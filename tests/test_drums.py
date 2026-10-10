@@ -61,6 +61,27 @@ def test_drum_map_entries():
         theory.drum_map_entry({"note": "C4", "channel": 17})
 
 
+@pytest.mark.parametrize("lane, channel", [
+    ("kick", 1), ("snare", 2), ("tom", 3), ("clap", 3), ("closed hat", 4), ("hihat", 4), ("chh", 4),
+    ("open hat", 5), ("ohh", 5), ("crash", 5),
+])
+def test_sila_is_built_in(tmp_path, lane, channel):
+    maps = DrumMaps(tmp_path / "drum_maps.json")
+    name, mapping = maps.find("VST3i: SILA (SILA) (18 out)")
+    assert name == "SILA"
+    hit = theory.resolve_drum_lane(lane, mapping, note_names={})
+    assert (hit.pitch, hit.channel) == (60, channel)
+    assert "channel N" in maps.notes_for("VST3i: SILA (SILA) (18 out)")
+
+
+def test_a_saved_map_overrides_a_built_in_one(tmp_path):
+    maps = DrumMaps(tmp_path / "drum_maps.json")
+    maps.save("SILA", {"kick": {"note": "C4", "channel": 7}})
+    _, mapping = maps.find("VST3i: SILA (SILA) (18 out)")
+    assert mapping == {"kick": {"pitch": 60, "channel": 7}}
+    assert maps.find("VSTi: ReaSynth (Cockos)") is None
+
+
 def test_drum_map_storage(tmp_path):
     maps = DrumMaps(tmp_path / "drum_maps.json")
     assert maps.find("VST3i: Analog Rytm (Elektron)") is None

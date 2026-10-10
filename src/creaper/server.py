@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 
 from . import analysis, theory
 from .bridge import Bridge, BridgeError
-from .drums import DrumMaps
+from .drums import BUILTIN_DRUM_MAPS, DrumMaps, builtin_entries
 from .sounds import SoundLibrary, describe as describe_sound
 
 try:  # mcp 2.x
@@ -66,8 +66,13 @@ Plugins (VST, VST3, CLAP, AU, JS):
   When the user likes a sound (theirs or yours), offer to save_sound it with tags for
   its role and character (dark, bright, warm, airy, gritty...). Sounds picked in a
   plugin's own preset browser can be saved the same way.
+- Drums: use a real drum instrument rather than ReaSynDr (a bare-bones synth). Look
+  with list_installed_fx(category="drum") and among samplers; skip plugins marked
+  hardware or realtime_only (they only sound with their device connected) unless the
+  user says it's plugged in. Instruments with a built-in drum map (see list_drum_maps,
+  e.g. SILA) work straight away; get_instrument_notes explains how to play them.
 - Drum patterns follow the instrument's own note names when it reports them, then a
-  saved drum map, then General MIDI. Check the "lanes" in the result; if a kit maps
+  saved or built-in drum map, then General MIDI. Check the "lanes" in the result; if a kit maps
   drums differently, ask the user and save_drum_map so it's right next time.
 - Multi-output instruments (drum machines, Overbridge, multitimbral synths) can be
   split onto separate tracks with split_instrument_outputs.
@@ -273,6 +278,9 @@ def get_instrument_notes(
     saved = drum_maps.find(result.get("instrument"))
     if saved:
         result["drum_map"] = {"name": saved[0], "lanes": _describe_map(saved[1])}
+    how_to_play = drum_maps.notes_for(result.get("instrument"))
+    if how_to_play:
+        result["how_to_play"] = how_to_play
     return result
 
 
@@ -479,6 +487,9 @@ def add_drum_pattern(
     result = call("add_midi_notes", item_id=item_id, notes=notes, replace=replace)
     result["instrument"] = instrument
     result["lanes"] = lanes
+    how_to_play = drum_maps.notes_for(instrument)
+    if how_to_play:
+        result["how_to_play"] = how_to_play
     if instrument and all(lane["source"] == "General MIDI" for lane in lanes.values()):
         result["note"] = (f"Used General MIDI notes; {instrument} didn't report note names and has no "
                           "saved drum map. If its kit is laid out differently, save one with save_drum_map.")
@@ -507,14 +518,19 @@ def save_drum_map(
 
 @tool(annotations=READ_ONLY)
 def list_drum_maps() -> dict:
-    """Lists saved drum maps."""
-    return {name: _describe_map(m) for name, m in drum_maps.all().items()}
+    """Lists drum maps: the user's saved ones and the instruments creaper knows already."""
+    saved = {name: _describe_map(m) for name, m in drum_maps.all().items()}
+    builtin = {name: _describe_map(builtin_entries(spec)) for name, spec in BUILTIN_DRUM_MAPS.items()
+               if name.lower() not in {k.lower() for k in saved}}
+    return {"saved": saved, "built_in": builtin}
 
 
 @tool(annotations=DESTRUCTIVE)
 def delete_drum_map(instrument: str) -> dict:
-    """Deletes a saved drum map."""
+    """Deletes a saved drum map (built-in maps can't be deleted, only overridden)."""
     if not drum_maps.delete(instrument):
+        if any(instrument.strip().lower() == k.lower() for k in BUILTIN_DRUM_MAPS):
+            raise ValueError(f"'{instrument}' is built in; save your own map with that name to override it")
         raise ValueError(f"there's no drum map named '{instrument}'")
     return {"deleted": instrument}
 

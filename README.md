@@ -65,7 +65,11 @@ creaper uses whatever is installed: VST, VST3, CLAP, AU and JS, instruments and 
 - **Hardware plugins.** Plugins REAPER marks as real-time only (e.g. Overbridge) can't be
   rendered offline. Analysis warns when they'd be missing from a measurement.
 
-Drum maps are saved in `<REAPER resource path>/creaper/drum_maps.json`.
+Drum maps are saved in `<REAPER resource path>/creaper/drum_maps.json`. Some
+instruments are known out of the box (currently **SILA**: each lane on its own MIDI
+channel); a map you save under the same name overrides the built-in one. Claude
+prefers a real drum instrument over REAPER's basic ReaSynDr, and skips hardware-only
+plugins unless you say the device is connected.
 
 ## Install
 
