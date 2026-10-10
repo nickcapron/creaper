@@ -121,9 +121,17 @@ Then ask Claude something like "What's in my REAPER project?"
 ## Chat inside REAPER
 
 Prefer not to switch windows? creaper includes a chat panel you can dock inside REAPER,
-like the mixer. It runs on your own **Claude Code** (so your Claude plan, no API key),
-and that Claude can only use the creaper tools: it can work in your REAPER project
-and nothing else on your computer.
+like the mixer. It runs your own installed **Claude Code**, signed in with your own
+account, and that Claude can only use the creaper tools: it can work in your REAPER
+project and nothing else on your computer.
+
+**Which account pays:** the panel never handles logins or keys. It uses whatever Claude
+Code is signed in with. Normally that's your Claude plan, and the panel shows how much
+of your plan's limits you've used. If `ANTHROPIC_API_KEY` is set, Claude Code uses that
+key instead and bills it per use. You're responsible for using your account within
+[Anthropic's terms](https://www.anthropic.com/legal/consumer-terms); the
+[API key route](https://code.claude.com/docs/en/authentication.md) is the one Anthropic
+documents for third-party tools.
 
 **You need:** [Claude Code](https://claude.com/claude-code), signed in once (run
 `claude` in a terminal), and the free **ReaImGui** extension: install
