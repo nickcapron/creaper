@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import sys
 from importlib import resources
@@ -13,11 +14,40 @@ from . import __version__
 from .bridge import Bridge, BridgeError, default_bridge_dir
 from .chat import find_claude
 
-STARTUP_MARKER = "-- creaper bridge (added by `creaper install-bridge`)"
-STARTUP_SNIPPET = (
-    f"{STARTUP_MARKER}\n"
+# What install-bridge keeps in REAPER's Scripts/__startup.lua, which REAPER runs at launch.
+STARTUP_BEGIN = "-- >>> creaper autostart (managed by `creaper install-bridge`; `--no-autostart` removes it)"
+STARTUP_END = "-- <<< creaper autostart"
+STARTUP_BRIDGE = """\
+do
+  local dir = reaper.GetResourcePath() .. "/Scripts/creaper/"
+  local ok, err = pcall(dofile, dir .. "creaper_bridge.lua")
+  if not ok then reaper.ShowConsoleMsg("creaper bridge didn't start: " .. tostring(err) .. "\\n") end
+"""
+STARTUP_CHAT = """\
+  -- Open the chat panel too, when ReaImGui is installed.
+  if reaper.ImGui_GetBuiltinPath and reaper.file_exists(dir .. "creaper_chat.lua") then
+    local command = reaper.AddRemoveReaScript(true, 0, dir .. "creaper_chat.lua", true)
+    if command ~= 0 then reaper.Main_OnCommand(command, 0) end
+  end
+"""
+# Written by creaper 0.1-0.4.
+LEGACY_STARTUP = (
+    "-- creaper bridge (added by `creaper install-bridge`)\n"
     'dofile(reaper.GetResourcePath() .. "/Scripts/creaper/creaper_bridge.lua")\n'
 )
+_STARTUP_BLOCK = re.compile(rf"(?ms)^{re.escape(STARTUP_BEGIN[:24])}.*?^{re.escape(STARTUP_END)}[^\n]*\n?")
+
+
+def update_startup(text: str, autostart: bool, chat: bool) -> str:
+    """The __startup.lua contents with creaper's block added, updated or removed.
+    Everything else in the file is left as it was."""
+    text = _STARTUP_BLOCK.sub("", text.replace(LEGACY_STARTUP, ""))
+    if not autostart:
+        return text
+    block = STARTUP_BEGIN + "\n" + STARTUP_BRIDGE + (STARTUP_CHAT if chat else "") + "end\n" + STARTUP_END + "\n"
+    if text and not text.endswith("\n"):
+        text += "\n"
+    return text + block
 
 
 def write_chat_config(bridge_dir: Path) -> Path:
@@ -36,7 +66,7 @@ def write_chat_config(bridge_dir: Path) -> Path:
     return path
 
 
-def install_bridge(resource_dir: Path, autostart: bool) -> None:
+def install_bridge(resource_dir: Path, autostart: bool = True, chat: bool = True) -> None:
     if not resource_dir.is_dir():
         sys.exit(f"REAPER's resource folder wasn't found at {resource_dir}. "
                  "Pass --reaper-resource-path (in REAPER: Options > Show REAPER resource path).")
@@ -56,25 +86,28 @@ def install_bridge(resource_dir: Path, autostart: bool) -> None:
         print("Claude Code wasn't found on PATH, so the chat panel won't work until it's installed "
               "(then run install-bridge again). The MCP server works without it.")
 
+    startup = resource_dir / "Scripts" / "__startup.lua"
+    existing = startup.read_text(encoding="utf-8") if startup.exists() else ""
+    updated = update_startup(existing, autostart, chat)
+    if updated != existing:
+        startup.write_text(updated, encoding="utf-8")
     if autostart:
-        startup = resource_dir / "Scripts" / "__startup.lua"
-        existing = startup.read_text(encoding="utf-8") if startup.exists() else ""
-        if STARTUP_MARKER in existing:
-            print(f"Autostart was already set up in {startup}")
-        else:
-            prefix = "" if not existing or existing.endswith("\n") else "\n"
-            startup.write_text(existing + prefix + STARTUP_SNIPPET, encoding="utf-8")
-            print(f"REAPER will start the bridge when it launches (added to {startup})")
+        opens = "the bridge and the chat panel" if chat else "the bridge"
+        print(f"REAPER will start {opens} when it launches (a marked block in {startup}).")
+        if chat:
+            print("  The panel opens only once ReaImGui is installed (Extensions > ReaPack > Browse packages).")
+    elif existing != updated:
+        print(f"Autostart removed from {startup}.")
 
     print("\nNext:")
     if autostart:
-        print("  - Restart REAPER, or run the script once now (below) so you don't have to.")
-    print("  - In REAPER: Actions > Show action list > New action > Load ReaScript, pick")
-    print(f"    {target}")
-    print("    and run it. It keeps running in the background; running it again stops it.")
-    print("  - Then check the connection with: creaper doctor")
-    print("  - For the chat panel, install ReaImGui (Extensions > ReaPack > Browse packages) and run")
-    print("    'creaper_chat.lua' from the action list (the bridge adds it there when it starts).")
+        print("  - Restart REAPER. Until then you can run 'Script: creaper_chat.lua' from the action list,")
+        print("    which starts the bridge too.")
+    else:
+        print("  - In REAPER: Actions > Show action list > New action > Load ReaScript, pick")
+        print(f"    {target}")
+        print("    and run it. It keeps running in the background; running it again stops it.")
+    print("  - Check the connection with: creaper doctor")
 
 
 def doctor() -> int:
@@ -107,15 +140,19 @@ def main(argv: list[str] | None = None) -> None:
     install = sub.add_parser("install-bridge", help="copy the bridge script into REAPER's Scripts folder")
     install.add_argument("--reaper-resource-path", type=Path, default=None,
                          help="REAPER's resource folder, if it isn't the standard one")
-    install.add_argument("--autostart", action="store_true",
-                         help="start the bridge automatically whenever REAPER launches")
+    install.add_argument("--no-autostart", action="store_true",
+                         help="don't start creaper when REAPER launches (removes it if it was set up)")
+    install.add_argument("--no-chat", action="store_true",
+                         help="start only the bridge at launch, not the chat panel")
+    install.add_argument("--autostart", action="store_true", help=argparse.SUPPRESS)  # the default now
     sub.add_parser("doctor", help="check that the server can reach REAPER")
     turn = sub.add_parser("chat-turn", help="run one chat-panel turn (started by creaper_chat.lua)")
     turn.add_argument("request", type=Path)
     args = parser.parse_args(argv)
 
     if args.command == "install-bridge":
-        install_bridge(args.reaper_resource_path or default_bridge_dir().parent, args.autostart)
+        install_bridge(args.reaper_resource_path or default_bridge_dir().parent,
+                       autostart=not args.no_autostart, chat=not args.no_chat)
     elif args.command == "doctor":
         sys.exit(doctor())
     elif args.command == "chat-turn":

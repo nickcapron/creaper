@@ -80,16 +80,21 @@ pip install git+https://github.com/nickcapron/creaper
 **2. Install the bridge script into REAPER**
 
 ```bash
-creaper install-bridge --autostart
+creaper install-bridge
 ```
 
-This copies `creaper_bridge.lua` into REAPER's `Scripts/creaper` folder. `--autostart`
-also starts it whenever REAPER launches (it adds one line to `Scripts/__startup.lua`).
-Leave the flag off if you'd rather start it yourself.
+This copies creaper's scripts into REAPER's `Scripts/creaper` folder and sets REAPER
+to start creaper whenever it launches: the bridge runs quietly in the background, and
+the chat panel opens (once ReaImGui is installed; see *Chat inside REAPER*). It does
+this with one clearly marked block in `Scripts/__startup.lua`, leaving anything else
+in that file alone. Options:
 
-**3. Start the bridge.** Restart REAPER, or in REAPER open *Actions → Show action list →
-New action → Load ReaScript*, pick `Scripts/creaper/creaper_bridge.lua` and run it.
-It runs quietly in the background; running the action again stops it.
+- `--no-chat`: start only the bridge, not the panel.
+- `--no-autostart`: don't start anything at launch (and remove creaper's block if it's
+  there). Then run `Scripts/creaper/creaper_bridge.lua` yourself from the action list
+  (*New action → Load ReaScript*); running it again stops it.
+
+**3. Restart REAPER.**
 
 **4. Check the connection**
 
@@ -147,8 +152,8 @@ search for **ReaImGui**, install it and restart REAPER.
 **Then:**
 
 1. Run `creaper install-bridge` again, so the panel knows where Python and Claude Code are.
-2. In REAPER, open the action list and run **Script: creaper_chat.lua**. Put it on a
-   toolbar or give it a shortcut if you like.
+2. Restart REAPER: the panel opens by itself. (Closed it? Run **Script: creaper_chat.lua**
+   from the action list, or put it on a toolbar or a shortcut.)
 3. Click **Dock** to dock it. Type a message and press Enter (Ctrl+Enter adds a line).
 
 The panel shows what Claude is doing as it works (each tool it runs) and how much of
