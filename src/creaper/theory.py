@@ -353,3 +353,148 @@ def drum_pattern_notes(
                     "velocity": velocity, "channel": lane_channel,
                 })
     return notes
+
+
+# --------------------------------------------------------------- MIDI edits
+# Notes are dicts like get_midi_notes returns: pitch, start, length (QN from the
+# item start), velocity, channel, and optionally selected/muted.
+
+SCALES: dict[str, tuple[int, ...]] = {
+    "major": (0, 2, 4, 5, 7, 9, 11), "ionian": (0, 2, 4, 5, 7, 9, 11),
+    "minor": (0, 2, 3, 5, 7, 8, 10), "aeolian": (0, 2, 3, 5, 7, 8, 10), "natural minor": (0, 2, 3, 5, 7, 8, 10),
+    "harmonic minor": (0, 2, 3, 5, 7, 8, 11), "melodic minor": (0, 2, 3, 5, 7, 9, 11),
+    "dorian": (0, 2, 3, 5, 7, 9, 10), "phrygian": (0, 1, 3, 5, 7, 8, 10), "lydian": (0, 2, 4, 6, 7, 9, 11),
+    "mixolydian": (0, 2, 4, 5, 7, 9, 10), "locrian": (0, 1, 3, 5, 6, 8, 10),
+    "major pentatonic": (0, 2, 4, 7, 9), "minor pentatonic": (0, 3, 5, 7, 10),
+    "blues": (0, 3, 5, 6, 7, 10), "chromatic": tuple(range(12)),
+}
+
+
+def scale_pitch_classes(key: str, scale: str) -> set[int]:
+    m = _PITCH_CLASS_RE.fullmatch(key.strip())
+    if not m:
+        raise ValueError(f"can't read the key '{key}' (use a note name like A, F#, Bb)")
+    root = (_LETTERS[m.group(1)] + _accidental(m.group(2))) % 12
+    intervals = SCALES.get(scale.strip().lower())
+    if intervals is None:
+        raise ValueError(f"unknown scale '{scale}'. Known: {', '.join(sorted(SCALES))}")
+    return {(root + i) % 12 for i in intervals}
+
+
+def _clamp_pitch(p: int) -> int:
+    return max(0, min(127, p))
+
+
+def quantize(notes: list[dict], grid: float, strength: float = 1.0, swing: float = 50.0,
+             lengths: bool = False) -> list[dict]:
+    """Moves note starts toward the grid (QN; 0.25 = 16ths). strength 0-1; swing
+    50-75 delays every other grid line (MPC style); lengths also snaps note ends."""
+    if grid <= 0:
+        raise ValueError("grid must be positive")
+    out = []
+    for n in notes:
+        index = round(n["start"] / grid)
+        target = index * grid
+        if index % 2 == 1:
+            target += 2 * grid * swing / 100 - grid
+        start = n["start"] + (target - n["start"]) * strength
+        length = n["length"]
+        if lengths:
+            end = n["start"] + n["length"]
+            snapped_end = max(start + grid, round(end / grid) * grid)
+            length = length + (snapped_end - start - length) * strength
+        out.append({**n, "start": round(max(0.0, start), 6), "length": round(max(1e-3, length), 6)})
+    return out
+
+
+def humanize(notes: list[dict], timing: float = 0.02, velocity: int = 8, seed: int | None = None) -> list[dict]:
+    """Random nudges: timing in QN (+/-), velocity in steps (+/-)."""
+    rng = random.Random(seed)
+    out = []
+    for n in notes:
+        start = max(0.0, n["start"] + rng.uniform(-timing, timing))
+        vel = max(1, min(127, n["velocity"] + round(rng.uniform(-velocity, velocity))))
+        out.append({**n, "start": round(start, 6), "velocity": vel})
+    return out
+
+
+def transpose(notes: list[dict], semitones: int) -> list[dict]:
+    moved = [n["pitch"] + semitones for n in notes]
+    if any(p < 0 or p > 127 for p in moved):
+        raise ValueError("that transposition would push notes outside the MIDI range")
+    return [{**n, "pitch": p} for n, p in zip(notes, moved)]
+
+
+def snap_to_scale(notes: list[dict], key: str, scale: str, direction: str = "nearest") -> list[dict]:
+    """Moves notes outside the scale to the nearest scale note (ties go down), or
+    always up/down."""
+    allowed = scale_pitch_classes(key, scale)
+    out = []
+    for n in notes:
+        p = n["pitch"]
+        if p % 12 not in allowed:
+            candidates = []
+            for d in range(1, 12):
+                if direction in ("nearest", "down") and (p - d) % 12 in allowed:
+                    candidates.append(p - d)
+                if direction in ("nearest", "up") and (p + d) % 12 in allowed:
+                    candidates.append(p + d)
+                if candidates:
+                    break
+            p = min(candidates) if direction != "up" else max(candidates)
+        out.append({**n, "pitch": _clamp_pitch(p)})
+    return out
+
+
+def set_velocity(notes: list[dict], value: int | None = None, start: int | None = None, end: int | None = None,
+                 scale: float | None = None) -> list[dict]:
+    """A fixed velocity, a ramp from start to end across the notes' time span, or
+    scaling by a factor."""
+    if not notes:
+        return []
+    t0 = min(n["start"] for n in notes)
+    t1 = max(n["start"] for n in notes)
+    out = []
+    for n in notes:
+        v = n["velocity"]
+        if value is not None:
+            v = value
+        elif start is not None and end is not None:
+            frac = 0.0 if t1 == t0 else (n["start"] - t0) / (t1 - t0)
+            v = start + (end - start) * frac
+        elif scale is not None:
+            v = v * scale
+        out.append({**n, "velocity": max(1, min(127, round(v)))})
+    return out
+
+
+def strum(notes: list[dict], delay: float = 0.03, direction: str = "up") -> list[dict]:
+    """Spreads notes that start together (chords): each higher (up) or lower (down)
+    note starts `delay` QN after the previous one."""
+    groups: dict[float, list[dict]] = {}
+    for n in notes:
+        groups.setdefault(round(n["start"], 4), []).append(n)
+    out = []
+    for start, group in groups.items():
+        ordered = sorted(group, key=lambda n: n["pitch"], reverse=direction == "down")
+        for i, n in enumerate(ordered):
+            offset = i * delay
+            out.append({**n, "start": round(n["start"] + offset, 6), "length": round(max(1e-3, n["length"] - offset), 6)})
+    return sorted(out, key=lambda n: (n["start"], n["pitch"]))
+
+
+def legato(notes: list[dict], gap: float = 0.0) -> list[dict]:
+    """Extends each note to the next note's start (per channel), minus gap."""
+    out = []
+    by_channel: dict[int, list[dict]] = {}
+    for n in notes:
+        by_channel.setdefault(n.get("channel", 1), []).append(n)
+    for group in by_channel.values():
+        starts = sorted({n["start"] for n in group})
+        for n in group:
+            later = [s for s in starts if s > n["start"] + 1e-6]
+            if later:
+                out.append({**n, "length": round(max(1e-3, later[0] - n["start"] - gap), 6)})
+            else:
+                out.append(dict(n))
+    return sorted(out, key=lambda n: (n["start"], n["pitch"]))

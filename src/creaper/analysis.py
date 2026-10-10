@@ -165,14 +165,21 @@ def stereo(audio: np.ndarray, fs: float) -> dict:
         return _round(float(np.dot(a, b)) / denom) if denom > 0 else None
 
     low = signal.butter(4, 150, btype="lowpass", fs=fs, output="sos")
+    e_left, e_right = float(np.dot(left, left)), float(np.dot(right, right))
+    # Positive = left louder. A silent side reads as +/-60 dB rather than infinity.
+    if e_left > 0 and e_right > 0:
+        balance = max(-60.0, min(60.0, 10 * math.log10(e_left / e_right)))
+    else:
+        balance = 60.0 if e_left > 0 else -60.0
     result = {
         "correlation": correlation(left, right),
         "low_end_correlation_below_150hz": correlation(signal.sosfilt(low, left), signal.sosfilt(low, right)),
         "side_to_mid_db": _round(10 * math.log10(e_side / e_mid)) if e_side > 0 and e_mid > 0 else None,
-        "left_right_balance_db": _round(10 * math.log10(float(np.dot(left, left)) / float(np.dot(right, right))))
-        if np.any(left) and np.any(right) else None,
+        "left_right_balance_db": _round(balance),
     }
-    if e_side < e_mid * 1e-6:
+    if e_right == 0 or e_left == 0:
+        result["note"] = "only the left channel has sound" if e_right == 0 else "only the right channel has sound"
+    elif e_side < e_mid * 1e-6:
         result["note"] = "effectively mono"
     return result
 

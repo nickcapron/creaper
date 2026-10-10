@@ -30,9 +30,17 @@ own Claude account; no API key needed.
 | **Compose** | Create tracks with instruments, MIDI items, notes, chord progressions from symbols (`Am7`, `Cmaj7/E`, `F#m7b5`) with voice leading, step-sequenced drums with swing and humanize, sustain/mod/expression/pitch bend, tempo and time signature, markers and regions |
 | **Plugins** | Browse installed plugins by kind, category and developer; load instruments and effects by loose name; read and set parameters by value or by label, several at once; list and load presets; split multi-output instruments onto tracks |
 | **Sound library** | Save any plugin's current sound with a name and tags, browse, and recall it on any track in any project |
-| **Mix** | Add, remove, bypass FX; volume, pan, mute, solo, color; sends and buses |
+| **Edit MIDI** | Quantize (grid, strength, swing), humanize, transpose, snap to a scale, set or ramp velocities, strum chords, legato; on all notes, a pitch/time range, or what's selected in the MIDI editor |
+| **Automate** | Volume, pan and any plugin parameter: points, ramps (a filter sweep over the build) or LFOs (wobbles, tremolo), in real units; read and clear envelopes |
+| **Edit clips** | Move, trim, split, duplicate, fade, re-pitch, time-stretch and delete audio or MIDI items; import audio files |
+| **Mix** | Add, remove, bypass FX; volume, pan, mute, solo, color; sends; and one-call jobs: side-chain ducking (calibrated to a depth), submix buses, parallel compression, a starting vocal chain, mastering to a loudness target |
+| **Styles** | Genre profiles (typical loudness, dynamics, low end, tone, width, tempo) and a check of your mix against one |
+| **Remember** | Notes Claude keeps between sessions: your taste, plugin quirks, mix lessons |
 | **Analyze** | Render the mix or one track and measure integrated/short-term loudness (LUFS), loudness range, true peak, clipping, crest factor, stereo correlation (including the low end), and frequency balance by band and octave, with a loudness timeline in bars |
 | **Control** | Play a range of bars, stop, move the cursor, undo, run any REAPER action |
+
+In Claude Desktop and Claude Code, creaper also adds four commands: **Critique the mix**,
+**Mix the song**, **Master the song** and **Design a sound**.
 
 ## Works with your plugins
 
@@ -70,6 +78,26 @@ instruments are known out of the box (currently **SILA**: each lane on its own M
 channel); a map you save under the same name overrides the built-in one. Claude
 prefers a real drum instrument over REAPER's basic ReaSynDr, and skips hardware-only
 plugins unless you say the device is connected.
+
+## Mixing jobs, measured
+
+The one-call jobs were checked against real renders, not just set up:
+
+- **Side-chain ducking** measures the trigger (e.g. the kick) and sets its level and the
+  compressor's threshold so it ducks by about the depth asked for (light ~2 dB, medium
+  ~4-5 dB, heavy ~10 dB with ReaComp). Instrument tracks are ducked on a small bus right
+  after them, because an instrument lets a trigger arriving on channels 3/4 through to
+  its output. Sidechain-capable plugins (e.g. compressors with an "SC Source: External"
+  switch) are switched over automatically.
+- **Mastering** renders, measures and adjusts the limiter and master level until the
+  integrated loudness is within 0.5 LU of the target, and warns when the limiter is
+  working hard.
+- The jobs take your own plugins (`compressor=`, `eq=`, `glue_compressor=`, `fx=`);
+  creaper configures REAPER's stock plugins itself and tells Claude what to set on
+  others.
+
+Notes are kept in `<REAPER resource path>/creaper/knowledge.json`; you can read, edit or
+delete them.
 
 ## Install
 

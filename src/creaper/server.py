@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import functools
 import json
+import math
 import os
 import threading
 import time
@@ -14,8 +15,9 @@ from typing import Annotated, Any, Literal
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
 
-from . import analysis, theory
+from . import analysis, styles, theory
 from .bridge import Bridge, BridgeError
+from .knowledge import Knowledge
 from .drums import BUILTIN_DRUM_MAPS, DrumMaps, builtin_entries
 from .sounds import SoundLibrary, describe as describe_sound
 
@@ -40,7 +42,14 @@ Conventions:
 
 Plugins (VST, VST3, CLAP, AU, JS):
 - list_installed_fx shows the user's plugins with kind (instrument/effect), category
-  and developer. Prefer the user's own plugins over REAPER's stock ones when they fit.
+  and developer. Prefer the user's own plugins over REAPER's stock ones when they fit:
+  their compressors, EQs, reverbs, delays, saturation, chorus and channel strips usually
+  sound better than ReaPlugs. Browse by category (dynamics, eq, reverb, delay,
+  modulation, distortion, mastering) before reaching for ReaComp/ReaEQ. The one-call
+  jobs accept them (setup_sidechain compressor=, add_vocal_chain eq=/compressor=,
+  master_to_target glue_compressor=, create_bus fx=); set third-party plugins'
+  parameters yourself afterwards, and save_note what you learn about each plugin's
+  controls (topic "plugin") so it's faster next time.
   Plugin names can be loose ("FET-76", "Analog Lab"); duplicates in several formats
   load as CLAP/VST3 first.
 - Look up parameter names with get_fx_parameters before setting them. Set values in
@@ -93,6 +102,7 @@ mcp = MCPServer("creaper", instructions=INSTRUCTIONS)
 bridge = Bridge()
 drum_maps = DrumMaps(bridge.directory / "drum_maps.json")
 sound_library = SoundLibrary(bridge.directory / "sounds")
+knowledge = Knowledge(bridge.directory / "knowledge.json")
 
 READ_ONLY = ToolAnnotations(readOnlyHint=True)
 DESTRUCTIVE = ToolAnnotations(destructiveHint=True)
@@ -777,6 +787,612 @@ def analyze_audio(
     if render.get("warning"):
         measured["warning"] = render["warning"]
     return {**measured, **result}
+
+
+# --------------------------------------------------------------- automation
+
+Shape = Literal["linear", "smooth", "square", "fast_start", "fast_end", "bezier"]
+AutomationKind = Annotated[Literal["volume", "pan", "fx"], Field(
+    description="volume (dB), pan (-1 left .. 1 right), or fx (a plugin parameter: give fx and parameter)")]
+
+
+class AutomationPoint(BaseModel):
+    bar: float = Field(ge=1, description="Bar, 1-based; fractions are parts of the bar")
+    beat: float | None = Field(None, description="Beat within the bar, 1-based")
+    value: float = Field(description="volume: dB; pan: -1..1; fx: the plugin's displayed value (e.g. 2500 for 2.5 kHz), or 0-1 with normalized=true")
+    shape: Shape | None = Field(None, description="Curve from this point to the next")
+
+
+class Ramp(BaseModel):
+    start_bar: float = Field(ge=1)
+    end_bar: float = Field(ge=1)
+    start_value: float = Field(description="Same units as points")
+    end_value: float
+    curve: Shape = "smooth"
+
+
+class Lfo(BaseModel):
+    start_bar: float = Field(ge=1)
+    end_bar: float = Field(ge=1)
+    cycles_per_bar: float = Field(1.0, gt=0, le=16, description="0.25 = one cycle every 4 bars, 4 = quarter-note wobble in 4/4")
+    low: float = Field(description="Lowest value, same units as points")
+    high: float
+    wave: Literal["sine", "triangle", "square", "saw"] = "sine"
+
+
+def _automation_points(points: list[AutomationPoint] | None, ramp: Ramp | None, lfo: Lfo | None) -> list[dict]:
+    out: list[dict] = []
+    for p in points or []:
+        out.append({"bar": p.bar, "beat": p.beat, "value": p.value, "shape": p.shape})
+    if ramp:
+        if ramp.end_bar <= ramp.start_bar:
+            raise ValueError("the ramp's end_bar must be after its start_bar")
+        out += [{"bar": ramp.start_bar, "value": ramp.start_value, "shape": ramp.curve},
+                {"bar": ramp.end_bar, "value": ramp.end_value, "shape": "linear"}]
+    if lfo:
+        if lfo.end_bar <= lfo.start_bar:
+            raise ValueError("the LFO's end_bar must be after its start_bar")
+        bars = lfo.end_bar - lfo.start_bar
+        cycles = bars * lfo.cycles_per_bar
+        per_cycle = {"sine": 8, "triangle": 2, "square": 2, "saw": 1}[lfo.wave]
+        steps = max(2, min(2000, round(cycles * per_cycle)))
+        mid, amp = (lfo.low + lfo.high) / 2, (lfo.high - lfo.low) / 2
+        for i in range(steps + 1):
+            phase = (i / steps) * cycles  # in cycles
+            frac = phase % 1.0
+            if lfo.wave == "sine":
+                value, shape = mid + amp * math.sin(2 * math.pi * frac), "smooth"
+            elif lfo.wave == "triangle":
+                value, shape = lfo.low + (lfo.high - lfo.low) * (1 - abs(2 * frac - 1)), "linear"
+            elif lfo.wave == "square":
+                value, shape = (lfo.high if frac < 0.5 else lfo.low), "square"
+            else:
+                value, shape = lfo.low + (lfo.high - lfo.low) * frac, "linear"
+            out.append({"bar": lfo.start_bar + phase / lfo.cycles_per_bar, "value": round(value, 6), "shape": shape})
+    if not out:
+        raise ValueError("give points, a ramp or an lfo")
+    return out
+
+
+def _target(kind: str, fx: str | int | None, parameter: str | int | None) -> dict:
+    if kind == "fx":
+        if fx is None or parameter is None:
+            raise ValueError("plugin automation needs fx and parameter")
+        return {"kind": "fx", "fx": fx, "parameter": parameter}
+    return {"kind": kind}
+
+
+def _bridge_points(kind: str, points: list[dict], normalized: bool) -> list[dict]:
+    key = {"volume": "db", "pan": "pan"}.get(kind, "value" if normalized else "display_value")
+    return [{"bar": p["bar"], "beat": p.get("beat"), key: p["value"], "shape": p.get("shape")} for p in points]
+
+
+@tool()
+def write_automation(
+    track: TrackRef,
+    target: AutomationKind,
+    points: list[AutomationPoint] | None = None,
+    ramp: Annotated[Ramp | None, Field(description="A move from one value to another, e.g. a filter sweep over a build")] = None,
+    lfo: Annotated[Lfo | None, Field(description="A repeating movement, e.g. a wobble or tremolo")] = None,
+    fx: Annotated[str | int | None, Field(description="For target fx: the plugin (chain position or name)")] = None,
+    parameter: Annotated[str | int | None, Field(description="For target fx: parameter name or number")] = None,
+    normalized: Annotated[bool, Field(description="For target fx: values are 0-1 instead of the plugin's displayed units")] = False,
+    replace: Annotated[bool, Field(description="Replace existing points in the written range")] = True,
+) -> dict:
+    """Writes automation: volume rides, pans, filter sweeps, wobbles. Give points,
+    a ramp or an lfo (they can be combined). The envelope is created and shown if
+    needed, and the change is one undo step."""
+    pts = _automation_points(points, ramp, lfo)
+    return call("write_automation", track=track, target=_target(target, fx, parameter), replace=replace,
+                points=_bridge_points(target, pts, normalized))
+
+
+@tool(annotations=READ_ONLY)
+def read_automation(
+    track: TrackRef,
+    target: Annotated[Literal["volume", "pan", "fx"] | None, Field(description="Leave empty to list the track's envelopes")] = None,
+    fx: str | int | None = None,
+    parameter: str | int | None = None,
+) -> dict:
+    """Reads a track's automation points (bars/beats with values in real units), or
+    lists which envelopes it has."""
+    return call("read_automation", track=track, target=_target(target, fx, parameter) if target else None)
+
+
+@tool(annotations=DESTRUCTIVE)
+def clear_automation(
+    track: TrackRef,
+    target: AutomationKind,
+    fx: str | int | None = None,
+    parameter: str | int | None = None,
+    start_bar: Bar = None,
+    end_bar: Annotated[float | None, Field(description="Default: to the end")] = None,
+) -> dict:
+    """Removes automation points in a range (default: all of them). Undoable."""
+    return call("clear_automation", track=track, target=_target(target, fx, parameter),
+                start_bar=start_bar, end_bar=end_bar)
+
+
+# -------------------------------------------------------------- clip editing
+
+
+@tool()
+def edit_item(
+    item_id: Annotated[str, Field(description='Item id (audio or MIDI) from get_track_details, or "selected"')],
+    start_bar: Annotated[float | None, Field(ge=1, description="Move the item to this bar")] = None,
+    start_beat: Beat = None,
+    length_bars: Annotated[float | None, Field(gt=0)] = None,
+    length_qn: Annotated[float | None, Field(gt=0)] = None,
+    trim_start_seconds: Annotated[float | None, Field(description="Trim this much off the start, keeping the content in place (negative extends)")] = None,
+    fade_in_seconds: Annotated[float | None, Field(ge=0)] = None,
+    fade_out_seconds: Annotated[float | None, Field(ge=0)] = None,
+    volume_db: float | None = None,
+    pitch_semitones: Annotated[float | None, Field(ge=-48, le=48, description="Audio items: transpose")] = None,
+    playrate: Annotated[float | None, Field(gt=0, le=16, description="Audio items: speed, 1 = normal")] = None,
+    preserve_pitch: Annotated[bool | None, Field(description="Audio items: keep pitch when changing playrate")] = None,
+    mute: bool | None = None,
+    loop: Annotated[bool | None, Field(description="Loop the source when the item is longer than it")] = None,
+    name: str | None = None,
+    color: Annotated[str | None, Field(description="#RRGGBB")] = None,
+    track: Annotated[str | int | None, Field(description="Move the item to this track")] = None,
+) -> dict:
+    """Moves, trims, fades, re-pitches or otherwise edits an audio or MIDI item."""
+    return call("edit_item", item_id=item_id, start_bar=start_bar, start_beat=start_beat, length_bars=length_bars,
+                length_qn=length_qn, trim_start_seconds=trim_start_seconds, fade_in_seconds=fade_in_seconds,
+                fade_out_seconds=fade_out_seconds, volume_db=volume_db, pitch_semitones=pitch_semitones,
+                playrate=playrate, preserve_pitch=preserve_pitch, mute=mute, loop=loop, name=name, color=color,
+                track=track)
+
+
+@tool()
+def split_item(
+    item_id: ItemId,
+    at_bar: Annotated[float, Field(ge=1)],
+    at_beat: Beat = None,
+) -> dict:
+    """Splits an item in two at a bar/beat; returns both halves' ids."""
+    return call("split_item", item_id=item_id, at_bar=at_bar, at_beat=at_beat)
+
+
+@tool()
+def duplicate_item(
+    item_id: ItemId,
+    count: Annotated[int, Field(ge=1, le=256)] = 1,
+    start_bar: Annotated[float | None, Field(ge=1, description="Where the first copy goes; default: right after the item")] = None,
+    start_beat: Beat = None,
+) -> dict:
+    """Copies an item (e.g. repeat a 4-bar loop, or reuse the chorus). Copies are
+    placed back to back."""
+    return call("duplicate_item", item_id=item_id, count=count, start_bar=start_bar, start_beat=start_beat)
+
+
+@tool(annotations=DESTRUCTIVE)
+def delete_item(item_id: ItemId) -> dict:
+    """Deletes an item (undoable)."""
+    return call("delete_item", item_id=item_id)
+
+
+@tool()
+def insert_audio_file(
+    path: Annotated[str, Field(description="Full path of an audio (wav, flac, mp3, aiff, ogg...) or MIDI file")],
+    track: TrackRef,
+    start_bar: Annotated[float | None, Field(ge=1, description="Default: the edit cursor")] = None,
+    start_beat: Beat = None,
+) -> dict:
+    """Imports an audio or MIDI file onto a track."""
+    return call("insert_audio_file", timeout=120.0, path=path, track=track, start_bar=start_bar, start_beat=start_beat)
+
+
+# ----------------------------------------------------------------- MIDI edits
+
+MidiOperation = Literal["quantize", "humanize", "transpose", "snap_to_scale", "velocity", "strum", "legato"]
+
+
+@tool()
+def edit_midi_notes(
+    item_id: ItemId,
+    operation: Annotated[MidiOperation, Field(description=(
+        "quantize (grid, strength, swing), humanize (timing, velocity_amount), transpose (semitones), "
+        "snap_to_scale (key, scale), velocity (velocity | velocity_start+velocity_end ramp | velocity_scale), "
+        "strum (strum_delay, strum_direction), legato (legato_gap)"))],
+    selected_only: Annotated[bool, Field(description="Only the notes selected in REAPER's MIDI editor")] = False,
+    pitch_low: Annotated[str | int | None, Field(description="Only notes at or above this pitch")] = None,
+    pitch_high: Annotated[str | int | None, Field(description="Only notes at or below this pitch")] = None,
+    start: Annotated[float | None, Field(description="Only notes starting at or after this QN position in the item")] = None,
+    end: Annotated[float | None, Field(description="Only notes starting before this QN position")] = None,
+    channel: Annotated[int | None, Field(ge=1, le=16)] = None,
+    grid: Annotated[float, Field(gt=0, description="Quantize grid in QN: 1 = quarters, 0.5 = 8ths, 0.25 = 16ths, 1/3 = 8th triplets")] = 0.25,
+    strength: Annotated[float, Field(ge=0, le=1)] = 1.0,
+    swing: Annotated[float, Field(ge=50, le=75)] = 50,
+    quantize_lengths: bool = False,
+    timing: Annotated[float, Field(ge=0, le=0.5, description="Humanize: max timing shift in QN")] = 0.02,
+    velocity_amount: Annotated[int, Field(ge=0, le=64, description="Humanize: max velocity change")] = 8,
+    semitones: Annotated[int | None, Field(ge=-48, le=48)] = None,
+    key: Annotated[str | None, Field(description="Scale root, e.g. A, F#, Bb")] = None,
+    scale: Annotated[str | None, Field(description="major, minor, dorian, mixolydian, harmonic minor, minor pentatonic, blues...")] = None,
+    snap_direction: Literal["nearest", "up", "down"] = "nearest",
+    velocity: Annotated[int | None, Field(ge=1, le=127)] = None,
+    velocity_start: Annotated[int | None, Field(ge=1, le=127)] = None,
+    velocity_end: Annotated[int | None, Field(ge=1, le=127)] = None,
+    velocity_scale: Annotated[float | None, Field(gt=0, le=4)] = None,
+    strum_delay: Annotated[float, Field(ge=0, le=1, description="QN between strummed notes")] = 0.03,
+    strum_direction: Literal["up", "down"] = "up",
+    legato_gap: Annotated[float, Field(ge=0, le=1)] = 0.0,
+) -> dict:
+    """Edits existing MIDI notes: quantize (with swing), humanize, transpose, snap to
+    a scale, set or ramp velocities, strum chords, make legato. Filters pick which
+    notes; the rest stay as they are. One undo step."""
+    raw = call("get_midi_notes", item_id=item_id, limit=20000)
+    if raw.get("truncated"):
+        raise ValueError("this item has too many notes to edit in one go")
+    notes = raw["notes"]
+    lo = theory.note_to_midi(pitch_low) if pitch_low is not None else 0
+    hi = theory.note_to_midi(pitch_high) if pitch_high is not None else 127
+
+    def chosen(n: dict) -> bool:
+        return ((not selected_only or n.get("selected")) and lo <= n["pitch"] <= hi
+                and (start is None or n["start"] >= start - 1e-6) and (end is None or n["start"] < end - 1e-6)
+                and (channel is None or n["channel"] == channel))
+
+    targets = [n for n in notes if chosen(n)]
+    others = [n for n in notes if not chosen(n)]
+    if not targets:
+        raise ValueError("no notes match those filters" + (" (are any selected in the MIDI editor?)" if selected_only else ""))
+    if operation == "quantize":
+        changed = theory.quantize(targets, grid, strength, swing, quantize_lengths)
+    elif operation == "humanize":
+        changed = theory.humanize(targets, timing, velocity_amount)
+    elif operation == "transpose":
+        if semitones is None:
+            raise ValueError("transpose needs semitones")
+        changed = theory.transpose(targets, semitones)
+    elif operation == "snap_to_scale":
+        if not key or not scale:
+            raise ValueError("snap_to_scale needs key and scale")
+        changed = theory.snap_to_scale(targets, key, scale, snap_direction)
+    elif operation == "velocity":
+        if velocity is None and velocity_scale is None and (velocity_start is None or velocity_end is None):
+            raise ValueError("give velocity, velocity_scale, or velocity_start and velocity_end")
+        changed = theory.set_velocity(targets, velocity, velocity_start, velocity_end, velocity_scale)
+    elif operation == "strum":
+        changed = theory.strum(targets, strum_delay, strum_direction)
+    else:
+        changed = theory.legato(targets, legato_gap)
+    moved = sum(1 for a, b in zip(sorted(targets, key=lambda n: (n["start"], n["pitch"])),
+                                  sorted(changed, key=lambda n: (n["start"], n["pitch"]))) if a != b)
+    payload = [{k: n.get(k) for k in ("pitch", "start", "length", "velocity", "channel", "selected", "muted")}
+               for n in others + changed]
+    result = call("add_midi_notes", item_id=item_id, notes=payload, replace=True)
+    return {"item_id": item_id, "operation": operation, "notes_edited": len(targets), "notes_changed": moved,
+            "note_count": result.get("note_count")}
+
+
+# ------------------------------------------------------------- mixing jobs
+
+
+@tool()
+def setup_sidechain(
+    source: Annotated[str | int, Field(description="The track that triggers the ducking, e.g. the kick")],
+    target: Annotated[str | int, Field(description="The track that ducks, e.g. the bass or a pad")],
+    compressor: Annotated[str | None, Field(description="Compressor to add, e.g. a sidechain-capable plugin of the user's; default: an existing ReaComp, else a new ReaComp")] = None,
+    fx: Annotated[str | int | None, Field(description="Use this compressor already on the target instead")] = None,
+    depth: Annotated[Literal["light", "medium", "heavy"], Field(description="How hard it ducks (measured with ReaComp): light ~2 dB, medium ~4-5 dB, heavy (pumping) ~10 dB")] = "medium",
+) -> dict:
+    """Sets up side-chain compression in one go: routes the source into the target's
+    compressor sidechain (channels 3/4), switches the compressor to listen to it,
+    then measures the source and sets the sidechain level (and ReaComp's threshold)
+    so it actually ducks by about the depth asked for."""
+    result = call("setup_sidechain", source=source, target=target, compressor=compressor, fx=fx)
+    # A quiet trigger never crosses the threshold, so calibrate on the source's real level.
+    measured = analyze_audio(track=source)
+    peak = measured.get("levels", {}).get("sample_peak_dbfs")
+    if peak is None:
+        result["note"] = "the source is silent, so the sidechain can't be calibrated yet; run this again once it plays"
+        return result
+    send_db = round(max(0.0, min(24.0, -6.0 - peak)), 1)  # trigger peaks at about -6 dBFS
+    ducked = result["target"]["number"]  # the target, or the ducking bus made for it
+    call("set_send", source=source, destination=ducked, volume_db=send_db)
+    result["sidechain_level"] = {"source_peak_dbfs": peak, "send_gain_db": send_db}
+    if result.get("ducking_bus"):
+        result["how"] = (f"'{result['ducking_bus']['name']}' was added after the instrument track: the track plays "
+                         "through it and the compressor ducks it there (an instrument would let the trigger through)")
+    if result.get("is_reacomp"):
+        # Measured with a -6 dBFS trigger: about 2, 4.5 and 10 dB of average ducking.
+        threshold = {"light": -24, "medium": -34, "heavy": -44}[depth]
+        call("set_fx_parameters", track=ducked, fx=result["fx_index"],
+             changes=[{"parameter": "Threshold", "display_value": threshold}])
+        result["threshold_db"] = threshold
+    else:
+        result["note"] = (result.get("note") or "") + (
+            " The trigger is set to peak around -6 dBFS; set how hard it ducks with the compressor's own "
+            "threshold or input control.").strip()
+    result.pop("is_reacomp", None)
+    return result
+
+
+@tool()
+def create_bus(
+    name: Annotated[str, Field(description="e.g. 'Drum Bus', 'Synth Bus'")],
+    tracks: Annotated[list[str | int], Field(min_length=1, description="Tracks that feed the bus")],
+    fx: Annotated[list[str] | None, Field(description="Plugins to put on the bus, e.g. ['ReaComp', 'ReaEQ']")] = None,
+    color: Annotated[str | None, Field(description="#RRGGBB")] = None,
+) -> dict:
+    """Creates a submix bus: the tracks send to it (post-fader) instead of straight to
+    the master, so they can be processed and leveled together."""
+    return call("create_bus", name=name, tracks=tracks, fx=fx, color=color)
+
+
+@tool()
+def add_parallel_compression(
+    track: TrackRef,
+    blend_db: Annotated[float, Field(le=0, description="Level of the crushed copy under the original")] = -10,
+    compressor: Annotated[str | None, Field(description="Default: ReaComp, set up to squash hard")] = None,
+) -> dict:
+    """New York-style parallel compression: a bus with a heavily compressed copy of the
+    track, blended underneath the untouched original."""
+    info = call("describe_track", track=track)
+    bus = call("create_bus", name=f"{info['name']} Parallel", tracks=[info["number"]], keep_main_send=True,
+               fx=[compressor or "ReaComp"])
+    bus_number = bus["bus"]["number"]
+    if not compressor:
+        call("set_fx_parameters", track=bus_number, fx=1, changes=[
+            {"parameter": "Threshold", "display_value": -30}, {"parameter": "Ratio", "display_value": 10},
+            {"parameter": "Attack", "display_value": 1}, {"parameter": "Release", "display_value": 60}])
+    call("set_track_properties", track=bus_number, volume_db=blend_db)
+    return {"bus": {"number": bus_number, "name": f"{info['name']} Parallel"}, "blend_db": blend_db,
+            "note": "raise the bus fader for more punch, lower it for subtler"}
+
+
+@tool()
+def add_vocal_chain(
+    track: TrackRef,
+    character: Literal["clean", "warm", "bright"] = "clean",
+    eq: Annotated[str | None, Field(description="EQ plugin to use instead of ReaEQ, e.g. one of the user's")] = None,
+    compressor: Annotated[str | None, Field(description="Compressor to use instead of ReaComp")] = None,
+    reverb_send_db: Annotated[float | None, Field(le=0, description="Also send to an existing reverb track at this level")] = None,
+) -> dict:
+    """A starting vocal chain: high-pass and tone EQ, then a compressor. With REAPER's
+    ReaEQ/ReaComp it's set up for you; with other plugins they're added and you set
+    them with set_fx_parameters. A starting point to tweak by ear; no de-esser."""
+    presence, air, mud = {"clean": (2.0, 1.5, -2.0), "warm": (1.0, 0.5, -1.0), "bright": (3.0, 3.0, -2.5)}[character]
+    to_configure = []
+    eq_fx = call("add_fx", track=track, name=eq or "ReaEQ")
+    if "ReaEQ" in eq_fx["name"]:
+        call("set_fx_parameters", track=track, fx=eq_fx["index"], changes=[
+            {"parameter": "Freq-High Pass 5", "display_value": 90},
+            {"parameter": "Freq-Band 2", "display_value": 300}, {"parameter": "Gain-Band 2", "display_value": mud},
+            {"parameter": "Freq-Band 3", "display_value": 3500}, {"parameter": "Gain-Band 3", "display_value": presence},
+            {"parameter": "Freq-High Shelf 4", "display_value": 10000}, {"parameter": "Gain-High Shelf 4", "display_value": air}])
+    else:
+        to_configure.append(f"{eq_fx['name']}: high-pass ~90 Hz, {mud:+} dB at 300 Hz, {presence:+} dB at 3.5 kHz, {air:+} dB shelf at 10 kHz")
+    comp_fx = call("add_fx", track=track, name=compressor or "ReaComp")
+    if "ReaComp" in comp_fx["name"]:
+        call("set_fx_parameters", track=track, fx=comp_fx["index"], changes=[
+            {"parameter": "Threshold", "display_value": -20}, {"parameter": "Ratio", "display_value": 3},
+            {"parameter": "Attack", "display_value": 5}, {"parameter": "Release", "display_value": 80}])
+    else:
+        to_configure.append(f"{comp_fx['name']}: about 3:1, 3-6 dB of gain reduction, fast-ish attack, ~80 ms release")
+    result: dict[str, Any] = {"track": track, "chain": [eq_fx["name"], comp_fx["name"]], "character": character}
+    if to_configure:
+        result["configure_these"] = to_configure
+    if reverb_send_db is not None:
+        overview = call("get_project_overview")
+        verbs = [t for t in overview["tracks"] if "verb" in t["name"].lower() or "reverb" in " ".join(t["fx"]).lower()]
+        if verbs:
+            call("set_send", source=track, destination=verbs[0]["number"], volume_db=reverb_send_db)
+            result["reverb_send"] = {"to": verbs[0]["name"], "db": reverb_send_db}
+        else:
+            result["note"] = "no reverb track found for the send; create one first"
+    return result
+
+
+@tool()
+def master_to_target(
+    target_lufs: Annotated[float | None, Field(ge=-30, le=-4, description="Integrated loudness to reach")] = None,
+    style: Annotated[str | None, Field(description="Or aim for the middle of this style's typical loudness")] = None,
+    platform: Annotated[str | None, Field(description="Or a platform: spotify, youtube, apple music, club...")] = None,
+    ceiling_dbtp: Annotated[float, Field(le=0, ge=-6)] = -1.0,
+    glue: Annotated[bool, Field(description="Also add a gentle bus compressor before the limiter")] = True,
+    glue_compressor: Annotated[str | None, Field(description="Bus compressor plugin to use for glue instead of ReaComp, e.g. one of the user's")] = None,
+    start_bar: Bar = None,
+    end_bar: Annotated[float | None, Field(description="Measure only this range (e.g. the loudest section) to save time")] = None,
+    passes: Annotated[int, Field(ge=1, le=5)] = 3,
+) -> dict:
+    """Masters the mix to a loudness target: puts a glue compressor and ReaLimit on the
+    master (or reuses them), then renders, measures and adjusts the limiter until the
+    integrated loudness is within 0.5 LU of the target. Each pass renders the range."""
+    if target_lufs is None:
+        if style:
+            lo, hi = styles.find_style(style).lufs
+            target_lufs = round((lo + hi) / 2, 1)
+        elif platform:
+            if platform.lower() not in styles.STREAMING_TARGETS:
+                raise ValueError(f"unknown platform; known: {', '.join(styles.STREAMING_TARGETS)}")
+            target_lufs = styles.STREAMING_TARGETS[platform.lower()]
+        else:
+            target_lufs = -14.0
+    details = call("get_track_details", track="master")
+    names = [f["name"] for f in details["fx"]]
+    glue_name = glue_compressor or "ReaComp"
+    glue_note = None
+    if glue and not any(glue_name.lower() in n.lower() for n in names):
+        # Glue goes before a limiter that's already there; otherwise at the end.
+        limiter_at = next((i + 1 for i, n in enumerate(names) if "ReaLimit" in n), None)
+        comp = call("add_fx", track="master", name=glue_name, position=limiter_at or len(names) + 1)
+        if "ReaComp" in comp["name"]:
+            call("set_fx_parameters", track="master", fx=comp["index"], changes=[
+                {"parameter": "Threshold", "display_value": -18}, {"parameter": "Ratio", "display_value": 2},
+                {"parameter": "Attack", "display_value": 30}, {"parameter": "Release", "display_value": 150}])
+        else:
+            glue_note = f"{comp['name']} was added for glue at its default settings; aim for 1-2 dB of gain reduction"
+    limiter = next((f for f in call("get_track_details", track="master")["fx"] if "ReaLimit" in f["name"]), None)
+    if limiter is None:
+        limiter = call("add_fx", track="master", name="ReaLimit")
+    lim = limiter["index"]
+    call("set_fx_parameters", track="master", fx=lim, changes=[{"parameter": "Ceiling", "display_value": ceiling_dbtp}])
+    threshold = float(call("get_fx_parameters", track="master", fx=lim, search="Threshold")["parameters"][0]["display"])
+    # Two controls: the limiter threshold pushes loudness up; the master fader (after
+    # the limiter) brings it down, so a mix that's already too loud can be tamed.
+    fader = call("describe_track", track="master").get("volume_db")
+    fader = 0.0 if fader is None else float(fader)
+    history = []
+    for _ in range(passes):
+        measured = analyze_audio(track="master", start_bar=start_bar, end_bar=end_bar)
+        lufs = measured.get("loudness", {}).get("integrated_lufs")
+        if lufs is None:
+            raise ValueError("the mix is silent in that range, so there's nothing to master")
+        history.append({"limiter_threshold_db": round(threshold, 2), "master_fader_db": round(fader, 2),
+                        "integrated_lufs": lufs, "true_peak_dbtp": measured["levels"]["true_peak_dbtp"]})
+        delta = target_lufs - lufs
+        if abs(delta) <= 0.5:
+            break
+        if delta > 0:  # too quiet: undo any fader cut first, then drive the limiter
+            lift = min(delta, -fader)
+            fader += lift
+            threshold = max(-30.0, threshold - (delta - lift))
+        else:          # too loud: ease the limiter first, then pull the fader down
+            ease = min(-delta, -threshold)
+            threshold += ease
+            fader = max(-30.0, fader + (delta + ease))
+        call("set_fx_parameters", track="master", fx=lim, changes=[{"parameter": "Threshold", "display_value": threshold}])
+        call("set_track_properties", track="master", volume_db=fader)
+    final = history[-1]
+    result = {"target_lufs": target_lufs, "passes": history, "reached": abs(final["integrated_lufs"] - target_lufs) <= 0.5}
+    if glue_note:
+        result["glue"] = glue_note
+    if threshold <= -8:
+        result["warning"] = (f"the limiter is working hard ({threshold:.1f} dB): the mix may sound squashed; "
+                             "turning up the mix itself, or a lower target, keeps more punch")
+    return result
+
+
+# ------------------------------------------------------------ style profiles
+
+
+@tool(annotations=READ_ONLY)
+def list_styles() -> dict:
+    """The genre style profiles creaper knows, with their typical master loudness."""
+    return {"styles": [{"style": s.name, "also": list(s.aliases), "integrated_lufs": list(s.lufs)} for s in styles.STYLES],
+            "streaming_targets_lufs": styles.STREAMING_TARGETS}
+
+
+@tool(annotations=READ_ONLY)
+def get_style_profile(style: str) -> dict:
+    """Typical loudness, dynamics, low end, tone, width, tempo and core elements of a
+    genre (rules of thumb from commercial releases, not standards)."""
+    return styles.describe(styles.find_style(style))
+
+
+@tool(annotations=READ_ONLY)
+def compare_mix_to_style(
+    style: str,
+    track: Annotated[str | int, Field(description='"master" for the mix')] = "master",
+    start_bar: Bar = None,
+    end_bar: Annotated[float | None, Field(description="Default: end of project")] = None,
+) -> dict:
+    """Measures the mix and compares it with a style profile: loudness, true peak,
+    dynamics and low-end mono get verdicts; low end and tone are reported to judge by ear."""
+    profile = styles.find_style(style)
+    measured = analyze_audio(track=track, start_bar=start_bar, end_bar=end_bar)
+    return {"style": styles.describe(profile), "findings": styles.compare(measured, profile),
+            "measured": {k: measured.get(k) for k in ("loudness", "levels", "stereo")}}
+
+
+# --------------------------------------------------------- learned knowledge
+
+NoteTopic = Literal["plugin", "preference", "mix", "sound", "project", "other"]
+
+
+@tool()
+def save_note(
+    text: Annotated[str, Field(description="One durable lesson, e.g. 'Prefers dark, warm pads; dislikes bright hats'")],
+    topic: Annotated[NoteTopic, Field(description="plugin (quirks/settings), preference (the user's taste), mix (lessons), sound, project, other")],
+    subject: Annotated[str | None, Field(description="What it's about, e.g. a plugin name 'Jup-8 V4', or 'drums'")] = None,
+) -> dict:
+    """Remembers something for future sessions: a plugin quirk, the user's taste, a
+    mix lesson. Save lasting lessons only, not one-off details of this song."""
+    return knowledge.add(text, topic, subject)
+
+
+@tool(annotations=READ_ONLY)
+def find_notes(
+    search: Annotated[str | None, Field(description="Words to look for, e.g. a plugin name or 'pad'")] = None,
+    topic: NoteTopic | None = None,
+    subject: str | None = None,
+) -> dict:
+    """Recalls saved notes. Check for the user's preferences and plugin notes before
+    designing sounds or mixing."""
+    notes = knowledge.find(search, topic, subject)
+    return {"count": len(notes), "notes": notes[:100]}
+
+
+@tool(annotations=DESTRUCTIVE)
+def delete_note(note_id: Annotated[str, Field(description="The note's id from find_notes")]) -> dict:
+    """Deletes a saved note."""
+    note = next((n for n in knowledge.find() if n["id"] == note_id.strip()), None)
+    if note is None:
+        raise ValueError(f"there's no note with id '{note_id}'")
+    confirm_with_user(f"forget the note \"{note['text'][:80]}\"")
+    return {"deleted": knowledge.delete(note_id)}
+
+
+# ----------------------------------------------------- skills (slash commands)
+
+
+@mcp.prompt(title="Critique the mix")
+def critique(style: str = "", focus: str = "") -> str:
+    """Honest feedback on the current mix, with measurements; changes nothing."""
+    return (
+        "Critique the mix in my REAPER project. Don't change anything.\n"
+        "1. find_notes for my preferences and earlier mix lessons.\n"
+        "2. get_project_overview, then analyze_audio on the master"
+        + (f" and compare_mix_to_style with style '{style}'" if style else "") + ".\n"
+        "3. Measure individual tracks that look suspect.\n"
+        "4. Give at most five findings, most important first: what you hear or measured, why it matters, "
+        "and the concrete fix (which track, which setting)."
+        + (f"\nFocus on: {focus}." if focus else "")
+    )
+
+
+@mcp.prompt(title="Mix the song")
+def mix(style: str = "") -> str:
+    """Improve the mix step by step, measuring as it goes."""
+    return (
+        "Mix my REAPER project" + (f" in a {style} style" if style else "") + ".\n"
+        "1. find_notes for my preferences and mix lessons" + (f"; get_style_profile('{style}')" if style else "") + ".\n"
+        "2. Measure the master and key tracks with analyze_audio.\n"
+        "3. Work through: levels and panning, EQ to clear masking, compression, buses where they help "
+        "(create_bus), side-chain where kick and bass fight (setup_sidechain), space (reverb/delay sends), "
+        "and automation for movement (write_automation).\n"
+        "4. After each stage, measure again and tell me in a line what changed and why.\n"
+        "5. Don't master; save_note any lasting lessons about my taste or plugins."
+    )
+
+
+@mcp.prompt(title="Master the song")
+def master(target: str = "", style: str = "") -> str:
+    """Master to a loudness target or style."""
+    goal = f"{target} LUFS" if target else (f"a typical {style} master" if style else "Spotify's -14 LUFS")
+    return (
+        f"Master my REAPER project for {goal}.\n"
+        "1. compare_mix_to_style first" + (f" with '{style}'" if style else " if a style fits") + " and fix "
+        "obvious mix problems (tell me before making big changes).\n"
+        "2. master_to_target" + (f" with target_lufs={target}" if target else (f" with style='{style}'" if style else " with platform='spotify'")) + ".\n"
+        "3. Report the final loudness, true peak and how hard the limiter works; warn me if it's squashed."
+    )
+
+
+@mcp.prompt(title="Design a sound")
+def design_sound(description: str, track: str = "") -> str:
+    """Design a synth sound from a description."""
+    return (
+        f"Design this sound: {description}" + (f", on track {track}" if track else "") + ".\n"
+        "1. find_notes for my taste and notes on the synth; list_sounds for a close match in my library.\n"
+        "2. Otherwise pick the best-suited synth I have and program it with get_fx_parameters and "
+        "set_fx_parameters (oscillators, filter, envelopes, effects).\n"
+        "3. Play it to me (write a short phrase if the track is empty), measure if useful, and refine.\n"
+        "4. Tell me in a line what you set, and offer to save_sound it."
+    )
 
 
 def run() -> None:

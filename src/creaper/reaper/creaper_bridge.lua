@@ -1,6 +1,6 @@
 -- @description creaper bridge: lets Claude work in REAPER through the creaper MCP server
 -- @author nickcapron
--- @version 0.5.1
+-- @version 0.6.0
 -- @link https://github.com/nickcapron/creaper
 -- @provides
 --   [nomain] creaper_json.lua
@@ -13,7 +13,7 @@
 --   Every change it makes is a named undo point ("creaper: ..."), so Ctrl+Z
 --   reverts anything Claude did.
 
-local BRIDGE_VERSION = "0.5.1"
+local BRIDGE_VERSION = "0.6.0"
 local PROTOCOL = 2
 
 ----------------------------------------------------------------------- JSON
@@ -1153,7 +1153,8 @@ end
 function commands.describe_track(p)
   local t = get_track(p.track, true)
   local summary = track_summary(t)
-  return { number = summary.number, name = summary.name, item_count = summary.item_count, fx = summary.fx }
+  return { number = summary.number, name = summary.name, item_count = summary.item_count, fx = summary.fx,
+           volume_db = summary.volume_db }
 end
 
 function commands.delete_track(p)
@@ -1324,7 +1325,7 @@ function commands.add_midi_notes(p)
       local s = base_qn + n.start
       local e = s + n.length
       reaper.MIDI_InsertNote(
-        take, false, n.muted or false,
+        take, n.selected or false, n.muted or false,
         reaper.MIDI_GetPPQPosFromProjQN(take, s), reaper.MIDI_GetPPQPosFromProjQN(take, e),
         int((n.channel or 1) - 1), int(n.pitch), int(n.velocity or 96), true)
       if e > last then last = e end
@@ -1565,6 +1566,503 @@ function commands.render_audio(p)
       .. "may be missing their audio: " .. table.concat(realtime, ", ")
       .. ". To measure them, record or render their output to an audio track first.") or nil,
   }
+end
+
+------------------------------------------------------------ automation
+
+local SHAPES = { linear = 0, square = 1, smooth = 2, fast_start = 3, fast_end = 4, bezier = 5 }
+local SHAPE_NAMES = { [0] = "linear", "square", "smooth", "fast_start", "fast_end", "bezier" }
+-- REAPER stores pan envelopes inverted relative to the track's pan (see tests).
+local PAN_ENV_SIGN = -1
+local TRACK_ENVELOPES = {
+  volume = { chunk = "<VOLENV2", name = "Volume", action = 40406 }, -- Track: Toggle track volume envelope visible
+  pan = { chunk = "<PANENV2", name = "Pan", action = 40407 },       -- Track: Toggle track pan envelope visible
+}
+
+local function with_only_track_selected(t, fn)
+  local selected = {}
+  for i = 0, reaper.CountTracks(0) - 1 do
+    local tr = reaper.GetTrack(0, i)
+    selected[tr] = reaper.IsTrackSelected(tr)
+  end
+  reaper.SetOnlyTrackSelected(t)
+  local ok, err = pcall(fn)
+  for tr, was in pairs(selected) do reaper.SetTrackSelected(tr, was) end
+  if not ok then error(err, 0) end
+end
+
+local function track_envelope(t, kind, create)
+  local spec = TRACK_ENVELOPES[kind]
+  local env = reaper.GetTrackEnvelopeByChunkName(t, spec.chunk) or reaper.GetTrackEnvelopeByName(t, spec.name)
+  if not env and create then
+    with_only_track_selected(t, function() reaper.Main_OnCommand(spec.action, 0) end)
+    env = reaper.GetTrackEnvelopeByChunkName(t, spec.chunk) or reaper.GetTrackEnvelopeByName(t, spec.name)
+  end
+  return env
+end
+
+-- Envelopes only play back while active; show them too, so the user sees the change.
+local function activate_envelope(env)
+  local ok, chunk = reaper.GetEnvelopeStateChunk(env, "", false)
+  if not ok then return end
+  local changed = chunk:gsub("\nACT 0", "\nACT 1"):gsub("\nVIS 0", "\nVIS 1")
+  if changed ~= chunk then reaper.SetEnvelopeStateChunk(env, changed, false) end
+end
+
+-- target: { kind = "volume" | "pan" | "fx", fx = ..., parameter = ... }
+local function automation_target(t, target, create)
+  local kind = target and target.kind
+  if kind == "volume" or kind == "pan" then
+    return track_envelope(t, kind, create), kind
+  elseif kind == "fx" then
+    local fx = get_fx(t, target.fx)
+    local param = find_param(t, fx, target.parameter)
+    return reaper.GetFXEnvelope(t, fx, param, create), kind, fx, param
+  end
+  fail("the automation target must be volume, pan or an FX parameter")
+end
+
+local function point_time(pt)
+  if pt.bar then return qn_to_time(bar_to_qn(pt.bar, pt.beat)) end
+  if pt.qn then return qn_to_time(pt.qn) end
+  if pt.seconds then return pt.seconds end
+  fail("each automation point needs a bar (and optional beat), qn or seconds")
+end
+
+-- FX envelopes use the parameter's own range; for most plugins that's 0-1.
+local function fx_range(t, fx, param)
+  local _, minv, maxv = reaper.TrackFX_GetParam(t, fx, param)
+  if not minv or not maxv or maxv <= minv then return 0, 1 end
+  return minv, maxv
+end
+
+local function envelope_value(t, env, kind, fx, param, pt, cache)
+  if kind == "volume" then
+    local db = pt.db or pt.value
+    if not db then fail("volume points need a db value") end
+    local amp = db <= -150 and 0 or db_to_amp(db)
+    return reaper.ScaleToEnvelopeMode(reaper.GetEnvelopeScalingMode(env), amp)
+  elseif kind == "pan" then
+    return math.max(-1, math.min(1, pt.pan or pt.value or 0)) * PAN_ENV_SIGN
+  end
+  local norm = pt.value
+  if norm == nil then
+    local key = pt.display_text and ("t:" .. pt.display_text) or ("v:" .. tostring(pt.display_value))
+    norm = cache[key]
+    if norm == nil then
+      local original = reaper.TrackFX_GetParamNormalized(t, fx, param)
+      if pt.display_text then
+        norm = solve_display_text(t, fx, param, tostring(pt.display_text))
+      elseif pt.display_value ~= nil then
+        norm = solve_display_value(t, fx, param, pt.display_value)
+      else
+        fail("plugin automation points need value (0-1), display_value or display_text")
+      end
+      reaper.TrackFX_SetParamNormalized(t, fx, param, original)
+      cache[key] = norm
+    end
+  end
+  local minv, maxv = fx_range(t, fx, param)
+  return minv + math.max(0, math.min(1, norm)) * (maxv - minv)
+end
+
+local function describe_point(t, env, kind, fx, param, time, value, shape)
+  local pt = { position = time_to_pos(time), shape = SHAPE_NAMES[int(shape)] }
+  if kind == "volume" then
+    pt.db = amp_to_db(reaper.ScaleFromEnvelopeMode(reaper.GetEnvelopeScalingMode(env), value))
+  elseif kind == "pan" then
+    pt.pan = round(value * PAN_ENV_SIGN, 3)
+  else
+    local minv, maxv = fx_range(t, fx, param)
+    local norm = (value - minv) / (maxv - minv)
+    pt.value = round(norm, 4)
+    local ok, display = reaper.TrackFX_FormatParamValueNormalized(t, fx, param, norm, "")
+    if ok and display ~= "" then pt.display = display end
+  end
+  return pt
+end
+
+local function envelope_label(t, env)
+  local _, name = reaper.GetEnvelopeName(env)
+  return name
+end
+
+function commands.write_automation(p)
+  local t = get_track(p.track)
+  local default_shape = SHAPES[p.shape or "linear"]
+  if not default_shape then fail("shape must be linear, smooth, square, fast_start, fast_end or bezier") end
+  return with_undo("automate " .. track_name(t), function()
+    local env, kind, fx, param = automation_target(t, p.target, true)
+    if not env then fail("REAPER couldn't create that envelope") end
+    local cache, points = {}, {}
+    for _, pt in ipairs(p.points or {}) do
+      local shape = pt.shape and SHAPES[pt.shape] or default_shape
+      points[#points + 1] = { time = point_time(pt), value = envelope_value(t, env, kind, fx, param, pt, cache), shape = shape }
+    end
+    if #points == 0 then fail("give at least one automation point") end
+    table.sort(points, function(a, b) return a.time < b.time end)
+    if p.replace ~= false then
+      reaper.DeleteEnvelopePointRange(env, points[1].time - 1e-6, points[#points].time + 1e-6)
+    end
+    for _, pt in ipairs(points) do reaper.InsertEnvelopePoint(env, pt.time, pt.value, pt.shape, 0, false, true) end
+    reaper.Envelope_SortPoints(env)
+    activate_envelope(env)
+    return {
+      envelope = envelope_label(t, env), track = track_ref(t), points_written = #points,
+      total_points = reaper.CountEnvelopePoints(env),
+      from = describe_point(t, env, kind, fx, param, points[1].time, points[1].value, points[1].shape),
+      to = describe_point(t, env, kind, fx, param, points[#points].time, points[#points].value, points[#points].shape),
+    }
+  end)
+end
+
+function commands.read_automation(p)
+  local t = get_track(p.track)
+  if not p.target then
+    local list = {}
+    for i = 0, reaper.CountTrackEnvelopes(t) - 1 do
+      local env = reaper.GetTrackEnvelope(t, i)
+      local count = reaper.CountEnvelopePoints(env)
+      if count > 0 then list[#list + 1] = { envelope = envelope_label(t, env), points = count } end
+    end
+    return { track = track_ref(t), envelopes = list }
+  end
+  local env, kind, fx, param = automation_target(t, p.target, false)
+  if not env then return { track = track_ref(t), points = {}, note = "there's no automation for that yet" } end
+  local count, points = reaper.CountEnvelopePoints(env), {}
+  for i = 0, math.min(count, p.limit or 500) - 1 do
+    local _, time, value, shape = reaper.GetEnvelopePoint(env, i)
+    points[#points + 1] = describe_point(t, env, kind, fx, param, time, value, shape)
+  end
+  return { envelope = envelope_label(t, env), track = track_ref(t), point_count = count, points = points }
+end
+
+function commands.clear_automation(p)
+  local t = get_track(p.track)
+  local env = automation_target(t, p.target, false)
+  if not env then fail("there's no automation for that") end
+  local start_qn, end_qn = resolve_qn(p, "start"), resolve_qn(p, "end")
+  return with_undo("clear automation on " .. track_name(t), function()
+    local from = start_qn and qn_to_time(start_qn) or -1
+    local to = end_qn and qn_to_time(end_qn) or (reaper.GetProjectLength(0) + 3600)
+    reaper.DeleteEnvelopePointRange(env, from - 1e-6, to + 1e-6)
+    reaper.Envelope_SortPoints(env)
+    return { envelope = envelope_label(t, env), remaining_points = reaper.CountEnvelopePoints(env) }
+  end)
+end
+
+------------------------------------------------------------ clip editing
+
+function commands.edit_item(p)
+  local item = find_item(p.item_id)
+  return with_undo("edit item", function()
+    if p.track then
+      local t = get_track(p.track)
+      if t == reaper.GetMasterTrack(0) then fail("items can't go on the master track") end
+      reaper.MoveMediaItemToTrack(item, t)
+    end
+    local take = reaper.GetActiveTake(item)
+    local is_midi = take and reaper.TakeIsMIDI(take)
+    local pos = reaper.GetMediaItemInfo_Value(item, "D_POSITION")
+
+    if p.trim_start_seconds and p.trim_start_seconds ~= 0 then
+      -- Shorten (or extend) from the left while the content stays where it is.
+      local d = p.trim_start_seconds
+      local len = reaper.GetMediaItemInfo_Value(item, "D_LENGTH")
+      if d >= len then fail("that would trim away the whole item") end
+      pos = pos + d
+      reaper.SetMediaItemInfo_Value(item, "D_POSITION", pos)
+      reaper.SetMediaItemInfo_Value(item, "D_LENGTH", len - d)
+      if take then
+        local rate = reaper.GetMediaItemTakeInfo_Value(take, "D_PLAYRATE")
+        reaper.SetMediaItemTakeInfo_Value(take, "D_STARTOFFS",
+          reaper.GetMediaItemTakeInfo_Value(take, "D_STARTOFFS") + d * rate)
+      end
+    end
+
+    local start_qn = resolve_qn(p, "start")
+    if start_qn then
+      pos = qn_to_time(start_qn)
+      reaper.SetMediaItemInfo_Value(item, "D_POSITION", pos)
+    end
+
+    local new_end
+    local pos_qn = time_to_qn(pos)
+    if p.length_bars then new_end = qn_to_time(pos_qn + p.length_bars * bar_length_qn_at(pos_qn))
+    elseif p.length_qn then new_end = qn_to_time(pos_qn + p.length_qn)
+    elseif p.length_seconds then new_end = pos + p.length_seconds end
+    if new_end then
+      if new_end <= pos then fail("the length must be positive") end
+      if is_midi then
+        reaper.MIDI_SetItemExtents(item, pos_qn, time_to_qn(new_end))
+      else
+        reaper.SetMediaItemInfo_Value(item, "D_LENGTH", new_end - pos)
+      end
+    end
+
+    if p.fade_in_seconds then reaper.SetMediaItemInfo_Value(item, "D_FADEINLEN", math.max(0, p.fade_in_seconds)) end
+    if p.fade_out_seconds then reaper.SetMediaItemInfo_Value(item, "D_FADEOUTLEN", math.max(0, p.fade_out_seconds)) end
+    if p.volume_db then reaper.SetMediaItemInfo_Value(item, "D_VOL", db_to_amp(p.volume_db)) end
+    if p.mute ~= nil then reaper.SetMediaItemInfo_Value(item, "B_MUTE", p.mute and 1 or 0) end
+    if p.loop ~= nil then reaper.SetMediaItemInfo_Value(item, "B_LOOPSRC", p.loop and 1 or 0) end
+    if p.color then
+      local r, g, b = tostring(p.color):match("^#?(%x%x)(%x%x)(%x%x)$")
+      if not r then fail("colors look like #RRGGBB") end
+      reaper.SetMediaItemInfo_Value(item, "I_CUSTOMCOLOR",
+        reaper.ColorToNative(tonumber(r, 16), tonumber(g, 16), tonumber(b, 16)) | 0x1000000)
+    end
+    if take then
+      if p.name then reaper.GetSetMediaItemTakeInfo_String(take, "P_NAME", p.name, true) end
+      if p.pitch_semitones then reaper.SetMediaItemTakeInfo_Value(take, "D_PITCH", p.pitch_semitones) end
+      if p.playrate then
+        if p.playrate <= 0 then fail("playrate must be positive") end
+        reaper.SetMediaItemTakeInfo_Value(take, "D_PLAYRATE", p.playrate)
+      end
+      if p.preserve_pitch ~= nil then reaper.SetMediaItemTakeInfo_Value(take, "B_PPITCH", p.preserve_pitch and 1 or 0) end
+    end
+    reaper.UpdateItemInProject(item)
+    local info = item_info(item)
+    info.fade_in_seconds = round(reaper.GetMediaItemInfo_Value(item, "D_FADEINLEN"), 3)
+    info.fade_out_seconds = round(reaper.GetMediaItemInfo_Value(item, "D_FADEOUTLEN"), 3)
+    info.volume_db = amp_to_db(reaper.GetMediaItemInfo_Value(item, "D_VOL"))
+    if take and not is_midi then
+      info.pitch_semitones = round(reaper.GetMediaItemTakeInfo_Value(take, "D_PITCH"), 2)
+      info.playrate = round(reaper.GetMediaItemTakeInfo_Value(take, "D_PLAYRATE"), 4)
+    end
+    return info
+  end)
+end
+
+function commands.split_item(p)
+  local item = find_item(p.item_id)
+  local at_qn = resolve_qn(p, "at") or fail("give where to split (at_bar, at_beat)")
+  local at = qn_to_time(at_qn)
+  local pos = reaper.GetMediaItemInfo_Value(item, "D_POSITION")
+  local len = reaper.GetMediaItemInfo_Value(item, "D_LENGTH")
+  if at <= pos + 1e-6 or at >= pos + len - 1e-6 then
+    local s, e = time_to_pos(pos), time_to_pos(pos + len)
+    fail(string.format("that point isn't inside the item (it runs from bar %d beat %s to bar %d beat %s)",
+      s.bar, s.beat, e.bar, e.beat))
+  end
+  return with_undo("split item", function()
+    local right = reaper.SplitMediaItem(item, at)
+    if not right then fail("REAPER couldn't split the item there") end
+    return { left = item_info(item), right = item_info(right) }
+  end)
+end
+
+function commands.duplicate_item(p)
+  local item = find_item(p.item_id)
+  local track = reaper.GetMediaItem_Track(item)
+  local pos = reaper.GetMediaItemInfo_Value(item, "D_POSITION")
+  local len = reaper.GetMediaItemInfo_Value(item, "D_LENGTH")
+  local count = math.max(1, math.min(int(p.count or 1), 256))
+  local _, chunk = reaper.GetItemStateChunk(item, "", false)
+  -- Without their GUIDs, REAPER gives the copies new ones.
+  chunk = chunk:gsub("\n%s*IGUID [^\n]*", ""):gsub("\n%s*GUID [^\n]*", "")
+  local start_qn = resolve_qn(p, "start")
+  return with_undo("duplicate item", function()
+    local copies, next_qn = {}, start_qn or time_to_qn(pos + len)
+    local item_qn = time_to_qn(pos + len) - time_to_qn(pos)
+    for _ = 1, count do
+      local copy = reaper.AddMediaItemToTrack(track)
+      reaper.SetItemStateChunk(copy, chunk, false)
+      reaper.SetMediaItemInfo_Value(copy, "D_POSITION", qn_to_time(next_qn))
+      copies[#copies + 1] = item_info(copy)
+      next_qn = next_qn + item_qn
+    end
+    reaper.UpdateArrange()
+    return { copies = copies }
+  end)
+end
+
+function commands.delete_item(p)
+  local item = find_item(p.item_id)
+  local info = item_info(item)
+  with_undo("delete item", function() reaper.DeleteTrackMediaItem(reaper.GetMediaItem_Track(item), item) end)
+  return { deleted = info }
+end
+
+local AUDIO_EXTENSIONS = { wav = true, aif = true, aiff = true, flac = true, mp3 = true, ogg = true,
+                           opus = true, wv = true, m4a = true, mid = true, midi = true }
+
+function commands.insert_audio_file(p)
+  local path = tostring(p.path or "")
+  local ext = (path:match("%.([%w]+)$") or ""):lower()
+  if not AUDIO_EXTENSIONS[ext] then fail("that isn't an audio or MIDI file REAPER can import: " .. path) end
+  if not reaper.file_exists(path) then fail("there's no file at " .. path) end
+  local t = get_track(p.track)
+  if t == reaper.GetMasterTrack(0) then fail("items can't go on the master track") end
+  local start_qn = resolve_qn(p, "start", time_to_qn(reaper.GetCursorPosition()))
+  return with_undo("insert " .. (path:match("[^\\/]+$") or path), function()
+    local cursor = reaper.GetCursorPosition()
+    local selected_items = {}
+    for i = 0, reaper.CountSelectedMediaItems(0) - 1 do selected_items[#selected_items + 1] = reaper.GetSelectedMediaItem(0, i) end
+    local inserted
+    with_only_track_selected(t, function()
+      reaper.SelectAllMediaItems(0, false)
+      reaper.SetEditCurPos(qn_to_time(start_qn), false, false)
+      reaper.InsertMedia(path, 0) -- 0 = add to the selected track
+      inserted = reaper.GetSelectedMediaItem(0, 0)
+    end)
+    reaper.SelectAllMediaItems(0, false)
+    for _, it in ipairs(selected_items) do reaper.SetMediaItemSelected(it, true) end
+    reaper.SetEditCurPos(cursor, false, false)
+    if not inserted then fail("REAPER couldn't import " .. path) end
+    return item_info(inserted)
+  end)
+end
+
+------------------------------------------------------------ routing jobs
+
+local function find_send(src, dest)
+  local guid = reaper.GetTrackGUID(dest)
+  for i = 0, reaper.GetTrackNumSends(src, 0) - 1 do
+    local other = reaper.GetTrackSendInfo_Value(src, 0, i, "P_DESTTRACK")
+    if other and reaper.GetTrackGUID(other) == guid then return i end
+  end
+end
+
+-- Sends `source` to channels 3/4 of `target`, where a compressor listens to it.
+function commands.setup_sidechain(p)
+  local src, dest = get_track(p.source), get_track(p.target)
+  if src == dest then fail("a track can't sidechain itself") end
+  local compressor = p.compressor and (resolve_plugin(p.compressor) or p.compressor)
+  return with_undo("sidechain " .. track_name(src) .. " -> " .. track_name(dest), function()
+    -- Instruments leak a trigger arriving on channels 3/4 into their output (tested:
+    -- ReaSynth and Arturia synths), so the target would play the kick. Duck an
+    -- instrument track on a bus after it instead; its own effects stay where they are.
+    local ducking_bus
+    if reaper.TrackFX_GetInstrument(dest) >= 0 and not p.fx then
+      local bus_name = track_name(dest) .. " Duck"
+      for i = 0, reaper.GetTrackNumSends(dest, 0) - 1 do
+        local other = reaper.GetTrackSendInfo_Value(dest, 0, i, "P_DESTTRACK")
+        if other and track_name(other) == bus_name then ducking_bus = other break end
+      end
+      if not ducking_bus then
+        local number = int(reaper.GetMediaTrackInfo_Value(dest, "IP_TRACKNUMBER"))
+        -- After the track; before it if it's a folder (a child would feed back into it).
+        local index = reaper.GetMediaTrackInfo_Value(dest, "I_FOLDERDEPTH") == 1 and number - 1 or number
+        reaper.InsertTrackAtIndex(index, true)
+        ducking_bus = reaper.GetTrack(0, index)
+        reaper.GetSetMediaTrackInfo_String(ducking_bus, "P_NAME", bus_name, true)
+        local color = reaper.GetTrackColor(dest)
+        if color ~= 0 then reaper.SetTrackColor(ducking_bus, color) end
+        reaper.CreateTrackSend(dest, ducking_bus) -- post-fader
+        reaper.SetMediaTrackInfo_Value(dest, "B_MAINSEND", 0)
+      end
+      dest = ducking_bus
+    end
+    local fx, added
+    if p.fx then
+      fx = get_fx(dest, p.fx)
+    else
+      if not compressor then
+        for i = 0, reaper.TrackFX_GetCount(dest) - 1 do
+          if fx_name(dest, i):find("ReaComp", 1, true) then fx = i break end
+        end
+      end
+      if not fx then
+        fx = reaper.TrackFX_AddByName(dest, compressor or "ReaComp", false, -1)
+        if fx < 0 then fail("couldn't find a compressor named '" .. tostring(compressor) .. "'") end
+        added = true
+      end
+    end
+    if reaper.GetMediaTrackInfo_Value(dest, "I_NCHAN") < 4 then reaper.SetMediaTrackInfo_Value(dest, "I_NCHAN", 4) end
+    -- Only channels 1/2 go on to the parent/master: the trigger on 3/4 must never be heard.
+    reaper.SetMediaTrackInfo_Value(dest, "C_MAINSEND_NCH", 2)
+    local send = find_send(src, dest) or reaper.CreateTrackSend(src, dest)
+    reaper.SetTrackSendInfo_Value(src, 0, send, "I_SRCCHAN", 0)
+    reaper.SetTrackSendInfo_Value(src, 0, send, "I_DSTCHAN", 2)  -- into channels 3/4
+    reaper.SetTrackSendInfo_Value(src, 0, send, "I_SENDMODE", 3) -- post-FX, before the source's fader
+    reaper.SetTrackSendInfo_Value(src, 0, send, "D_VOL", 1)
+
+    -- Feed the compressor's sidechain inputs (pins 3/4) from channels 3/4.
+    local _, inputs = reaper.TrackFX_GetIOSize(dest, fx)
+    if inputs and inputs >= 4 then
+      reaper.TrackFX_SetPinMappings(dest, fx, 0, 2, 4, 0)
+      reaper.TrackFX_SetPinMappings(dest, fx, 0, 3, 8, 0)
+    end
+
+    local name = fx_name(dest, fx)
+    local switched = {}
+    if name:find("ReaComp", 1, true) then
+      -- ReaComp's detector input channel ("SignIn"): 2 = channels 3/4.
+      local param = find_param(dest, fx, "SignIn")
+      local value = solve_display_value(dest, fx, param, 2)
+      reaper.TrackFX_SetParamNormalized(dest, fx, param, value)
+      switched[#switched + 1] = "detector input: channels 3/4"
+      if added then
+        for _, change in ipairs({
+          { parameter = "Ratio", display_value = 4 },
+          { parameter = "Attack", display_value = 1 },
+          { parameter = "Release", display_value = 120 },
+        }) do pcall(apply_param_change, dest, fx, change) end
+      end
+    else
+      -- Third-party compressors have their own sidechain switch. Leave alone the
+      -- controls that monitor or filter the sidechain ("Sidechain Listen" would
+      -- replace the output with the trigger signal).
+      for i = 0, reaper.TrackFX_GetNumParams(dest, fx) - 1 do
+        local _, pname = reaper.TrackFX_GetParamName(dest, fx, i, "")
+        local lower = pname:lower()
+        local is_monitor = lower:find("listen") or lower:find("monitor") or lower:find("solo")
+          or lower:find("audition") or lower:find("preview") or lower:find("eq") or lower:find("filter")
+          or lower:find("gain") or lower:find("time") or lower:find("detection")
+        if not is_monitor and (lower:find("sidechain") or lower:find("side chain") or lower:find("sc source")
+            or lower:find("external") or lower:find("key input")) then
+          for _, wanted in ipairs({ "External", "Ext", "On", "Sidechain" }) do
+            local ok = pcall(function()
+              reaper.TrackFX_SetParamNormalized(dest, fx, i, solve_display_text(dest, fx, i, wanted))
+            end)
+            if ok then switched[#switched + 1] = pname .. ": " .. wanted break end
+          end
+        end
+      end
+    end
+    return {
+      source = track_ref(src), target = track_ref(dest), compressor = name, fx_index = fx + 1,
+      added_compressor = added or nil, is_reacomp = name:find("ReaComp", 1, true) ~= nil,
+      ducking_bus = ducking_bus and track_ref(ducking_bus) or nil,
+      switched = switched,
+      note = #switched == 0 and "turn on the compressor's sidechain / external input in its window" or nil,
+    }
+  end)
+end
+
+-- A bus track the given tracks send to (post-fader). By default they stop
+-- sending to the master directly; keep_main_send keeps both (parallel processing).
+function commands.create_bus(p)
+  local sources = {}
+  for _, ref in ipairs(p.tracks or {}) do
+    local t = get_track(ref)
+    if t == reaper.GetMasterTrack(0) then fail("the master track can't feed a bus") end
+    sources[#sources + 1] = t
+  end
+  if #sources == 0 then fail("give the tracks that should feed the bus") end
+  local plugins = {}
+  for _, name in ipairs(p.fx or {}) do plugins[#plugins + 1] = resolve_plugin(name, false) or name end
+  return with_undo("create bus " .. p.name, function()
+    local last = 0
+    for _, t in ipairs(sources) do last = math.max(last, int(reaper.GetMediaTrackInfo_Value(t, "IP_TRACKNUMBER"))) end
+    reaper.InsertTrackAtIndex(last, true)
+    local bus = reaper.GetTrack(0, last)
+    reaper.GetSetMediaTrackInfo_String(bus, "P_NAME", p.name, true)
+    if p.color then set_color(bus, p.color) end
+    for _, t in ipairs(sources) do
+      local send = find_send(t, bus) or reaper.CreateTrackSend(t, bus)
+      reaper.SetTrackSendInfo_Value(t, 0, send, "I_SENDMODE", p.pre_fader and 3 or 0)
+      if not p.keep_main_send then reaper.SetMediaTrackInfo_Value(t, "B_MAINSEND", 0) end
+    end
+    local added = {}
+    for _, name in ipairs(plugins) do
+      local fx = reaper.TrackFX_AddByName(bus, name, false, -1)
+      if fx >= 0 then added[#added + 1] = { index = fx + 1, name = fx_name(bus, fx) } end
+    end
+    local refs = {}
+    for _, t in ipairs(sources) do refs[#refs + 1] = track_ref(t) end
+    return { bus = track_summary(bus), sources = refs, fx = added }
+  end)
 end
 
 ---------------------------------------------------------------- the loop
