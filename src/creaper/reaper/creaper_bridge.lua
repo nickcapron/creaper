@@ -1,6 +1,6 @@
 -- @description creaper bridge: lets Claude work in REAPER through the creaper MCP server
 -- @author nickcapron
--- @version 0.4.1
+-- @version 0.5.0
 -- @link https://github.com/nickcapron/creaper
 -- @provides
 --   [nomain] creaper_json.lua
@@ -13,8 +13,8 @@
 --   Every change it makes is a named undo point ("creaper: ..."), so Ctrl+Z
 --   reverts anything Claude did.
 
-local BRIDGE_VERSION = "0.4.1"
-local PROTOCOL = 1
+local BRIDGE_VERSION = "0.5.0"
+local PROTOCOL = 2
 
 ----------------------------------------------------------------------- JSON
 
@@ -28,8 +28,10 @@ local SEP = package.config:sub(1, 1)
 local function join(...) return table.concat({ ... }, SEP) end
 
 local BRIDGE_DIR = join(reaper.GetResourcePath(), "creaper")
-local REQUEST_PATH = join(BRIDGE_DIR, "request.json")
-local RESPONSE_PATH = join(BRIDGE_DIR, "response.json")
+local REQUESTS_DIR = join(BRIDGE_DIR, "requests")   -- protocol 2: <id>.json per request
+local RESPONSES_DIR = join(BRIDGE_DIR, "responses") -- protocol 2: <id>.json per answer
+local REQUEST_PATH = join(BRIDGE_DIR, "request.json")   -- protocol 1 (older servers)
+local RESPONSE_PATH = join(BRIDGE_DIR, "response.json") -- protocol 1
 local HEARTBEAT_PATH = join(BRIDGE_DIR, "bridge.json")
 local RENDER_DIR = join(BRIDGE_DIR, "renders")
 
@@ -1585,19 +1587,32 @@ local function handle(raw)
   return { id = req.id, ok = false, error = result.message, traceback = result.traceback }
 end
 
-local function write_file(path, text)
-  local tmp = path .. ".tmp"
-  local f = assert(io.open(tmp, "wb"))
-  f:write(text)
-  f:close()
-  os.remove(path)
-  assert(os.rename(tmp, path))
-end
-
 reaper.RecursiveCreateDirectory(BRIDGE_DIR, 0)
 math.randomseed(os.time())
 local INSTANCE = string.format("%d%04d", os.time(), math.random(0, 9999))
 local CLAIMED_PATH = REQUEST_PATH .. "." .. INSTANCE
+
+-- Replaces a file atomically (write a temp file, rename it over). On Windows
+-- the rename fails while another program has the file open for a moment (the
+-- server reads the heartbeat often), so retry, then fall back to writing in
+-- place. Returns false instead of raising: a missed write must never stop the bridge.
+local function write_file(path, text)
+  local tmp = path .. "." .. INSTANCE .. ".tmp"
+  local f = io.open(tmp, "wb")
+  if not f then return false end
+  f:write(text)
+  f:close()
+  for _ = 1, 5 do
+    os.remove(path)
+    if os.rename(tmp, path) then return true end
+  end
+  os.remove(tmp)
+  local direct = io.open(path, "wb")
+  if not direct then return false end
+  direct:write(text)
+  direct:close()
+  return true
+end
 local last_heartbeat = 0
 
 -- Only one bridge may answer requests. The newest one to start takes over, so
@@ -1609,9 +1624,24 @@ local taking_over = previous_beat and reaper.time_precise() - previous_beat < 2
 reaper.SetExtState("creaper", "owner", INSTANCE, false)
 -- Give a bridge that's still running time to see the handover before we claim requests.
 local claim_after = reaper.time_precise() + (taking_over and 0.5 or 0)
+reaper.RecursiveCreateDirectory(REQUESTS_DIR, 0)
+reaper.RecursiveCreateDirectory(RESPONSES_DIR, 0)
 if not taking_over then
+  -- Leftovers from a previous session: requests nobody is waiting for any more,
+  -- answers nobody collected.
   os.remove(REQUEST_PATH)
   os.remove(RESPONSE_PATH)
+  for _, dir in ipairs({ REQUESTS_DIR, RESPONSES_DIR }) do
+    reaper.EnumerateFiles(dir, -1)
+    local names, i = {}, 0
+    while true do
+      local name = reaper.EnumerateFiles(dir, i)
+      if not name then break end
+      names[#names + 1] = name
+      i = i + 1
+    end
+    for _, name in ipairs(names) do os.remove(join(dir, name)) end
+  end
 end
 
 local _, _, section_id, command_id = reaper.get_action_context()
@@ -1625,8 +1655,45 @@ if reaper.file_exists(SCRIPT_DIR .. "creaper_chat.lua") then
   reaper.AddRemoveReaScript(true, 0, SCRIPT_DIR .. "creaper_chat.lua", true)
 end
 
-local function tick()
-  if not owns_bridge() then return end -- a newer bridge took over; let this script end
+-- nil if the file is locked for a moment (e.g. a virus scanner checking it).
+local function read_claimed(path)
+  local f = io.open(path, "rb")
+  if not f then return nil end
+  local raw = f:read("a")
+  f:close()
+  os.remove(path)
+  return raw
+end
+
+-- Answers that couldn't be written yet (another program holding the folder's
+-- files for a moment); retried every tick for up to a minute.
+local unsent = {}
+
+local function answer(raw, response_path, id)
+  local response = handle(raw)
+  response.id = response.id or id
+  local ok, encoded = pcall(json.encode, response)
+  if not ok then
+    encoded = json.encode({ id = response.id, ok = false, error = "couldn't encode the result: " .. tostring(encoded) })
+  end
+  if not write_file(response_path, encoded) then
+    unsent[#unsent + 1] = { path = response_path, text = encoded, since = reaper.time_precise() }
+  end
+end
+
+local function retry_unsent()
+  for i = #unsent, 1, -1 do
+    local u = unsent[i]
+    if write_file(u.path, u.text) then
+      table.remove(unsent, i)
+    elseif reaper.time_precise() - u.since > 60 then
+      table.remove(unsent, i)
+      reaper.ShowConsoleMsg("creaper: gave up writing a response to " .. u.path .. "\n")
+    end
+  end
+end
+
+local function step()
   local now = reaper.time_precise()
   reaper.SetExtState("creaper", "heartbeat", tostring(now), false)
   if now - last_heartbeat >= 1 then
@@ -1646,20 +1713,49 @@ local function tick()
     end
   end
 
-  -- Renaming claims the request atomically.
-  if now >= claim_after and os.rename(REQUEST_PATH, CLAIMED_PATH) then
-    local f = io.open(CLAIMED_PATH, "rb")
-    local raw = f and f:read("a") or ""
-    if f then f:close() end
-    os.remove(CLAIMED_PATH)
-    local response = handle(raw)
-    local ok, encoded = pcall(json.encode, response)
-    if not ok then
-      encoded = json.encode({ id = response.id, ok = false, error = "couldn't encode the result: " .. tostring(encoded) })
+  if now < claim_after then return end
+  retry_unsent()
+
+  -- Protocol 2: every request has its own file, so clients never overwrite each
+  -- other. Renaming claims a request atomically.
+  reaper.EnumerateFiles(REQUESTS_DIR, -1) -- refresh REAPER's cached listing
+  local pending, i = {}, 0
+  while #pending < 20 do
+    local name = reaper.EnumerateFiles(REQUESTS_DIR, i)
+    if not name then break end
+    local id = name:match("^([%w_%-]+)%.json$")
+    if id then pending[#pending + 1] = id end
+    i = i + 1
+  end
+  for _, id in ipairs(pending) do
+    local request = join(REQUESTS_DIR, id .. ".json")
+    local claimed = join(REQUESTS_DIR, id .. "." .. INSTANCE .. ".claimed")
+    if os.rename(request, claimed) then
+      local raw = read_claimed(claimed)
+      if raw then
+        answer(raw, join(RESPONSES_DIR, id .. ".json"), id)
+      else
+        os.rename(claimed, request) -- couldn't read it yet: put it back for the next tick
+      end
     end
-    write_file(RESPONSE_PATH, encoded)
   end
 
+  -- Protocol 1 (creaper 0.1-0.4 servers): a single shared request file.
+  if os.rename(REQUEST_PATH, CLAIMED_PATH) then
+    local raw = read_claimed(CLAIMED_PATH)
+    if raw then answer(raw, RESPONSE_PATH) else os.rename(CLAIMED_PATH, REQUEST_PATH) end
+  end
+end
+
+local last_error
+local function tick()
+  if not owns_bridge() then return end -- a newer bridge took over; let this script end
+  -- Whatever goes wrong in one tick, keep the bridge running; report each new error once.
+  local ok, err = xpcall(step, debug.traceback)
+  if not ok and err ~= last_error then
+    last_error = err
+    reaper.ShowConsoleMsg("creaper bridge error (still running): " .. tostring(err) .. "\n")
+  end
   reaper.defer(tick)
 end
 

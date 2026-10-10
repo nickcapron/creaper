@@ -1,6 +1,6 @@
 -- @description creaper chat: talk to Claude from a dockable panel inside REAPER
 -- @author nickcapron
--- @version 0.4.1
+-- @version 0.5.0
 -- @link https://github.com/nickcapron/creaper
 -- @about
 --   A chat panel for creaper. Messages go to your own Claude Code (your Claude
@@ -52,13 +52,24 @@ local function read_file(path)
   return data
 end
 
+-- Atomic replace that tolerates Windows briefly locking a file another program
+-- is reading (see the bridge's write_file). Returns false rather than raising.
 local function write_file(path, text)
-  local tmp = path .. ".tmp"
-  local f = assert(io.open(tmp, "wb"))
+  local tmp = path .. ".panel.tmp"
+  local f = io.open(tmp, "wb")
+  if not f then return false end
   f:write(text)
   f:close()
-  os.remove(path)
-  assert(os.rename(tmp, path))
+  for _ = 1, 5 do
+    os.remove(path)
+    if os.rename(tmp, path) then return true end
+  end
+  os.remove(tmp)
+  local direct = io.open(path, "wb")
+  if not direct then return false end
+  direct:write(text)
+  direct:close()
+  return true
 end
 
 local function read_json(path)
@@ -96,13 +107,17 @@ end
 
 ------------------------------------------------------------------ bridge
 
-local function bridge_running()
+-- The bridge pauses while REAPER is busy (renders, heavy plugins), so a late
+-- heartbeat isn't proof it stopped; only start another after a long silence.
+local function bridge_age()
   local beat = tonumber(reaper.GetExtState("creaper", "heartbeat"))
-  return beat ~= nil and reaper.time_precise() - beat < 3
+  return beat and reaper.time_precise() - beat or math.huge
 end
 
+local function bridge_running() return bridge_age() < 3 end
+
 local function start_bridge()
-  if bridge_running() or not reaper.file_exists(BRIDGE_SCRIPT) then return end
+  if bridge_age() < 15 or not reaper.file_exists(BRIDGE_SCRIPT) then return end
   local command = reaper.AddRemoveReaScript(true, 0, BRIDGE_SCRIPT, true)
   if command and command > 0 then reaper.Main_OnCommand(command, 0) end
 end
@@ -134,7 +149,7 @@ local function start_turn(prompt)
     started = os.time(),
     got_event = false,
   }
-  write_file(t.request, json.encode({
+  local written = write_file(t.request, json.encode({
     prompt = prompt,
     session_id = state.session_id,
     events = t.events,
@@ -144,6 +159,10 @@ local function start_turn(prompt)
     claude = config.claude,
     model = config.model,
   }))
+  if not written then
+    add_message("error", "Couldn't write to " .. CHAT_DIR .. ", so the message wasn't sent.")
+    return
+  end
   reaper.ExecProcess(string.format('"%s" -m creaper chat-turn "%s"', config.python, t.request), -1)
   turn = t
   save_state()
