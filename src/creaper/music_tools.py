@@ -8,6 +8,7 @@ arrangement for a genre in one call.
 
 from __future__ import annotations
 
+import math
 import random
 from typing import Annotated, Literal
 
@@ -745,3 +746,202 @@ def sketch_song(
     if not instruments:
         result["note"] = "No instruments were given, so the tracks are empty of plugins: add instruments to hear them."
     return result
+
+
+# ---------------------------------------------------------------- listening
+
+def _render_track(track: str | int, start_bar: float, end_bar: float):
+    """Renders a track's range and returns (mono audio, sample rate); deletes the file."""
+    import os
+    from pathlib import Path
+
+    import soundfile as sf
+
+    from .server import BridgeError, bridge
+
+    render = call("render_audio", timeout=900.0, track=track, start_bar=start_bar, end_bar=end_bar)
+    renders = (bridge.directory / "renders").resolve()
+    for f in render["files"]:
+        if renders not in Path(f).resolve().parents:
+            raise BridgeError(f"refusing to use a render outside {renders}: {f}")
+    try:
+        audio, fs = sf.read(render["files"][0], dtype="float32", always_2d=True)
+    finally:
+        if not os.environ.get("CREAPER_KEEP_RENDERS"):
+            for f in render["files"]:
+                Path(f).unlink(missing_ok=True)
+    return audio.mean(axis=1), fs
+
+
+def _listen(track: str | int, pitches: list[int], channel: int | list[int], note_seconds: float, gap_seconds: float,
+            velocity: int, one_shots: bool = False) -> tuple[list[dict], dict]:
+    """Plays each pitch once on the track (in a temporary item after the end of the
+    project), renders it, measures every note, and removes the item again."""
+    from . import listen
+
+    overview = call("get_project_overview")
+    bpm = float(overview.get("tempo_bpm") or 120)
+    num, den = (int(x) for x in (overview.get("time_signature") or "4/4").split("/"))
+    qn_per_bar = num * 4 / den
+    slot_s = note_seconds + gap_seconds
+    slot_qn = slot_s * bpm / 60
+    start_bar = int(overview["length"]["bar"]) + 2
+    length_bars = math.ceil(slot_qn * len(pitches) / qn_per_bar) + 1
+    item = call("create_midi_item", track=track, start_bar=start_bar, length_bars=length_bars, name="creaper listening")
+    try:
+        channels = channel if isinstance(channel, list) else [channel] * len(pitches)
+        notes = [{"pitch": p, "start": round(i * slot_qn, 6), "length": round(note_seconds * bpm / 60, 6),
+                  "velocity": velocity, "channel": c} for i, (p, c) in enumerate(zip(pitches, channels))]
+        call("add_midi_notes", item_id=item["id"], notes=notes, replace=True)
+        context = call("get_instrument_notes", item_id=item["id"], channel=channels[0])
+        audio, fs = _render_track(track, start_bar, start_bar + length_bars)
+    finally:
+        call("delete_item", item_id=item["id"])
+    results = []
+    slot = int(slot_s * fs)
+    for i, p in enumerate(pitches):
+        f = listen.features(audio[i * slot: (i + 1) * slot], fs, note_off=None if one_shots else note_seconds)
+        f.update({"note": theory.midi_to_note(p), "pitch": p, "channel": channels[i]})
+        results.append(f)
+    return results, context
+
+
+def _short_name(fx: str | None) -> str | None:
+    import re
+
+    if not fx:
+        return None
+    name = re.sub(r"^(VSTi?3?|CLAPi?|AUi?|JS|DXi?)\s*:\s*", "", fx)
+    return re.sub(r"\s*\([^)]*\)\s*$", "", name).strip() or fx
+
+
+@tool()
+def map_drum_kit(
+    track: Annotated[str | int, Field(description="The drum track (number or name)")],
+    low: Annotated[str | int, Field(description="Lowest key to try")] = "C0",
+    high: Annotated[str | int, Field(description="Highest key to try")] = "C6",
+    channel: Annotated[int, Field(ge=1, le=16, description="MIDI channel to play on (most kits listen on all; GM kits use 10)")] = 10,
+    per_channel: Annotated[bool, Field(description=(
+        "For kits that put each drum on its own MIDI channel (SILA, drum machines, multitimbral setups): "
+        "play one note (`low`, default C4) on channels 1-16 instead of a range of keys"))] = False,
+    save: Annotated[bool, Field(description="Save the result as this instrument's drum map")] = True,
+    overwrite: Annotated[bool, Field(description="Replace a drum map you saved for this instrument before")] = False,
+) -> dict:
+    """Works out a drum kit by ear: plays every key in the range through the track's
+    instrument (offline, in a temporary item that's removed afterwards), measures each
+    sound and identifies it (kick, snare, clap, rim, closed/open hat, crash, ride, toms,
+    shaker, cowbell, percussion). Saves the layout as a drum map so add_drum_pattern and
+    genre grooves land on the right sounds. Use it whenever a kit's layout is unknown,
+    instead of asking the user. Kits inside one plugin can differ: map again after
+    changing kit."""
+    from . import listen
+    from .server import drum_maps
+
+    lo, hi = theory.note_to_midi(low), theory.note_to_midi(high)
+    if hi < lo or hi - lo > 96:
+        raise ValueError("give a range of up to 8 octaves, low to high")
+    if per_channel:
+        lo = 60 if low == "C0" else lo  # per-channel kits usually trigger on C4
+        results, context = _listen(track, [lo] * 16, list(range(1, 17)), 0.3, 1.5, 110, one_shots=True)
+    else:
+        results, context = _listen(track, list(range(lo, hi + 1)), channel, 0.3, 1.5, 110, one_shots=True)
+    instrument = context.get("instrument")
+    names = {n["pitch"]: n["name"] for n in context.get("note_names", [])}
+    if instrument is None:
+        raise ValueError("that track has no instrument to listen to")
+    for r in results:
+        if r.get("silent"):
+            r["kind"], r["confidence"] = "silent", 1.0
+    sounding = [r for r in results if not r.get("silent")]
+    if not sounding:
+        return {"instrument": instrument, "sounding_keys": 0,
+                "note": f"Nothing sounded on channel {channel}. Try another channel (some kits put each drum on its own "
+                        "channel), check the track isn't muted, or load a kit first."}
+    follows, _ = listen.tracks_pitch(sounding)
+    if per_channel:
+        for r in sounding:
+            r["pitch"], r["_note"] = r["channel"], r["pitch"]  # assign lanes by channel
+    lanes, labels = listen.map_kit(sounding, gm=not per_channel)
+    for r in sounding:
+        r["kind"], r["confidence"] = labels.get(r["pitch"], ("percussion", 0.3))
+    if per_channel:
+        for r in sounding:
+            r["pitch"] = r.pop("_note")
+    # The plugin's own key names, when it reports them, beat any guess by ear.
+    named_lanes = {}
+    if names and not per_channel:
+        for lane in ("kick", "snare", "clap", "rim", "closed hat", "open hat", "crash", "ride", "low tom", "mid tom", "high tom"):
+            hit = theory.best_name_match(lane, names)
+            if hit is not None:
+                named_lanes[lane] = hit
+        for lane, pitch in named_lanes.items():
+            lanes[lane] = pitch
+    gm_layout = not per_channel and listen.follows_gm(lanes)
+    out: dict = {
+        "instrument": instrument,
+        "sounding_keys": len(sounding),
+        "layout": ("named by the plugin" if len(named_lanes) >= 3 else
+                   "General MIDI (kick C1, snare D1, closed hat F#1): reliable" if gm_layout else
+                   "custom: lanes are educated guesses from the sound, so check them by ear"),
+        "keys": [{"note": r["note"], **({"channel": r["channel"]} if per_channel else {}),
+                  "sound": r["kind"], "confidence": r["confidence"],
+                  "decay_s": r["decay_s"], "brightness_hz": r["centroid_hz"],
+                  **({"pitch_hz": r["pitch_hz"]} if r.get("pitch_hz") else {}),
+                  **({"plugin_calls_it": names[r["pitch"]]} if r["pitch"] in names and not per_channel else {})}
+                 for r in sounding],
+    }
+    out["drum_map"] = ({lane: f"{theory.midi_to_note(lo)} ch {ch}" for lane, ch in lanes.items()} if per_channel
+                       else {lane: theory.midi_to_note(p) for lane, p in lanes.items()})
+    if follows and len(sounding) > 24:
+        out["warning"] = ("The sound follows the keys chromatically, so this looks like a pitched instrument (or one "
+                          "sample across the keyboard) rather than a kit; the map is probably meaningless.")
+        save = False
+    name = _short_name(instrument)
+    if save and lanes:
+        existing = drum_maps.find(instrument)
+        if existing and existing[0] in drum_maps.all() and not overwrite:
+            out["not_saved"] = f"You already have a drum map for {existing[0]}; pass overwrite=True to replace it."
+        else:
+            if per_channel:
+                mapping = {lane: {"note": lo, "channel": ch} for lane, ch in lanes.items()}
+            else:
+                mapping = {lane: ({"note": p, "channel": channel} if channel != 10 else p) for lane, p in lanes.items()}
+            drum_maps.save(name, mapping)
+            out["saved_as"] = name
+    out["tip"] = ("For a custom layout, play the main lanes back (a short add_drum_pattern and transport) and ask the "
+                  "user only if something sounds wrong; fix a lane with save_drum_map.")
+    return out
+
+
+@tool()
+def audition_instrument(
+    track: Annotated[str | int, Field(description="The track whose instrument to listen to")],
+    notes: Annotated[list[str | int] | None, Field(description="Notes to play; default C1 to C7, one per octave")] = None,
+    note_seconds: Annotated[float, Field(gt=0.05, le=8)] = 1.0,
+    channel: Annotated[int, Field(ge=1, le=16)] = 1,
+    velocity: Annotated[int, Field(ge=1, le=127)] = 100,
+) -> dict:
+    """Listens to the track's current sound: plays notes across the range offline (in a
+    temporary item that's removed afterwards) and reports its playable range, whether
+    it follows pitch (and any transposition), attack, sustain, release, brightness and
+    character (bright/dark, plucky/sustained, pad-like, noisy). Use it to check a patch
+    you designed, or to find out what an unfamiliar sound or preset is."""
+    from . import listen
+
+    pitches = [theory.note_to_midi(n) for n in notes] if notes else [24 + 12 * i for i in range(7)]
+    results, context = _listen(track, pitches, channel, note_seconds, 1.5, velocity)
+    instrument = context.get("instrument")
+    if instrument is None:
+        raise ValueError("that track has no instrument to listen to")
+    per_note = []
+    for r in results:
+        entry: dict = {"note": r["note"], "level_db": r["peak_db"]}
+        if r.get("silent"):
+            entry["silent"] = True
+        else:
+            entry.update({k: r[k] for k in ("attack_ms", "decay_s", "sustain_db", "release_s", "centroid_hz")
+                          if r.get(k) is not None})
+            if r.get("pitch_hz"):
+                entry["sounds_as"] = theory.midi_to_note(round(69 + 12 * math.log2(r["pitch_hz"] / 440)))
+        per_note.append(entry)
+    return {"instrument": instrument, "summary": listen.describe_patch(results), "notes": per_note}

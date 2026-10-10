@@ -87,8 +87,18 @@ Plugins (VST, VST3, CLAP, AU, JS):
   user says it's plugged in. Instruments with a built-in drum map (see list_drum_maps,
   e.g. SILA) work straight away; get_instrument_notes explains how to play them.
 - Drum patterns follow the instrument's own note names when it reports them, then a
-  saved or built-in drum map, then General MIDI. Check the "lanes" in the result; if a kit maps
-  drums differently, ask the user and save_drum_map so it's right next time.
+  saved or built-in drum map, then General MIDI. When a kit's layout is unknown (no saved
+  map, generic note names, or the user changed kits), run map_drum_kit: it plays every key,
+  identifies the sounds by ear and saves the drum map. Kits with a drum per MIDI channel
+  take per_channel=True.
+
+Figure things out before asking. You can listen and measure: audition_instrument (what a
+patch does: range, pitch, envelope, tone), map_drum_kit, analyze_audio, get_fx_parameters,
+list_fx_presets, find_notes. Use them first, then act on what you found, and tell the user
+briefly how you know. Ask only for what no tool can reach (picking a sound in a plugin's own
+browser, hardware, taste), and then say exactly what to click. When something you found
+will matter again (a kit layout, a plugin quirk), save it (save_drum_map, save_sound,
+save_note).
 - Multi-output instruments (drum machines, Overbridge, multitimbral synths) can be
   split onto separate tracks with split_instrument_outputs.
 

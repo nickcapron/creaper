@@ -96,6 +96,12 @@ creaper uses whatever is installed: VST, VST3, CLAP, AU and JS, instruments and 
   description, and Claude can recall it on any track, in any project ("use a warm pad
   from my library"). Plugins that don't share their state are saved as parameter
   values instead. The library lives in `<REAPER resource path>/creaper/sounds/`.
+- **Kits mapped by ear.** `map_drum_kit` plays every key of a drum instrument offline,
+  identifies each sound (kick, snare, clap, hats, cymbals, toms, rim, percussion) and saves
+  the layout. It compares sounds within the kit and checks for the General MIDI layout most
+  commercial kits use; on held-out real-sample kits it gets about 84% of lanes right for
+  General MIDI layouts and about half for custom ones, and says which case it's in.
+  `audition_instrument` reports what a patch does: range, pitch tracking, envelope, tone.
 - **Drums on any kit.** Drum patterns follow the instrument's own note names when it
   reports them ("Kick", "HH Closed"…). Otherwise creaper uses a drum map you've saved
   for that instrument (which can also put each drum on its own MIDI channel), then
@@ -324,7 +330,8 @@ python -m venv .venv
 - `src/creaper/scales.py`, `harmony.py`: scales and modes, spelling, Roman numerals, chord naming, key detection, cadences, modulation
 - `src/creaper/composer.py`: progressions, reharmonization, voicings and voice leading, bass, comping, melody, rhythm, MIDI harmony analysis
 - `src/creaper/genres/`: the genre library, one module per family (`genres/__init__.py` has the schema and validator)
-- `src/creaper/music_tools.py`: the theory, genre and composition tools
+- `src/creaper/music_tools.py`: the theory, genre, composition and listening tools
+- `src/creaper/listen.py`: per-note audio features, drum classification and kit mapping
 - `assets/make_brand.py`: regenerates the logo, banner and thumbnail in `assets/brand/`
 - `src/creaper/drums.py`: saved drum maps
 - `src/creaper/analysis.py`: loudness (ITU-R BS.1770-4 / EBU R128), true peak, spectrum, stereo
