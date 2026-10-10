@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import os
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -10,12 +11,14 @@ from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
 
 from . import analysis, theory
-from .bridge import Bridge
+from .bridge import Bridge, BridgeError
 
 try:  # mcp 2.x
     from mcp.server.mcpserver import MCPServer
+    from mcp.server.mcpserver.exceptions import ToolError
 except ImportError:  # mcp 1.x
     from mcp.server.fastmcp import FastMCP as MCPServer
+    from mcp.server.fastmcp.exceptions import ToolError
 
 INSTRUCTIONS = """\
 creaper controls the user's open REAPER project.
@@ -41,6 +44,26 @@ bridge = Bridge()
 
 READ_ONLY = ToolAnnotations(readOnlyHint=True)
 DESTRUCTIVE = ToolAnnotations(destructiveHint=True)
+
+
+def tool(annotations: ToolAnnotations | None = None):
+    """Registers an MCP tool whose expected failures reach Claude with their message.
+
+    The MCP SDK hides the text of any exception that isn't a ToolError, but REAPER's
+    answers ("there is no track named ...") are what Claude needs to fix its call.
+    """
+    def decorator(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            try:
+                return fn(*args, **kwargs)
+            except (BridgeError, ValueError) as e:
+                raise ToolError(str(e)) from e
+
+        mcp.tool(annotations=annotations)(wrapper)
+        return fn
+
+    return decorator
 
 TrackRef = Annotated[str | int, Field(description='Track number (1 = top), track name, or "master"')]
 FxRef = Annotated[str | int, Field(description="FX position in the chain (1 = first) or name, e.g. 'ReaComp'")]
@@ -82,7 +105,7 @@ def _with_note_names(notes: list[dict]) -> list[dict]:
 # ------------------------------------------------------------------ reading
 
 
-@mcp.tool(annotations=READ_ONLY)
+@tool(annotations=READ_ONLY)
 def get_project_overview() -> dict:
     """Start here. Returns tempo, time signature, length, edit cursor, time selection,
     transport state, markers and regions, the master track, every track (volume, pan,
@@ -90,14 +113,14 @@ def get_project_overview() -> dict:
     return call("get_project_overview")
 
 
-@mcp.tool(annotations=READ_ONLY)
+@tool(annotations=READ_ONLY)
 def get_track_details(track: TrackRef) -> dict:
     """Everything about one track: its items (with ids, positions and note counts), FX
     chain with presets, sends and receives."""
     return call("get_track_details", track=track)
 
 
-@mcp.tool(annotations=READ_ONLY)
+@tool(annotations=READ_ONLY)
 def get_fx_parameters(
     track: TrackRef,
     fx: FxRef,
@@ -110,7 +133,7 @@ def get_fx_parameters(
     return call("get_fx_parameters", track=track, fx=fx, search=search, offset=offset, limit=limit)
 
 
-@mcp.tool(annotations=READ_ONLY)
+@tool(annotations=READ_ONLY)
 def list_installed_fx(
     search: Annotated[str | None, Field(description="Words to match, e.g. 'compressor', 'eq', 'reverb', 'synth'")] = None,
     limit: int = 50,
@@ -121,7 +144,7 @@ def list_installed_fx(
     return call("list_installed_fx", search=search, limit=limit)
 
 
-@mcp.tool(annotations=READ_ONLY)
+@tool(annotations=READ_ONLY)
 def get_midi_notes(item_id: ItemId) -> dict:
     """Reads the notes in a MIDI item (positions in quarter notes from the item start)."""
     result = call("get_midi_notes", item_id=item_id)
@@ -132,7 +155,7 @@ def get_midi_notes(item_id: ItemId) -> dict:
 # -------------------------------------------------------------- arrangement
 
 
-@mcp.tool()
+@tool()
 def set_tempo(
     bpm: Annotated[float | None, Field(gt=0, le=960)] = None,
     numerator: Annotated[int | None, Field(ge=1, le=64, description="Time signature top number")] = None,
@@ -142,7 +165,7 @@ def set_tempo(
     return call("set_tempo", bpm=bpm, numerator=numerator, denominator=denominator)
 
 
-@mcp.tool()
+@tool()
 def create_track(
     name: str,
     instrument: Annotated[str | None, Field(description="Instrument plugin to load, e.g. 'ReaSynth' or a name from list_installed_fx")] = None,
@@ -153,7 +176,7 @@ def create_track(
     return call("create_track", name=name, instrument=instrument, position=position, color=color)
 
 
-@mcp.tool()
+@tool()
 def set_track_properties(
     track: TrackRef,
     name: str | None = None,
@@ -169,13 +192,13 @@ def set_track_properties(
                 mute=mute, solo=solo, color=color, selected=selected)
 
 
-@mcp.tool(annotations=DESTRUCTIVE)
+@tool(annotations=DESTRUCTIVE)
 def delete_track(track: TrackRef) -> dict:
     """Deletes a track and everything on it (undoable). Confirm with the user first."""
     return call("delete_track", track=track)
 
 
-@mcp.tool()
+@tool()
 def add_marker(
     name: str,
     bar: Annotated[float, Field(ge=1, description="Bar number, 1-based")],
@@ -187,7 +210,7 @@ def add_marker(
     return call("add_marker", name=name, start_bar=bar, start_beat=beat, end_bar=end_bar, color=color)
 
 
-@mcp.tool()
+@tool()
 def transport(
     action: Literal["play", "stop", "pause", "go_to"],
     start_bar: Bar = None,
@@ -200,13 +223,13 @@ def transport(
     return call("transport", action=action, start_bar=start_bar, start_beat=start_beat, end_bar=end_bar, loop=loop)
 
 
-@mcp.tool()
+@tool()
 def undo(steps: Annotated[int, Field(ge=1, le=50)] = 1) -> dict:
     """Undoes the most recent changes in REAPER (Claude's or the user's)."""
     return call("undo", steps=steps)
 
 
-@mcp.tool()
+@tool()
 def run_action(
     command: Annotated[str | int, Field(description="Numeric action id (e.g. 40029) or named command (e.g. '_SWS_ABOUT')")],
 ) -> dict:
@@ -218,7 +241,7 @@ def run_action(
 # --------------------------------------------------------------------- MIDI
 
 
-@mcp.tool()
+@tool()
 def create_midi_item(
     track: TrackRef,
     start_bar: Annotated[float | None, Field(ge=1, description="Bar to start at, 1-based; default: the edit cursor")] = None,
@@ -233,7 +256,7 @@ def create_midi_item(
                 length_bars=length_bars, length_qn=length_qn, name=name)
 
 
-@mcp.tool()
+@tool()
 def add_midi_notes(
     item_id: ItemId,
     notes: list[Note],
@@ -249,7 +272,7 @@ def add_midi_notes(
     return call("add_midi_notes", item_id=item_id, notes=payload, replace=replace)
 
 
-@mcp.tool()
+@tool()
 def add_chord_progression(
     item_id: ItemId,
     chords: list[ChordEvent],
@@ -279,7 +302,7 @@ def add_chord_progression(
     return result
 
 
-@mcp.tool()
+@tool()
 def add_drum_pattern(
     item_id: ItemId,
     pattern: Annotated[dict[str, str], Field(description=(
@@ -302,7 +325,7 @@ def add_drum_pattern(
     return call("add_midi_notes", item_id=item_id, notes=notes, replace=replace)
 
 
-@mcp.tool(annotations=DESTRUCTIVE)
+@tool(annotations=DESTRUCTIVE)
 def delete_midi_notes(
     item_id: ItemId,
     start: Annotated[float | None, Field(description="Only notes starting at or after this QN position")] = None,
@@ -314,7 +337,7 @@ def delete_midi_notes(
                 pitch=theory.note_to_midi(pitch) if pitch is not None else None)
 
 
-@mcp.tool()
+@tool()
 def add_midi_cc(
     item_id: ItemId,
     events: list[CCEvent],
@@ -327,7 +350,7 @@ def add_midi_cc(
 # ------------------------------------------------------------------- mixing
 
 
-@mcp.tool()
+@tool()
 def add_fx(
     track: TrackRef,
     fx_name: Annotated[str, Field(description="Plugin name, e.g. 'ReaEQ', 'ReaComp', 'Pro-Q 3'")],
@@ -337,7 +360,7 @@ def add_fx(
     return call("add_fx", track=track, name=fx_name, position=position)
 
 
-@mcp.tool()
+@tool()
 def set_fx_parameter(
     track: TrackRef,
     fx: FxRef,
@@ -350,7 +373,7 @@ def set_fx_parameter(
     return call("set_fx_parameter", track=track, fx=fx, parameter=parameter, value=value, display_value=display_value)
 
 
-@mcp.tool()
+@tool()
 def update_fx(
     track: TrackRef,
     fx: FxRef,
@@ -362,13 +385,13 @@ def update_fx(
     return call("update_fx", track=track, fx=fx, enabled=enabled, preset=preset, show=show)
 
 
-@mcp.tool(annotations=DESTRUCTIVE)
+@tool(annotations=DESTRUCTIVE)
 def remove_fx(track: TrackRef, fx: FxRef) -> dict:
     """Removes an FX from a track's chain."""
     return call("remove_fx", track=track, fx=fx)
 
 
-@mcp.tool()
+@tool()
 def set_send(
     source: TrackRef,
     destination: TrackRef,
@@ -386,7 +409,7 @@ def set_send(
 # ----------------------------------------------------------------- analysis
 
 
-@mcp.tool(annotations=READ_ONLY)
+@tool(annotations=READ_ONLY)
 def analyze_audio(
     track: Annotated[str | int, Field(description='"master" for the full mix, or a track to measure on its own (post-FX, post-fader)')] = "master",
     start_bar: Bar = None,

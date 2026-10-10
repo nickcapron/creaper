@@ -1157,22 +1157,25 @@ local function write_file(path, text)
   assert(os.rename(tmp, path))
 end
 
--- Only one bridge may run, or two could both answer a request.
-do
-  local beat = tonumber(reaper.GetExtState("creaper", "heartbeat"))
-  if beat and reaper.time_precise() - beat < 2 then
-    reaper.ShowMessageBox("The creaper bridge is already running.", "creaper", 0)
-    return
-  end
-end
-
 reaper.RecursiveCreateDirectory(BRIDGE_DIR, 0)
-os.remove(REQUEST_PATH)
-os.remove(RESPONSE_PATH)
 math.randomseed(os.time())
 local INSTANCE = string.format("%d%04d", os.time(), math.random(0, 9999))
 local CLAIMED_PATH = REQUEST_PATH .. "." .. INSTANCE
 local last_heartbeat = 0
+
+-- Only one bridge may answer requests. The newest one to start takes over, so
+-- running an updated copy replaces the old one without restarting REAPER; the
+-- old one notices it no longer owns the bridge and exits.
+local function owns_bridge() return reaper.GetExtState("creaper", "owner") == INSTANCE end
+local previous_beat = tonumber(reaper.GetExtState("creaper", "heartbeat"))
+local taking_over = previous_beat and reaper.time_precise() - previous_beat < 2
+reaper.SetExtState("creaper", "owner", INSTANCE, false)
+-- Give a bridge that's still running time to see the handover before we claim requests.
+local claim_after = reaper.time_precise() + (taking_over and 0.5 or 0)
+if not taking_over then
+  os.remove(REQUEST_PATH)
+  os.remove(RESPONSE_PATH)
+end
 
 local _, _, section_id, command_id = reaper.get_action_context()
 if command_id and command_id > 0 then
@@ -1181,6 +1184,7 @@ if command_id and command_id > 0 then
 end
 
 local function tick()
+  if not owns_bridge() then return end -- a newer bridge took over; let this script end
   local now = reaper.time_precise()
   reaper.SetExtState("creaper", "heartbeat", tostring(now), false)
   if now - last_heartbeat >= 1 then
@@ -1201,7 +1205,7 @@ local function tick()
   end
 
   -- Renaming claims the request atomically.
-  if os.rename(REQUEST_PATH, CLAIMED_PATH) then
+  if now >= claim_after and os.rename(REQUEST_PATH, CLAIMED_PATH) then
     local f = io.open(CLAIMED_PATH, "rb")
     local raw = f and f:read("a") or ""
     if f then f:close() end
@@ -1218,8 +1222,11 @@ local function tick()
 end
 
 reaper.atexit(function()
-  os.remove(HEARTBEAT_PATH)
-  reaper.DeleteExtState("creaper", "heartbeat", false)
+  if owns_bridge() then
+    os.remove(HEARTBEAT_PATH)
+    reaper.DeleteExtState("creaper", "heartbeat", false)
+    reaper.DeleteExtState("creaper", "owner", false)
+  end
   if command_id and command_id > 0 then
     reaper.SetToggleCommandState(section_id, command_id, 0)
     reaper.RefreshToolbar2(section_id, command_id)

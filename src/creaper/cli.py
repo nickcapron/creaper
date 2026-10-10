@@ -44,7 +44,7 @@ def install_bridge(resource_dir: Path, autostart: bool) -> None:
         print("  - Restart REAPER, or run the script once now (below) so you don't have to.")
     print("  - In REAPER: Actions > Show action list > New action > Load ReaScript, pick")
     print(f"    {target}")
-    print("    and run it. It keeps running in the background.")
+    print("    and run it. It keeps running in the background; running it again stops it.")
     print("  - Then check the connection with: creaper doctor")
 
 
