@@ -40,6 +40,7 @@ own Claude account; no API key needed.
 | **Edit MIDI** | Quantize (grid, strength, swing), humanize, transpose, snap to a scale, set or ramp velocities, strum chords, legato, and motif development (diatonic transposition, inversion, retrograde, augmentation, harmony lines, sequences, negative harmony); on all notes, a pitch/time range, or what's selected in the MIDI editor |
 | **Automate** | Volume, pan and any plugin parameter: points, ramps (a filter sweep over the build) or LFOs (wobbles, tremolo), in real units; read and clear envelopes |
 | **Edit clips** | Move, trim, split, duplicate, fade, re-pitch, time-stretch and delete audio or MIDI items; import audio files |
+| **Save & deliver** | Save, save as, and snapshot copies; export the mix (or a region or bar range) to WAV/FLAC/MP3/OGG with loudness and true peak checked and no clipping; stems for every track, lined up |
 | **Arrange** | Tempo changes, ramps and time-signature changes over the song; markers and regions |
 | **Samples & loops** | Search your sample folders by name, role, tempo and key, with each result checked by ear; place loops stretched to the project tempo and moved into key; build drum kits from any samples in REAPER's sampler |
 | **Routing** | A map of folders, sends, sidechains and outputs; folders; sends; master-send on/off |
@@ -344,6 +345,7 @@ python -m venv .venv
 - `src/creaper/pluginscan.py`, `scan_tools.py`: testing plugins and the plugin catalog
 - `src/creaper/project_tools.py`: tempo map, program changes and controllers, routing
 - `src/creaper/samplelib.py`, `sample_tools.py`: the sample library, loop tempo/key analysis, sampler kits
+- `src/creaper/export_tools.py`: saving the project, exporting the mix and stems
 - `assets/make_brand.py`: regenerates the logo, banner and thumbnail in `assets/brand/`
 - `src/creaper/drums.py`: saved drum maps
 - `src/creaper/analysis.py`: loudness (ITU-R BS.1770-4 / EBU R128), true peak, spectrum, stereo

@@ -1,6 +1,6 @@
 -- @description creaper bridge: lets Claude work in REAPER through the creaper MCP server
 -- @author nickcapron
--- @version 0.9.0
+-- @version 0.10.0
 -- @link https://github.com/nickcapron/creaper
 -- @provides
 --   [nomain] creaper_json.lua
@@ -13,7 +13,7 @@
 --   Every change it makes is a named undo point ("creaper: ..."), so Ctrl+Z
 --   reverts anything Claude did.
 
-local BRIDGE_VERSION = "0.9.0"
+local BRIDGE_VERSION = "0.10.0"
 local PROTOCOL = 2
 
 ----------------------------------------------------------------------- JSON
@@ -1515,6 +1515,9 @@ local WAV_32_FLOAT = "ZXZhdyAA" -- base64 of the WAV sink config: 'evaw', 32-bit
 -- Renders [start_t, end_t] of a track (stem) or the master to a 32-bit float WAV in
 -- RENDER_DIR, restoring the user's render settings and track selection afterwards.
 local function render_range(t, master, start_t, end_t)
+  local wanted = {}
+  local list = type(t) == "table" and t or { t }
+  for _, tr in ipairs(list) do wanted[tr] = true end
   local saved_strings, saved_numbers, saved_selection = {}, {}, {}
   for _, k in ipairs(RENDER_STRING_KEYS) do
     local _, v = reaper.GetSetProjectInfo_String(0, k, "", false)
@@ -1528,6 +1531,7 @@ local function render_range(t, master, start_t, end_t)
 
   reaper.RecursiveCreateDirectory(RENDER_DIR, 0)
   local name = string.format("render_%d_%04d", os.time(), math.random(0, 9999))
+  if #list > 1 then name = name .. "_$tracknumber" end
   local ok, result = pcall(function()
     reaper.GetSetProjectInfo_String(0, "RENDER_FILE", RENDER_DIR, true)
     reaper.GetSetProjectInfo_String(0, "RENDER_PATTERN", name, true)
@@ -1545,7 +1549,7 @@ local function render_range(t, master, start_t, end_t)
     if master then
       reaper.GetSetProjectInfo(0, "RENDER_SETTINGS", 0, true)
     else
-      for tr in pairs(saved_selection) do reaper.SetTrackSelected(tr, tr == t) end
+      for tr in pairs(saved_selection) do reaper.SetTrackSelected(tr, wanted[tr] or false) end
       reaper.GetSetProjectInfo(0, "RENDER_SETTINGS", 3, true) -- stems (selected tracks) only
     end
     local _, targets = reaper.GetSetProjectInfo_String(0, "RENDER_TARGETS", "", false)
@@ -1574,6 +1578,7 @@ function commands.render_audio(p)
   local start_t = start_qn and qn_to_time(start_qn) or 0
   local end_t = end_qn and qn_to_time(end_qn) or reaper.GetProjectLength(0)
   if end_t <= start_t then fail("nothing to render: the range is empty (is the project empty?)") end
+  end_t = end_t + math.max(0, math.min(30, tonumber(p.tail_seconds) or 0))
   if end_t - start_t > 1800 then fail("renders are limited to 30 minutes; pick a shorter range") end
 
   local files = render_range(t, master, start_t, end_t)
@@ -1600,6 +1605,54 @@ function commands.render_audio(p)
       .. "may be missing their audio: " .. table.concat(realtime, ", ")
       .. ". To measure them, record or render their output to an audio track first.") or nil,
   }
+end
+
+--------------------------------------------------------- stems and saving
+
+-- Renders each track's own output (post-fader, without the master's effects) in one pass.
+function commands.render_stems(p)
+  local tracks = {}
+  for _, ref in ipairs(p.tracks or {}) do tracks[#tracks + 1] = get_track(ref) end
+  if #tracks == 0 then fail("no tracks to render") end
+  local start_qn, end_qn = resolve_qn(p, "start"), resolve_qn(p, "end")
+  local start_t = start_qn and qn_to_time(start_qn) or 0
+  local end_t = (end_qn and qn_to_time(end_qn) or reaper.GetProjectLength(0))
+    + math.max(0, math.min(30, tonumber(p.tail_seconds) or 0))
+  if end_t <= start_t then fail("nothing to render: the range is empty") end
+  local files = render_range(tracks, false, start_t, end_t)
+  local by_track = {}
+  for _, tr in ipairs(tracks) do
+    local number = int(reaper.GetMediaTrackInfo_Value(tr, "IP_TRACKNUMBER"))
+    for _, f in ipairs(files) do
+      local tail = f:match("_(%d+)%.[%w]+$")
+      if tail and int(tonumber(tail)) == number then by_track[#by_track + 1] = { track = track_ref(tr), file = f } end
+    end
+  end
+  return { stems = by_track, files = files, start = time_to_pos(start_t), ["end"] = time_to_pos(end_t) }
+end
+
+function commands.save_project(p)
+  local proj, current = reaper.EnumProjects(-1)
+  if p.mode == "save" then
+    if current == "" then fail("the project has no file yet: give a name to save it as") end
+    reaper.Main_OnCommand(40026, 0) -- File: Save project
+  elseif p.mode == "copy" then
+    reaper.Main_SaveProjectEx(proj, p.path, 0)
+    if not reaper.file_exists(p.path) then fail("REAPER couldn't write " .. p.path) end
+  else -- save as: write the file, then open it in this tab so the project is attached to it
+    reaper.Main_SaveProjectEx(proj, p.path, 0)
+    if not reaper.file_exists(p.path) then fail("REAPER couldn't write " .. p.path) end
+    reaper.Main_openProject("noprompt:" .. p.path)
+  end
+  local _, now = reaper.EnumProjects(-1)
+  return { path = now ~= "" and now or nil, written = p.path or now, dirty = reaper.IsProjectDirty(0) == 1,
+           project = reaper.GetProjectName(0, "") }
+end
+
+function commands.project_paths()
+  local _, current = reaper.EnumProjects(-1)
+  return { project = current ~= "" and current or nil, default_folder = reaper.GetProjectPath(""),
+           name = reaper.GetProjectName(0, "") }
 end
 
 ------------------------------------------------------------- tempo map
