@@ -85,8 +85,9 @@ def test_needs_something():
 
 def test_find_styles_by_name_and_alias():
     assert styles.find_style("DnB").name == "drum and bass"
-    assert styles.find_style("90s r&b").name == "r&b"
-    with pytest.raises(ValueError, match="Known"):
+    assert styles.find_style("90s r&b").name == "90s r&b"
+    assert styles.find_style("rnb").name == "r&b"
+    with pytest.raises(ValueError, match="no genre profile"):
         styles.find_style("sea shanty")
     for s in styles.STYLES:
         assert s.lufs[0] < s.lufs[1] and s.lra[0] < s.lra[1]

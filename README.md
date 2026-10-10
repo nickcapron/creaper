@@ -1,5 +1,7 @@
 # creaper
 
+![creaper: an AI producer that lives inside REAPER](assets/brand/creaper-banner.svg)
+
 **Let Claude compose, mix and analyze in [REAPER](https://www.reaper.fm).**
 
 creaper connects Claude to your open REAPER project. You ask in plain language;
@@ -8,6 +10,10 @@ the actual audio before giving mix feedback.
 
 > "Make an 8-bar lo-fi progression in D minor on a new Keys track, with a swung drum
 > beat underneath."
+>
+> "Sketch a bossa nova in F: guitar comping, walking-ish bass, a melody I can sing."
+>
+> "Reharmonize my chorus with tritone subs and tell me what each change does."
 >
 > "The chorus feels muddy. Measure the mix from bar 33 to 49 and tell me why."
 >
@@ -27,20 +33,48 @@ own Claude account; no API key needed.
 | Area | Tools |
 | --- | --- |
 | **Read the project** | Overview (tempo, time signature, markers, regions, tracks, selection), track details (items, FX, sends), FX parameters, installed plugins |
-| **Compose** | Create tracks with instruments, MIDI items, notes, chord progressions from symbols (`Am7`, `Cmaj7/E`, `F#m7b5`) with voice leading, step-sequenced drums with swing and humanize, sustain/mod/expression/pitch bend, tempo and time signature, markers and regions |
+| **Compose** | Create tracks with instruments, MIDI items and notes; chord parts from symbols (`Am7`, `Cmaj7/E`) or Roman numerals (`ii7-V7/V-bVII`) in 11 voicings and 20 comping rhythms; basslines in 18 styles; motif-based melodies; genre drum grooves; a whole genre sketch in one call; sustain/mod/expression/pitch bend, tempo, markers and regions |
+| **Music theory** | Scales and modes spelled correctly, chord naming, Roman-numeral and harmony analysis (of symbols or your MIDI), key detection, cadences, progression suggestions, reharmonization, four-part voice leading and a rule checker, modulation routes, rhythms (clave, Euclidean, polyrhythms) |
 | **Plugins** | Browse installed plugins by kind, category and developer; load instruments and effects by loose name; read and set parameters by value or by label, several at once; list and load presets; split multi-output instruments onto tracks |
 | **Sound library** | Save any plugin's current sound with a name and tags, browse, and recall it on any track in any project |
-| **Edit MIDI** | Quantize (grid, strength, swing), humanize, transpose, snap to a scale, set or ramp velocities, strum chords, legato; on all notes, a pitch/time range, or what's selected in the MIDI editor |
+| **Edit MIDI** | Quantize (grid, strength, swing), humanize, transpose, snap to a scale, set or ramp velocities, strum chords, legato, and motif development (diatonic transposition, inversion, retrograde, augmentation, harmony lines, sequences, negative harmony); on all notes, a pitch/time range, or what's selected in the MIDI editor |
 | **Automate** | Volume, pan and any plugin parameter: points, ramps (a filter sweep over the build) or LFOs (wobbles, tremolo), in real units; read and clear envelopes |
 | **Edit clips** | Move, trim, split, duplicate, fade, re-pitch, time-stretch and delete audio or MIDI items; import audio files |
 | **Mix** | Add, remove, bypass FX; volume, pan, mute, solo, color; sends; and one-call jobs: side-chain ducking (calibrated to a depth), submix buses, parallel compression, a starting vocal chain, mastering to a loudness target |
-| **Styles** | Genre profiles (typical loudness, dynamics, low end, tone, width, tempo) and a check of your mix against one |
+| **Genres** | 264 genre profiles, from house and drill to bebop, flamenco, amapiano and Baroque: how each is composed, played, arranged and mixed, and a check of your mix against one |
 | **Remember** | Notes Claude keeps between sessions: your taste, plugin quirks, mix lessons |
 | **Analyze** | Render the mix or one track and measure integrated/short-term loudness (LUFS), loudness range, true peak, clipping, crest factor, stereo correlation (including the low end), and frequency balance by band and octave, with a loudness timeline in bars |
 | **Control** | Play a range of bars, stop, move the cursor, undo, run any REAPER action |
 
-In Claude Desktop and Claude Code, creaper also adds four commands: **Critique the mix**,
-**Mix the song**, **Master the song** and **Design a sound**.
+In Claude Desktop and Claude Code, creaper also adds five commands: **Compose in a genre**,
+**Critique the mix**, **Mix the song**, **Master the song** and **Design a sound**.
+
+## Music theory and genres
+
+creaper gives Claude a composer's toolkit, so it works from theory instead of guessing:
+
+- **Keys and spelling.** About 60 scales and modes (church modes, melodic and harmonic
+  minor modes, bebop, pentatonic and symmetric scales, and 12-tone versions of maqam,
+  raga and Japanese scales), with notes spelled as a musician writes them: E# in F#
+  major, Bbb in a C dim7.
+- **Analysis.** Roman numerals with inversions, secondary dominants, borrowed chords,
+  tritone substitutes, the Neapolitan and augmented sixths; cadences; key detection;
+  famous progressions recognised by name. `analyze_harmony` reads a MIDI item in your
+  project and explains it, including a melody's passing tones, suspensions and
+  appoggiaturas.
+- **Writing.** Progressions by genre or mood (a library of about 50 named ones plus
+  new ones from functional harmony), 15 reharmonization techniques, voicings from close
+  position to rootless and quartal, four-part writing that follows the common-practice
+  voice-leading rules, basslines (walking, 808, tumbao, one-drop...), comping (stabs,
+  skank, bossa, montuno, strum, arpeggios...), and melodies built from a motif developed
+  over phrases.
+- **264 genres in 20 families.** Each profile has the style's era and touchstones,
+  tempo, feel and swing, modes, typical progressions and harmonic rhythm, voicing,
+  comping, bass and melody habits, a drum groove, song form with bar counts,
+  instruments, sound design, production habits and mix targets. `sketch_song` turns a
+  profile into drums, bass, chords and melody on new tracks in one call.
+
+These are rules of thumb drawn from the records that define each style, not laws.
 
 ## Works with your plugins
 
@@ -286,7 +320,12 @@ python -m venv .venv
 - `src/creaper/chat.py`: runs one panel turn on Claude Code, limited to creaper's tools
 - `src/creaper/server.py`: the MCP tools
 - `src/creaper/bridge.py`: the file-based client
-- `src/creaper/theory.py`: note names, chord symbols, voice leading, drum patterns and drum-name matching
+- `src/creaper/theory.py`: note names, chord symbols, drum patterns and MIDI edits
+- `src/creaper/scales.py`, `harmony.py`: scales and modes, spelling, Roman numerals, chord naming, key detection, cadences, modulation
+- `src/creaper/composer.py`: progressions, reharmonization, voicings and voice leading, bass, comping, melody, rhythm, MIDI harmony analysis
+- `src/creaper/genres/`: the genre library, one module per family (`genres/__init__.py` has the schema and validator)
+- `src/creaper/music_tools.py`: the theory, genre and composition tools
+- `assets/make_brand.py`: regenerates the logo, banner and thumbnail in `assets/brand/`
 - `src/creaper/drums.py`: saved drum maps
 - `src/creaper/analysis.py`: loudness (ITU-R BS.1770-4 / EBU R128), true peak, spectrum, stereo
 

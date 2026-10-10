@@ -12,6 +12,8 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from . import scales as scales_db
+
 NOTE_NAMES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
 _LETTERS = {"C": 0, "D": 2, "E": 4, "F": 5, "G": 7, "A": 9, "B": 11}
 _NOTE_RE = re.compile(r"^([A-Ga-g])([#b♯♭]*)(-?\d+)$")
@@ -72,6 +74,35 @@ CHORD_QUALITIES: dict[str, tuple[int, ...]] = {
     "maj7#11": (0, 4, 7, 11, 18),
     "11": (0, 4, 7, 10, 14, 17), "m11": (0, 3, 7, 10, 14, 17),
     "13": (0, 4, 7, 10, 14, 21), "maj13": (0, 4, 7, 11, 14, 21), "m13": (0, 3, 7, 10, 14, 21),
+    # Extended, altered and colour chords.
+    "add2": (0, 2, 4, 7), "madd2": (0, 2, 3, 7), "m(add9)": (0, 3, 7, 14), "add4": (0, 4, 5, 7),
+    "madd11": (0, 3, 7, 17), "m(add11)": (0, 3, 7, 17), "add#11": (0, 4, 7, 18), "add13": (0, 4, 7, 21),
+    "sus2sus4": (0, 2, 5, 7), "sus24": (0, 2, 5, 7), "6sus4": (0, 5, 7, 9), "6sus2": (0, 2, 7, 9),
+    "m6/9": (0, 3, 7, 9, 14), "m69": (0, 3, 7, 9, 14), "6/9#11": (0, 4, 7, 9, 14, 18),
+    "maj7#5": (0, 4, 8, 11), "maj7+5": (0, 4, 8, 11), "+maj7": (0, 4, 8, 11), "augmaj7": (0, 4, 8, 11),
+    "maj7b5": (0, 4, 6, 11), "maj7sus2": (0, 2, 7, 11), "maj7sus4": (0, 5, 7, 11),
+    "maj9#11": (0, 4, 7, 11, 14, 18), "maj13#11": (0, 4, 7, 11, 14, 18, 21), "maj7#9": (0, 4, 7, 11, 15),
+    "m(maj9)": (0, 3, 7, 11, 14), "mmaj9": (0, 3, 7, 11, 14), "mM9": (0, 3, 7, 11, 14),
+    "m7b9": (0, 3, 7, 10, 13), "m7#5": (0, 3, 8, 10), "m7b13": (0, 3, 7, 10, 20),
+    "m9b5": (0, 3, 6, 10, 14), "ø9": (0, 3, 6, 10, 14), "m11b5": (0, 3, 6, 10, 14, 17), "ø11": (0, 3, 6, 10, 14, 17),
+    "dim(maj7)": (0, 3, 6, 11), "dimmaj7": (0, 3, 6, 11), "°maj7": (0, 3, 6, 11), "dim9": (0, 3, 6, 9, 14),
+    "9sus4": (0, 5, 7, 10, 14), "9sus": (0, 5, 7, 10, 14), "13sus4": (0, 5, 7, 10, 14, 21), "13sus": (0, 5, 7, 10, 14, 21),
+    "7sus4b9": (0, 5, 7, 10, 13), "7susb9": (0, 5, 7, 10, 13), "sus4b9": (0, 5, 7, 13),
+    "7b13": (0, 4, 7, 10, 20), "7#5b9": (0, 4, 8, 10, 13), "7#5#9": (0, 4, 8, 10, 15), "7b5b9": (0, 4, 6, 10, 13),
+    "7b5#9": (0, 4, 6, 10, 15), "7b9#11": (0, 4, 7, 10, 13, 18), "7#9#11": (0, 4, 7, 10, 15, 18),
+    "7b9b13": (0, 4, 7, 10, 13, 20), "7#9b13": (0, 4, 7, 10, 15, 20), "7b9#9": (0, 4, 7, 10, 13, 15),
+    "7alt": (0, 4, 10, 13, 15, 18, 20), "alt": (0, 4, 10, 13, 15, 18, 20),
+    "9#11": (0, 4, 7, 10, 14, 18), "9b5": (0, 4, 6, 10, 14), "9#5": (0, 4, 8, 10, 14), "aug9": (0, 4, 8, 10, 14),
+    "9b13": (0, 4, 7, 10, 14, 20), "13#11": (0, 4, 7, 10, 14, 18, 21), "13b9": (0, 4, 7, 10, 13, 21),
+    "13#9": (0, 4, 7, 10, 15, 21), "7add13": (0, 4, 7, 10, 21), "7/6": (0, 4, 7, 9, 10),
+    "11b9": (0, 4, 7, 10, 13, 17), "m13b5": (0, 3, 6, 10, 14, 17, 21),
+    "m7add11": (0, 3, 7, 10, 17), "m7(add11)": (0, 3, 7, 10, 17), "m(add2)": (0, 2, 3, 7),
+    "5add9": (0, 7, 14), "no3": (0, 7), "(no3)": (0, 7), "7no3": (0, 7, 10), "7(no3)": (0, 7, 10),
+    "7no5": (0, 4, 10), "maj7no5": (0, 4, 11), "m7no5": (0, 3, 10),
+    "quartal": (0, 5, 10), "q": (0, 5, 10), "quartal4": (0, 5, 10, 15), "so what": (0, 5, 10, 15, 19),
+    "+add9": (0, 4, 8, 14), "aug(add9)": (0, 4, 8, 14), "b5": (0, 4, 6), "dim(add9)": (0, 3, 6, 14),
+    "add6": (0, 4, 7, 9), "madd6": (0, 3, 7, 9),
+    "1": (0,), "octave": (0, 12),
 }
 
 
@@ -81,6 +112,25 @@ class Chord:
     root: int  # pitch class 0-11
     intervals: tuple[int, ...]
     bass: int | None  # pitch class of a slash bass note
+
+
+def lookup_quality(text: str) -> tuple[int, ...] | None:
+    """Chord-quality text -> intervals, tolerating common spellings: Maj7, mi7,
+    min(maj7), 7(b9), (add9), -7b5, 7+, ^7."""
+    candidates = [text]
+    t = text.replace("Maj", "maj").replace("MA", "maj").replace("^", "maj").replace("♭", "b").replace("♯", "#")
+    t = re.sub(r"^mi(?!n)", "m", t)
+    t = re.sub(r"^min", "m", t)
+    t = re.sub(r"^-", "m", t)
+    candidates.append(t)
+    no_parens = t.replace("(", "").replace(")", "").replace(",", "")
+    candidates += [no_parens, no_parens.replace("+", "#"), no_parens.replace("#5", "+5")]
+    if t.endswith("+") and t[:-1] in ("7", "9"):
+        candidates.append(t[:-1] + "#5")
+    for c in candidates:
+        if c in CHORD_QUALITIES:
+            return CHORD_QUALITIES[c]
+    return None
 
 
 def parse_chord(symbol: str) -> Chord:
@@ -97,7 +147,7 @@ def parse_chord(symbol: str) -> Chord:
         if bm:
             bass = (_LETTERS[bm.group(1)] + _accidental(bm.group(2))) % 12
             rest = head
-    intervals = CHORD_QUALITIES.get(rest) or CHORD_QUALITIES.get(rest.replace("Maj", "maj"))
+    intervals = lookup_quality(rest)
     if intervals is None:
         known = ", ".join(sorted(q for q in CHORD_QUALITIES if q))
         raise ValueError(f"unknown chord quality '{rest}' in '{symbol}'. Known qualities: {known}")
@@ -164,6 +214,10 @@ GM_DRUMS: dict[str, int] = {
     "high timbale": 65, "low timbale": 66, "high agogo": 67, "low agogo": 68,
     "cabasa": 69, "shaker": 70, "maracas": 70, "claves": 75,
     "high woodblock": 76, "woodblock": 76, "low woodblock": 77, "mute triangle": 80, "triangle": 81,
+    "tom": 47, "bongo": 60, "conga": 63, "open conga": 63, "slap conga": 62, "timbale": 65, "agogo": 67,
+    "guiro": 73, "short guiro": 73, "long guiro": 74, "whistle": 72, "short whistle": 71, "long whistle": 72,
+    "cuica": 79, "open cuica": 79, "mute cuica": 78, "castanets": 85, "jingle bell": 83, "bell tree": 84,
+    "sticks": 31, "metronome click": 33, "high q": 27, "slap": 28, "snare roll": 38,
 }
 
 
@@ -359,15 +413,7 @@ def drum_pattern_notes(
 # Notes are dicts like get_midi_notes returns: pitch, start, length (QN from the
 # item start), velocity, channel, and optionally selected/muted.
 
-SCALES: dict[str, tuple[int, ...]] = {
-    "major": (0, 2, 4, 5, 7, 9, 11), "ionian": (0, 2, 4, 5, 7, 9, 11),
-    "minor": (0, 2, 3, 5, 7, 8, 10), "aeolian": (0, 2, 3, 5, 7, 8, 10), "natural minor": (0, 2, 3, 5, 7, 8, 10),
-    "harmonic minor": (0, 2, 3, 5, 7, 8, 11), "melodic minor": (0, 2, 3, 5, 7, 9, 11),
-    "dorian": (0, 2, 3, 5, 7, 9, 10), "phrygian": (0, 1, 3, 5, 7, 8, 10), "lydian": (0, 2, 4, 6, 7, 9, 11),
-    "mixolydian": (0, 2, 4, 5, 7, 9, 10), "locrian": (0, 1, 3, 5, 6, 8, 10),
-    "major pentatonic": (0, 2, 4, 7, 9), "minor pentatonic": (0, 3, 5, 7, 10),
-    "blues": (0, 3, 5, 6, 7, 10), "chromatic": tuple(range(12)),
-}
+SCALES: dict[str, tuple[int, ...]] = scales_db.all_intervals()
 
 
 def scale_pitch_classes(key: str, scale: str) -> set[int]:
@@ -375,10 +421,7 @@ def scale_pitch_classes(key: str, scale: str) -> set[int]:
     if not m:
         raise ValueError(f"can't read the key '{key}' (use a note name like A, F#, Bb)")
     root = (_LETTERS[m.group(1)] + _accidental(m.group(2))) % 12
-    intervals = SCALES.get(scale.strip().lower())
-    if intervals is None:
-        raise ValueError(f"unknown scale '{scale}'. Known: {', '.join(sorted(SCALES))}")
-    return {(root + i) % 12 for i in intervals}
+    return {(root + i) % 12 for i in scales_db.find_scale(scale).intervals}
 
 
 def _clamp_pitch(p: int) -> int:

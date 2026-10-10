@@ -65,7 +65,11 @@ def describe_tool(name: str, args: dict[str, Any]) -> str:
     if "notes" in args:
         parts.append(f"{len(args['notes'])} notes")
     if "chords" in args:
-        parts.append(" ".join(c.get("chord", "?") for c in args["chords"])[:40])
+        chords = args["chords"]
+        if isinstance(chords, str):
+            parts.append(chords[:40])
+        else:
+            parts.append(" ".join(c.get("chord", "?") if isinstance(c, dict) else str(c) for c in chords)[:40])
     text = f"{short}({', '.join(parts)})"
     return text if len(text) <= 90 else text[:87] + "..."
 

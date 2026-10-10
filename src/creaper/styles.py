@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from . import genres
+
 
 @dataclass(frozen=True)
 class Style:
@@ -29,82 +31,20 @@ class Style:
     elements: tuple[str, ...] = field(default=())
 
 
-STYLES: tuple[Style, ...] = (
-    Style("pop", ("mainstream", "top 40"), (-10, -7), (4, 7), "moderate", "bright", "wide", (90, 130),
-          "Vocal on top and upfront; punchy but controlled drums; polished, bright top end.",
-          elements=("lead vocal", "drums", "bass", "keys/synths")),
-    Style("hip-hop", ("hip hop", "rap", "boom bap"), (-10, -7), (4, 7), "heavy", "warm", "moderate", (80, 100),
-          "Kick and bass carry the track; vocal clear and dry-ish; sampled textures fine to be a bit lo-fi.",
-          elements=("drums", "808/bass", "samples", "vocal")),
-    Style("trap", ("drill",), (-9, -6), (3, 6), "very heavy", "bright", "moderate", (130, 160),
-          "Long 808s with mono sub; crisp rolling hats; sparse, loud, heavily compressed.",
-          elements=("808", "hi-hats", "snare/clap", "vocal")),
-    Style("house", ("deep house", "dance"), (-9, -7), (3, 6), "heavy", "neutral", "wide", (118, 128),
-          "Four-on-the-floor kick and bass locked together; side-chain pumping common; mono low end.",
-          elements=("kick", "bass", "hats/percussion", "chords")),
-    Style("techno", (), (-9, -7), (3, 6), "heavy", "dark", "wide", (125, 140),
-          "Kick dominates; hypnotic, repetitive; dark, driving low mids; wide atmospherics.",
-          elements=("kick", "rumble/bass", "percussion", "textures")),
-    Style("edm", ("electro", "big room", "future bass"), (-8, -5), (3, 6), "heavy", "bright", "wide", (124, 150),
-          "Very loud and dense; huge drops; aggressive limiting and side-chain.",
-          elements=("kick", "bass", "lead", "fx")),
-    Style("drum and bass", ("dnb", "jungle", "liquid"), (-8, -6), (3, 7), "very heavy", "bright", "wide", (165, 178),
-          "Fast breakbeats; deep sub-bass under midrange bass; snare cuts through.",
-          elements=("breaks", "sub", "reese/mid bass", "pads")),
-    Style("dubstep", ("bass music", "riddim"), (-7, -5), (3, 6), "very heavy", "bright", "wide", (138, 150),
-          "Half-time drums; heavy, aggressive mid bass over a mono sub; very loud.",
-          elements=("kick/snare", "sub", "mid bass", "fx")),
-    Style("lo-fi", ("lofi", "lofi hip hop", "chillhop"), (-14, -10), (4, 8), "moderate", "dark", "moderate", (70, 90),
-          "Soft, dusty, rolled-off highs; relaxed drums; vinyl or tape character; quiet compared with pop.",
-          elements=("dusty drums", "keys", "bass", "texture")),
-    Style("rock", ("alt rock", "classic rock"), (-10, -8), (4, 8), "moderate", "neutral", "wide", (100, 140),
-          "Guitars wide, drums punchy, bass supports the kick; vocal sits in the band.",
-          elements=("drums", "bass", "guitars", "vocal")),
-    Style("metal", ("heavy metal", "metalcore"), (-9, -6), (3, 6), "heavy", "bright", "wide", (100, 200),
-          "Dense, saturated guitars; tight low end; clicky kick; aggressive limiting.",
-          elements=("drums", "rhythm guitars", "bass", "vocal")),
-    Style("indie", ("indie rock", "indie pop", "alternative"), (-12, -9), (5, 9), "moderate", "warm", "wide", (90, 140),
-          "More dynamic and less polished than pop; character over perfection.",
-          elements=("drums", "guitars/synths", "bass", "vocal")),
-    Style("r&b", ("rnb", "soul", "neo soul", "90s r&b"), (-11, -8), (4, 8), "heavy", "warm", "moderate", (65, 100),
-          "Smooth, warm low end; lush vocals and harmonies; soft, swung drums.",
-          elements=("vocal", "keys", "bass", "drums")),
-    Style("synthwave", ("retrowave", "80s", "outrun"), (-11, -8), (4, 7), "moderate", "bright", "wide", (80, 118),
-          "Gated-reverb snares, analog-style pads and arps, wide chorus; nostalgic and glossy.",
-          elements=("drums", "bass arp", "pads", "lead")),
-    Style("trip-hop", ("downtempo",), (-12, -9), (5, 9), "heavy", "dark", "wide", (70, 100),
-          "Slow, moody breakbeats; deep bass; cinematic, smoky textures.",
-          elements=("breaks", "bass", "atmospheres", "vocal")),
-    Style("jazz", ("jazz trio", "big band"), (-18, -12), (8, 15), "light", "warm", "wide", (60, 220),
-          "Natural dynamics, little limiting; real room sound; instruments balanced as if live.",
-          elements=("piano", "bass", "drums", "horns")),
-    Style("acoustic", ("folk", "singer-songwriter", "country"), (-16, -11), (6, 12), "light", "warm", "moderate", (70, 130),
-          "Natural, intimate; vocal and acoustic instruments close and clear; gentle compression.",
-          elements=("vocal", "acoustic guitar", "light percussion")),
-    Style("cinematic", ("film score", "trailer", "orchestral"), (-18, -12), (8, 18), "moderate", "neutral", "wide", (60, 140),
-          "Big dynamic arcs from quiet to huge; wide, deep reverbs; space for impacts.",
-          elements=("strings", "brass", "percussion", "synths")),
-    Style("classical", ("orchestra", "chamber"), (-24, -16), (10, 20), "light", "neutral", "wide", (40, 180),
-          "Preserve dynamics; no obvious compression or limiting; realistic hall sound.",
-          elements=("ensemble",)),
-    Style("ambient", ("drone", "new age"), (-20, -14), (6, 14), "moderate", "dark", "wide", (50, 100),
-          "Slow-evolving textures; soft transients; space and depth over punch.",
-          elements=("pads", "textures", "drones")),
-)
+def _from_genre(g) -> Style:
+    m = g.mix
+    return Style(g.name, tuple(g.aliases), m.lufs, m.lra, m.low_end, m.tone, m.width, g.tempo,
+                 g.production, m.true_peak, tuple(g.instruments))
+
+
+STYLES: tuple[Style, ...] = tuple(_from_genre(g) for g in genres.GENRES)
 
 STREAMING_TARGETS = {"spotify": -14, "youtube": -14, "apple music": -16, "tidal": -14, "amazon music": -14,
                      "soundcloud": -14, "club": -7}
 
 
 def find_style(name: str) -> Style:
-    wanted = name.strip().lower()
-    for style in STYLES:
-        if wanted == style.name or wanted in style.aliases:
-            return style
-    for style in STYLES:
-        if wanted in style.name or any(wanted in a for a in style.aliases):
-            return style
-    raise ValueError(f"no style profile for '{name}'. Known: {', '.join(s.name for s in STYLES)}")
+    return _from_genre(genres.find(name))
 
 
 def describe(style: Style) -> dict:
