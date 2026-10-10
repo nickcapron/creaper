@@ -74,8 +74,13 @@ def features(x: np.ndarray, fs: float, note_off: float | None = None) -> dict:
     env = np.sqrt(np.mean(np.square(x[: frames * hop]).reshape(frames, hop), axis=1)) + 1e-12
     p = int(np.argmax(env))
     env_db = 20 * np.log10(env / env[p])
+    # How late the sound starts after the note-on (silence at the start of a sample,
+    # or unreported plugin latency), then the attack measured from there.
+    start_frames = np.where(env_db >= -40)[0]
+    start = int(start_frames[0]) if start_frames.size else 0
+    out["starts_late_ms"] = round(start * hop / fs * 1000, 1)
     reach = np.where(env_db >= -3)[0]
-    out["attack_ms"] = round((reach[0] if reach.size else p) * hop / fs * 1000, 1)
+    out["attack_ms"] = round(((reach[0] if reach.size else p) - start) * hop / fs * 1000, 1)
     held_end = int(note_off * fs / hop) if note_off is not None else frames
     below = np.where(env_db[p:held_end] < -30)[0] if held_end > p else np.array([])
     if below.size:

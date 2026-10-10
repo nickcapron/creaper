@@ -806,6 +806,24 @@ def _listen(track: str | int, pitches: list[int], channel: int | list[int], note
     return results, context
 
 
+LATE_MS = 8.0
+
+
+def _late_warning(results: list[dict]) -> str | None:
+    """A note about sounds that start noticeably after their note-on."""
+    late = [r for r in results if not r.get("silent") and r.get("starts_late_ms", 0) >= LATE_MS]
+    if not late:
+        return None
+    worst = max(late, key=lambda r: r["starts_late_ms"])
+    where = f"ch {worst['channel']}" if len(results) == 16 and len({r.get("channel") for r in results}) > 1 else worst["note"]
+    spread = {round(r["starts_late_ms"]) for r in late}
+    kind = ("the plugin seems to add latency it doesn't report to REAPER" if len(late) == len(results) and max(spread) - min(spread) < 3
+            else "those samples probably have silence at the start")
+    return (f"{len(late)} sound(s) start late after the note (worst: {worst['starts_late_ms']:.0f} ms on {where}), so "
+            f"they'll sound behind the beat: {kind}. Fix it at the source (trim the sample start in the "
+            "instrument), or as a stopgap move those notes earlier by that much.")
+
+
 def _short_name(fx: str | None) -> str | None:
     import re
 
@@ -887,9 +905,13 @@ def map_drum_kit(
                   "sound": r["kind"], "confidence": r["confidence"],
                   "decay_s": r["decay_s"], "brightness_hz": r["centroid_hz"],
                   **({"pitch_hz": r["pitch_hz"]} if r.get("pitch_hz") else {}),
+                  **({"starts_late_ms": r["starts_late_ms"]} if r.get("starts_late_ms", 0) >= LATE_MS else {}),
                   **({"plugin_calls_it": names[r["pitch"]]} if r["pitch"] in names and not per_channel else {})}
                  for r in sounding],
     }
+    late = _late_warning(sounding)
+    if late:
+        out["timing"] = late
     out["drum_map"] = ({lane: f"{theory.midi_to_note(lo)} ch {ch}" for lane, ch in lanes.items()} if per_channel
                        else {lane: theory.midi_to_note(p) for lane, p in lanes.items()})
     if follows and len(sounding) > 24:
@@ -936,6 +958,8 @@ def audition_instrument(
     per_note = []
     for r in results:
         entry: dict = {"note": r["note"], "level_db": r["peak_db"]}
+        if r.get("starts_late_ms", 0) >= LATE_MS:
+            entry["starts_late_ms"] = r["starts_late_ms"]
         if r.get("silent"):
             entry["silent"] = True
         else:
@@ -944,4 +968,8 @@ def audition_instrument(
             if r.get("pitch_hz"):
                 entry["sounds_as"] = theory.midi_to_note(round(69 + 12 * math.log2(r["pitch_hz"] / 440)))
         per_note.append(entry)
-    return {"instrument": instrument, "summary": listen.describe_patch(results), "notes": per_note}
+    out = {"instrument": instrument, "summary": listen.describe_patch(results), "notes": per_note}
+    late = _late_warning(results)
+    if late:
+        out["timing"] = late
+    return out

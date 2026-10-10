@@ -63,3 +63,13 @@ def test_map_kit_on_synthesized_kits():
                 assert lanes[lane] == truth[lane], (gm, lane, lanes)
             if gm:
                 assert listen.follows_gm(lanes)
+
+
+def test_late_start_is_measured_not_mistaken_for_attack():
+    import numpy as np
+
+    hat = d.closed_hat()
+    late = np.concatenate([np.zeros(int(0.3 * d.FS)), hat])[: len(hat)]
+    f = listen.features(late, d.FS)
+    assert 295 <= f["starts_late_ms"] <= 305 and f["attack_ms"] < 5
+    assert listen.features(hat, d.FS)["starts_late_ms"] < 2
