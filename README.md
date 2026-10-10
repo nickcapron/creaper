@@ -118,6 +118,29 @@ claude mcp add creaper -- python -m creaper
 
 Then ask Claude something like "What's in my REAPER project?"
 
+## Chat inside REAPER
+
+Prefer not to switch windows? creaper includes a chat panel you can dock inside REAPER,
+like the mixer. It runs on your own **Claude Code** (so your Claude plan, no API key),
+and that Claude can only use the creaper tools: it can work in your REAPER project
+and nothing else on your computer.
+
+**You need:** [Claude Code](https://claude.com/claude-code), signed in once (run
+`claude` in a terminal), and the free **ReaImGui** extension: install
+[ReaPack](https://reapack.com), then in REAPER *Extensions → ReaPack → Browse packages*,
+search for **ReaImGui**, install it and restart REAPER.
+
+**Then:**
+
+1. Run `creaper install-bridge` again, so the panel knows where Python and Claude Code are.
+2. In REAPER, open the action list and run **Script: creaper_chat.lua**. Put it on a
+   toolbar or give it a shortcut if you like.
+3. Click **Dock** to dock it. Type a message and press Enter (Ctrl+Enter adds a line).
+
+The panel shows what Claude is doing as it works (each tool it runs) and how much of
+your plan's 5-hour limit you've used. **Stop** interrupts a turn, and **New chat**
+starts over. Conversations continue across REAPER restarts.
+
 ## Conventions Claude uses
 
 - Tracks are named by number (1 = top), by name, or `master`.
@@ -166,6 +189,8 @@ them afterwards. The server measures the file in Python, then deletes it.
 | "REAPER didn't answer within N seconds" | Close any open dialog in REAPER; modal windows can pause scripts. |
 | A plugin parameter won't take a `display_value` | It may show text instead; use `display_text`, or the raw 0–1 `value`. |
 | Drums land on the wrong sounds | The kit doesn't follow General MIDI or report note names. Tell Claude which note each drum is on; it saves a drum map for that instrument. |
+| The chat panel says it needs ReaImGui | Install ReaImGui through ReaPack (see *Chat inside REAPER*) and restart REAPER. |
+| The chat panel says Claude Code wasn't found | Install Claude Code, run `claude` once to sign in, then `creaper install-bridge` again. |
 | An analysis of a hardware/Overbridge track is silent | Real-time-only plugins can't render offline. Record their output to an audio track first. |
 
 ## Development
@@ -178,7 +203,9 @@ python -m venv .venv
 .venv/bin/pytest
 ```
 
-- `src/creaper/reaper/creaper_bridge.lua`: the REAPER side, a single dependency-free file
+- `src/creaper/reaper/creaper_bridge.lua`: the REAPER side (plus `creaper_json.lua`)
+- `src/creaper/reaper/creaper_chat.lua`: the dockable chat panel (ReaImGui)
+- `src/creaper/chat.py`: runs one panel turn on Claude Code, limited to creaper's tools
 - `src/creaper/server.py`: the MCP tools
 - `src/creaper/bridge.py`: the file-based client
 - `src/creaper/theory.py`: note names, chord symbols, voice leading, drum patterns and drum-name matching
