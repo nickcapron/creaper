@@ -1,6 +1,6 @@
 -- @description creaper bridge: lets Claude work in REAPER through the creaper MCP server
 -- @author nickcapron
--- @version 0.8.0
+-- @version 0.9.0
 -- @link https://github.com/nickcapron/creaper
 -- @provides
 --   [nomain] creaper_json.lua
@@ -13,7 +13,7 @@
 --   Every change it makes is a named undo point ("creaper: ..."), so Ctrl+Z
 --   reverts anything Claude did.
 
-local BRIDGE_VERSION = "0.8.0"
+local BRIDGE_VERSION = "0.9.0"
 local PROTOCOL = 2
 
 ----------------------------------------------------------------------- JSON
@@ -1166,6 +1166,7 @@ function commands.set_track_properties(p)
     if p.solo ~= nil then reaper.SetMediaTrackInfo_Value(t, "I_SOLO", p.solo and 2 or 0) end
     if p.color then set_color(t, p.color) end
     if p.selected ~= nil then reaper.SetTrackSelected(t, p.selected) end
+    if p.main_send ~= nil then reaper.SetMediaTrackInfo_Value(t, "B_MAINSEND", p.main_send and 1 or 0) end
     return track_summary(t)
   end)
 end
@@ -1408,6 +1409,10 @@ function commands.add_midi_cc(p)
       if ev.cc == "pitchbend" then
         local v = math.max(0, math.min(16383, int(ev.value) + 8192))
         reaper.MIDI_InsertCC(take, false, false, ppq, 0xE0, chan, v & 0x7F, (v >> 7) & 0x7F)
+      elseif ev.cc == "program" then
+        reaper.MIDI_InsertCC(take, false, false, ppq, 0xC0, chan, math.max(0, math.min(127, int(ev.value))), 0)
+      elseif ev.cc == "aftertouch" then
+        reaper.MIDI_InsertCC(take, false, false, ppq, 0xD0, chan, math.max(0, math.min(127, int(ev.value))), 0)
       else
         reaper.MIDI_InsertCC(take, false, false, ppq, 0xB0, chan, int(ev.cc), math.max(0, math.min(127, int(ev.value))))
       end
@@ -1595,6 +1600,239 @@ function commands.render_audio(p)
       .. "may be missing their audio: " .. table.concat(realtime, ", ")
       .. ". To measure them, record or render their output to an audio track first.") or nil,
   }
+end
+
+------------------------------------------------------------- tempo map
+
+local function tempo_markers()
+  local out = {}
+  for i = 0, reaper.CountTempoTimeSigMarkers(0) - 1 do
+    local _, timepos, _, _, bpm, num, denom, linear = reaper.GetTempoTimeSigMarker(0, i)
+    out[#out + 1] = {
+      index = i + 1,
+      position = time_to_pos(timepos),
+      bpm = round(bpm, 3),
+      time_signature = num > 0 and (num .. "/" .. denom) or nil,
+      ramp_to_next = linear or nil,
+    }
+  end
+  return out
+end
+
+function commands.get_tempo_map()
+  local num, denom, bpm = reaper.TimeMap_GetTimeSigAtTime(0, 0)
+  return { start_tempo_bpm = round(bpm, 3), start_time_signature = num .. "/" .. denom, changes = tempo_markers() }
+end
+
+-- Adds or updates tempo and time-signature changes at bars, in time order so each
+-- bar is found on the map as it stands after the earlier changes.
+function commands.set_tempo_map(p)
+  local changes = p.changes or {}
+  table.sort(changes, function(a, b) return (a.bar + (a.beat or 1) / 1000) < (b.bar + (b.beat or 1) / 1000) end)
+  for _, c in ipairs(changes) do
+    if (c.numerator or c.denominator) and (c.beat or 1) ~= 1 then
+      fail("time signature changes have to be on a bar line (beat 1), bar " .. tostring(c.bar))
+    end
+  end
+  return with_undo("edit tempo map", function()
+    if p.clear then
+      for i = reaper.CountTempoTimeSigMarkers(0) - 1, 1, -1 do reaper.DeleteTempoTimeSigMarker(0, i) end
+    end
+    for _, bar in ipairs(p.remove_bars or {}) do
+      for i = reaper.CountTempoTimeSigMarkers(0) - 1, 0, -1 do
+        local _, timepos, measure = reaper.GetTempoTimeSigMarker(0, i)
+        if measure + 1 == int(bar) and not (i == 0 and timepos < 0.001) then reaper.DeleteTempoTimeSigMarker(0, i) end
+      end
+    end
+    for _, c in ipairs(changes) do
+      local t = qn_to_time(bar_to_qn(c.bar, c.beat or 1))
+      local bpm = c.bpm or reaper.TimeMap2_GetDividedBpmAtTime(0, t)
+      local existing = -1
+      for i = 0, reaper.CountTempoTimeSigMarkers(0) - 1 do
+        local _, timepos = reaper.GetTempoTimeSigMarker(0, i)
+        if math.abs(timepos - t) < 0.001 then existing = i end
+      end
+      local num, denom = c.numerator or 0, c.denominator or (c.numerator and 4 or 0)
+      if existing >= 0 and num == 0 then
+        local _, _, _, _, _, old_num, old_denom = reaper.GetTempoTimeSigMarker(0, existing)
+        num, denom = old_num, old_denom
+      end
+      -- Placed by bar and beat, not time: a ramp before it would otherwise slide it off the beat.
+      reaper.SetTempoTimeSigMarker(0, existing, -1, int(c.bar) - 1, (c.beat or 1) - 1, bpm, num, denom,
+        c.ramp_to_next and true or false)
+    end
+    reaper.UpdateTimeline()
+    return commands.get_tempo_map()
+  end)
+end
+
+--------------------------------------------------------- MIDI events
+
+local function cc_kind(chanmsg)
+  if chanmsg == 0xB0 then return "cc" end
+  if chanmsg == 0xE0 then return "pitchbend" end
+  if chanmsg == 0xC0 then return "program" end
+  if chanmsg == 0xD0 then return "aftertouch" end
+  if chanmsg == 0xA0 then return "poly aftertouch" end
+  return string.format("0x%X", chanmsg)
+end
+
+local function cc_matches(p, kind, number, chan, qn)
+  if p.kind and p.kind ~= kind then return false end
+  if p.cc and not (kind == "cc" and number == p.cc) then return false end
+  if p.channel and chan + 1 ~= p.channel then return false end
+  if p.start and qn < p.start - 1e-6 then return false end
+  if p["end"] and qn >= p["end"] - 1e-6 then return false end
+  return true
+end
+
+function commands.get_midi_cc(p)
+  local item = find_item(p.item_id)
+  local take = midi_take(item)
+  local base_qn = item_bounds_qn(item)
+  local _, _, count = reaper.MIDI_CountEvts(take)
+  local events, limit = {}, p.limit or 2000
+  for i = 0, count - 1 do
+    local _, _, muted, ppq, chanmsg, chan, msg2, msg3 = reaper.MIDI_GetCC(take, i)
+    local qn = reaper.MIDI_GetProjQNFromPPQPos(take, ppq) - base_qn
+    local kind = cc_kind(chanmsg)
+    local number = kind == "cc" and msg2 or nil
+    if cc_matches(p, kind, msg2, chan, qn) and #events < limit then
+      local value = msg3
+      if kind == "pitchbend" then value = (msg3 << 7 | msg2) - 8192 end
+      if kind == "program" then value = msg2 + 1 end
+      if kind == "aftertouch" then value = msg2 end
+      events[#events + 1] = { position = round(qn, 4), kind = kind, cc = number, value = value, channel = chan + 1,
+                              muted = muted or nil }
+    end
+  end
+  return { item_id = p.item_id, count = #events, truncated = #events >= limit or nil, events = events }
+end
+
+function commands.delete_midi_cc(p)
+  local item = find_item(p.item_id)
+  local take = midi_take(item)
+  local base_qn = item_bounds_qn(item)
+  return with_undo("delete MIDI CC", function()
+    local _, _, count = reaper.MIDI_CountEvts(take)
+    local removed = 0
+    for i = count - 1, 0, -1 do
+      local _, _, _, ppq, chanmsg, chan, msg2 = reaper.MIDI_GetCC(take, i)
+      local qn = reaper.MIDI_GetProjQNFromPPQPos(take, ppq) - base_qn
+      if cc_matches(p, cc_kind(chanmsg), msg2, chan, qn) then
+        reaper.MIDI_DeleteCC(take, i)
+        removed = removed + 1
+      end
+    end
+    reaper.MIDI_Sort(take)
+    return { removed = removed }
+  end)
+end
+
+-------------------------------------------------------------- routing
+
+local SEND_MODES = { [0] = "post-fader", [1] = "pre-fx", [2] = "post-fx", [3] = "post-fx" }
+
+local function channel_text(v)
+  if v < 0 then return nil end
+  local start, width = (v & 1023) + 1, v >> 10
+  if width == 1 then return tostring(start) end
+  local n = width == 0 and 2 or width * 2
+  return start .. "-" .. (start + n - 1)
+end
+
+function commands.get_routing()
+  local tracks = {}
+  for i = 0, reaper.CountTracks(0) - 1 do
+    local t = reaper.GetTrack(0, i)
+    local parent = reaper.GetParentTrack(t)
+    local entry = {
+      number = i + 1,
+      name = track_name(t),
+      folder = ({ [1] = "starts a folder" })[int(reaper.GetMediaTrackInfo_Value(t, "I_FOLDERDEPTH"))] or nil,
+      in_folder = parent and track_name(parent) or nil,
+      to_master = reaper.GetMediaTrackInfo_Value(t, "B_MAINSEND") == 1,
+      sends = {},
+    }
+    if parent and entry.to_master then entry.to_master, entry.to_parent_folder = nil, true end
+    for s_i = 0, reaper.GetTrackNumSends(t, 0) - 1 do
+      local dest = reaper.GetTrackSendInfo_Value(t, 0, s_i, "P_DESTTRACK")
+      local src = int(reaper.GetTrackSendInfo_Value(t, 0, s_i, "I_SRCCHAN"))
+      local dst = int(reaper.GetTrackSendInfo_Value(t, 0, s_i, "I_DSTCHAN"))
+      local midi = int(reaper.GetTrackSendInfo_Value(t, 0, s_i, "I_MIDIFLAGS"))
+      local send = {
+        to = dest and track_name(dest) or "?",
+        volume_db = amp_to_db(reaper.GetTrackSendInfo_Value(t, 0, s_i, "D_VOL")),
+        pan = round(reaper.GetTrackSendInfo_Value(t, 0, s_i, "D_PAN"), 2),
+        mute = reaper.GetTrackSendInfo_Value(t, 0, s_i, "B_MUTE") == 1 or nil,
+        mode = SEND_MODES[int(reaper.GetTrackSendInfo_Value(t, 0, s_i, "I_SENDMODE"))] or "post-fader",
+        audio = src >= 0 and (channel_text(src) .. " -> " .. channel_text(dst)) or nil,
+        midi = (midi & 31) ~= 31 or nil,
+      }
+      if dst >= 0 and (dst & 1023) == 2 then send.note = "into channels 3-4: a sidechain input" end
+      entry.sends[#entry.sends + 1] = send
+    end
+    if #entry.sends == 0 then entry.sends = nil end
+    local hw = reaper.GetTrackNumSends(t, 1)
+    if hw > 0 then entry.hardware_outputs = hw end
+    tracks[#tracks + 1] = entry
+  end
+  return { tracks = tracks }
+end
+
+-- Puts tracks into a new folder (a summing group): the folder track sits above them
+-- and they play through it.
+function commands.create_folder(p)
+  local members = {}
+  for _, ref in ipairs(p.tracks or {}) do members[#members + 1] = get_track(ref) end
+  if #members == 0 then fail("give the tracks to put in the folder") end
+  local first = math.huge
+  for _, t in ipairs(members) do first = math.min(first, int(reaper.GetMediaTrackInfo_Value(t, "IP_TRACKNUMBER")) - 1) end
+  return with_undo("create folder " .. (p.name or ""), function()
+    local was_selected = {}
+    for i = 0, reaper.CountTracks(0) - 1 do
+      local t = reaper.GetTrack(0, i)
+      was_selected[t] = reaper.IsTrackSelected(t)
+    end
+    reaper.InsertTrackAtIndex(first, true)
+    local folder = reaper.GetTrack(0, first)
+    reaper.GetSetMediaTrackInfo_String(folder, "P_NAME", p.name or "Folder", true)
+    if p.color then set_color(folder, p.color) end
+    for t in pairs(was_selected) do reaper.SetTrackSelected(t, false) end
+    reaper.SetTrackSelected(folder, false)
+    for _, t in ipairs(members) do reaper.SetTrackSelected(t, true) end
+    reaper.ReorderSelectedTracks(first + 1, 1)  -- 1: the track before becomes their folder
+    for t, sel in pairs(was_selected) do reaper.SetTrackSelected(t, sel) end
+    reaper.SetTrackSelected(folder, false)
+    return { folder = track_summary(folder), members = #members }
+  end)
+end
+
+----------------------------------------------------------- sampler kits
+
+-- Loads one ReaSamplOmatic5000 per sample onto a track, each playing on one key.
+function commands.build_sampler_kit(p)
+  local t = get_track(p.track)
+  local pads = p.pads or {}
+  if #pads == 0 then fail("give at least one sample") end
+  for _, pad in ipairs(pads) do
+    if type(pad.path) ~= "string" or not reaper.file_exists(pad.path) then fail("can't find the sample " .. tostring(pad.path)) end
+  end
+  return with_undo("build sampler kit on " .. track_name(t), function()
+    local loaded = {}
+    for _, pad in ipairs(pads) do
+      local fx = reaper.TrackFX_AddByName(t, "ReaSamplOmatic5000 (Cockos)", false, -1)
+      if fx < 0 then fail("couldn't load ReaSamplOmatic5000") end
+      reaper.TrackFX_SetNamedConfigParm(t, fx, "FILE0", pad.path)
+      reaper.TrackFX_SetNamedConfigParm(t, fx, "DONE", "")
+      reaper.TrackFX_SetParamNormalized(t, fx, 3, int(pad.note) / 127)  -- note range start
+      reaper.TrackFX_SetParamNormalized(t, fx, 4, int(pad.note) / 127)  -- note range end
+      if pad.name then reaper.TrackFX_SetNamedConfigParm(t, fx, "renamed_name", pad.name) end
+      local _, start_name = reaper.TrackFX_GetFormattedParamValue(t, fx, 3)
+      loaded[#loaded + 1] = { fx = fx + 1, note = int(pad.note), plays_on = start_name, sample = pad.path:match("[^\\/]+$") }
+    end
+    return { track = track_ref(t), pads = loaded }
+  end)
 end
 
 -- Tests one plugin on a hidden temporary track after the end of the project:

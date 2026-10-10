@@ -33,13 +33,16 @@ own Claude account; no API key needed.
 | Area | Tools |
 | --- | --- |
 | **Read the project** | Overview (tempo, time signature, markers, regions, tracks, selection), track details (items, FX, sends), FX parameters, installed plugins |
-| **Compose** | Create tracks with instruments, MIDI items and notes; chord parts from symbols (`Am7`, `Cmaj7/E`) or Roman numerals (`ii7-V7/V-bVII`) in 11 voicings and 20 comping rhythms; basslines in 18 styles; motif-based melodies; genre drum grooves; a whole genre sketch in one call; sustain/mod/expression/pitch bend, tempo, markers and regions |
+| **Compose** | Create tracks with instruments, MIDI items and notes; chord parts from symbols (`Am7`, `Cmaj7/E`) or Roman numerals (`ii7-V7/V-bVII`) in 11 voicings and 20 comping rhythms; basslines in 18 styles; motif-based melodies; genre drum grooves; a whole genre sketch in one call; sustain/mod/expression/pitch bend/aftertouch, program changes with bank select, reading and clearing controllers, markers and regions |
 | **Music theory** | Scales and modes spelled correctly, chord naming, Roman-numeral and harmony analysis (of symbols or your MIDI), key detection, cadences, progression suggestions, reharmonization, four-part voice leading and a rule checker, modulation routes, rhythms (clave, Euclidean, polyrhythms) |
 | **Plugins** | Browse installed plugins by kind, category and developer; load instruments and effects by loose name; read and set parameters by value or by label, several at once; list and load presets; split multi-output instruments onto tracks |
 | **Sound library** | Save any plugin's current sound with a name and tags, browse, and recall it on any track in any project |
 | **Edit MIDI** | Quantize (grid, strength, swing), humanize, transpose, snap to a scale, set or ramp velocities, strum chords, legato, and motif development (diatonic transposition, inversion, retrograde, augmentation, harmony lines, sequences, negative harmony); on all notes, a pitch/time range, or what's selected in the MIDI editor |
 | **Automate** | Volume, pan and any plugin parameter: points, ramps (a filter sweep over the build) or LFOs (wobbles, tremolo), in real units; read and clear envelopes |
 | **Edit clips** | Move, trim, split, duplicate, fade, re-pitch, time-stretch and delete audio or MIDI items; import audio files |
+| **Arrange** | Tempo changes, ramps and time-signature changes over the song; markers and regions |
+| **Samples & loops** | Search your sample folders by name, role, tempo and key, with each result checked by ear; place loops stretched to the project tempo and moved into key; build drum kits from any samples in REAPER's sampler |
+| **Routing** | A map of folders, sends, sidechains and outputs; folders; sends; master-send on/off |
 | **Mix** | Add, remove, bypass FX; volume, pan, mute, solo, color; sends; and one-call jobs: side-chain ducking (calibrated to a depth), submix buses, parallel compression, a starting vocal chain, mastering to a loudness target |
 | **Genres** | 264 genre profiles, from house and drill to bebop, flamenco, amapiano and Baroque: how each is composed, played, arranged and mixed, and a check of your mix against one |
 | **Remember** | Notes Claude keeps between sessions: your taste, plugin quirks, mix lessons |
@@ -339,6 +342,8 @@ python -m venv .venv
 - `src/creaper/music_tools.py`: the theory, genre, composition and listening tools
 - `src/creaper/listen.py`: per-note audio features, drum classification and kit mapping
 - `src/creaper/pluginscan.py`, `scan_tools.py`: testing plugins and the plugin catalog
+- `src/creaper/project_tools.py`: tempo map, program changes and controllers, routing
+- `src/creaper/samplelib.py`, `sample_tools.py`: the sample library, loop tempo/key analysis, sampler kits
 - `assets/make_brand.py`: regenerates the logo, banner and thumbnail in `assets/brand/`
 - `src/creaper/drums.py`: saved drum maps
 - `src/creaper/analysis.py`: loudness (ITU-R BS.1770-4 / EBU R128), true peak, spectrum, stereo
