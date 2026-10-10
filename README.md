@@ -28,9 +28,38 @@ own Claude account; no API key needed.
 | --- | --- |
 | **Read the project** | Overview (tempo, time signature, markers, regions, tracks, selection), track details (items, FX, sends), FX parameters, installed plugins |
 | **Compose** | Create tracks with instruments, MIDI items, notes, chord progressions from symbols (`Am7`, `Cmaj7/E`, `F#m7b5`) with voice leading, step-sequenced drums with swing and humanize, sustain/mod/expression/pitch bend, tempo and time signature, markers and regions |
-| **Mix** | Add, remove, bypass FX and load presets; set parameters in the plugin's own units ("−18 dB", "2.5 kHz", "4:1"); volume, pan, mute, solo, color; sends and buses |
+| **Plugins** | Browse installed plugins by kind, category and developer; load instruments and effects by loose name; read and set parameters by value or by label, several at once; list and load presets; split multi-output instruments onto tracks |
+| **Mix** | Add, remove, bypass FX; volume, pan, mute, solo, color; sends and buses |
 | **Analyze** | Render the mix or one track and measure integrated/short-term loudness (LUFS), loudness range, true peak, clipping, crest factor, stereo correlation (including the low end), and frequency balance by band and octave, with a loudness timeline in bars |
 | **Control** | Play a range of bars, stop, move the cursor, undo, run any REAPER action |
+
+## Works with your plugins
+
+creaper uses whatever is installed: VST, VST3, CLAP, AU and JS, instruments and effects.
+
+- **Knows your library.** Claude can browse plugins by kind, category ("what reverbs do I
+  have?") and developer. A plugin installed in several formats shows up once and loads
+  as CLAP or VST3 first. Loose names work: "FET-76" finds *Comp FET-76*. Ambiguous names
+  come back with the candidates instead of a guess.
+- **Speaks each plugin's language.** Parameters are set in the plugin's own units and
+  labels: `-18` dB, `2500` Hz, or text for switches and menus ("Saw", "Low Pass", "16'").
+  Several settings can change in one undo step. The thousands of placeholder "MIDI CC"
+  parameters that many VST3 plugins expose are hidden.
+- **Presets.** Factory programs and presets saved in REAPER can be listed and loaded.
+  Plugins that keep presets in their own browser (Arturia, for example) are detected,
+  and Claude offers to open the plugin window instead.
+- **Drums on any kit.** Drum patterns follow the instrument's own note names when it
+  reports them ("Kick", "HH Closed"…). Otherwise creaper uses a drum map you've saved
+  for that instrument (which can also put each drum on its own MIDI channel), then
+  General MIDI. Every pattern reports which note each lane used, so a wrong guess is
+  easy to spot and fix.
+- **Multi-output instruments.** Drum machines, Elektron Overbridge, multitimbral synths:
+  `split_instrument_outputs` gives each output its own track, named after the plugin's
+  outputs (e.g. *Rytm - BD 1*, *Rytm - SD 2*).
+- **Hardware plugins.** Plugins REAPER marks as real-time only (e.g. Overbridge) can't be
+  rendered offline. Analysis warns when they'd be missing from a measurement.
+
+Drum maps are saved in `<REAPER resource path>/creaper/drum_maps.json`.
 
 ## Install
 
@@ -135,7 +164,9 @@ them afterwards. The server measures the file in Python, then deletes it.
 | "REAPER isn't answering" | Is REAPER open and the bridge running? Run `creaper doctor`. |
 | `doctor` finds no heartbeat with a portable REAPER | Set `CREAPER_REAPER_RESOURCE_PATH` (see above). |
 | "REAPER didn't answer within N seconds" | Close any open dialog in REAPER; modal windows can pause scripts. |
-| A plugin parameter won't take a `display_value` | Some plugins don't show numbers; Claude can set the raw 0–1 `value` instead. |
+| A plugin parameter won't take a `display_value` | It may show text instead; use `display_text`, or the raw 0–1 `value`. |
+| Drums land on the wrong sounds | The kit doesn't follow General MIDI or report note names. Tell Claude which note each drum is on; it saves a drum map for that instrument. |
+| An analysis of a hardware/Overbridge track is silent | Real-time-only plugins can't render offline. Record their output to an audio track first. |
 
 ## Development
 
@@ -150,7 +181,8 @@ python -m venv .venv
 - `src/creaper/reaper/creaper_bridge.lua`: the REAPER side, a single dependency-free file
 - `src/creaper/server.py`: the MCP tools
 - `src/creaper/bridge.py`: the file-based client
-- `src/creaper/theory.py`: note names, chord symbols, voice leading, drum patterns
+- `src/creaper/theory.py`: note names, chord symbols, voice leading, drum patterns and drum-name matching
+- `src/creaper/drums.py`: saved drum maps
 - `src/creaper/analysis.py`: loudness (ITU-R BS.1770-4 / EBU R128), true peak, spectrum, stereo
 
 Issues and pull requests are welcome.

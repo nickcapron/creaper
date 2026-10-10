@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 HEARTBEAT_MAX_AGE = 5.0
+STALE_HEARTBEAT_GRACE = 15.0
 
 NOT_RUNNING_HELP = (
     "REAPER isn't answering. Make sure REAPER is open and the creaper bridge script "
@@ -80,10 +81,21 @@ class Bridge:
         beat = self.heartbeat()
         return beat is not None and beat["age"] <= HEARTBEAT_MAX_AGE
 
+    def wait_until_running(self, timeout: float) -> bool:
+        """REAPER pauses scripts while it's busy (loading heavy plugins, saving undo
+        state, a dialog), so a late heartbeat isn't proof the bridge has stopped."""
+        deadline = time.monotonic() + timeout
+        while not self.is_running():
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.1)
+        return True
+
     def call(self, cmd: str, params: dict[str, Any] | None = None, timeout: float = 30.0) -> Any:
         params = {k: v for k, v in (params or {}).items() if v is not None}
         with self._lock:
-            if not self.is_running():
+            # Give up at once if the bridge has never run; wait if it's just late.
+            if not self.wait_until_running(STALE_HEARTBEAT_GRACE if self.heartbeat() else 0.5):
                 raise BridgeError(NOT_RUNNING_HELP)
             request_id = uuid.uuid4().hex
             self.response_path.unlink(missing_ok=True)

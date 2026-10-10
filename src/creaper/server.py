@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from . import analysis, theory
 from .bridge import Bridge, BridgeError
+from .drums import DrumMaps
 
 try:  # mcp 2.x
     from mcp.server.mcpserver import MCPServer
@@ -32,6 +33,23 @@ Conventions:
 - MIDI items are identified by the item_id returned from create_midi_item or
   get_track_details. "selected" means the item the user has selected.
 
+Plugins (VST, VST3, CLAP, AU, JS):
+- list_installed_fx shows the user's plugins with kind (instrument/effect), category
+  and developer. Prefer the user's own plugins over REAPER's stock ones when they fit.
+  Plugin names can be loose ("FET-76", "Analog Lab"); duplicates in several formats
+  load as CLAP/VST3 first.
+- Look up parameter names with get_fx_parameters before setting them. Set values in
+  the plugin's own terms: display_value for numbers ("-18" dB, "2500" Hz), display_text
+  for menus and switches ("Saw", "Low Pass", "On"). Use set_fx_parameters to change
+  several at once.
+- Many commercial plugins keep presets in their own browser, invisible to REAPER.
+  list_fx_presets says so; then offer to open the plugin window (update_fx show).
+- Drum patterns follow the instrument's own note names when it reports them, then a
+  saved drum map, then General MIDI. Check the "lanes" in the result; if a kit maps
+  drums differently, ask the user and save_drum_map so it's right next time.
+- Multi-output instruments (drum machines, Overbridge, multitimbral synths) can be
+  split onto separate tracks with split_instrument_outputs.
+
 Start with get_project_overview to learn the tempo, key landmarks and tracks.
 Every change is one undo step named "creaper: ...", so the user can Ctrl+Z it, or
 you can call undo. Before deleting things or making large changes the user didn't
@@ -41,6 +59,7 @@ rather than guessing.
 
 mcp = MCPServer("creaper", instructions=INSTRUCTIONS)
 bridge = Bridge()
+drum_maps = DrumMaps(bridge.directory / "drum_maps.json")
 
 READ_ONLY = ToolAnnotations(readOnlyHint=True)
 DESTRUCTIVE = ToolAnnotations(destructiveHint=True)
@@ -65,6 +84,7 @@ def tool(annotations: ToolAnnotations | None = None):
 
     return decorator
 
+
 TrackRef = Annotated[str | int, Field(description='Track number (1 = top), track name, or "master"')]
 FxRef = Annotated[str | int, Field(description="FX position in the chain (1 = first) or name, e.g. 'ReaComp'")]
 ItemId = Annotated[str, Field(description='MIDI item id from create_midi_item/get_track_details, or "selected"')]
@@ -88,6 +108,13 @@ class ChordEvent(BaseModel):
     chord: str = Field(description="Chord symbol, e.g. Am7, F#m7b5, Cmaj7/E, Bb, Dsus4")
     length: float = Field(4.0, gt=0, description="Length in quarter notes (4 = a bar of 4/4)")
     start: float | None = Field(None, ge=0, description="Start in QN from the item start; default: right after the previous chord")
+
+
+class ParamChange(BaseModel):
+    parameter: str | int = Field(description="Parameter number or name, from get_fx_parameters")
+    display_value: float | None = Field(None, description="Number in the plugin's displayed units: -18 for '-18 dB', 2500 for '2.5 kHz'")
+    display_text: str | None = Field(None, description="Text the plugin shows, for menus and switches: 'Saw', 'Low Pass', 'On'")
+    value: float | None = Field(None, ge=0, le=1, description="Raw normalized value 0-1")
 
 
 class CCEvent(BaseModel):
@@ -124,24 +151,63 @@ def get_track_details(track: TrackRef) -> dict:
 def get_fx_parameters(
     track: TrackRef,
     fx: FxRef,
-    search: Annotated[str | None, Field(description="Only parameters whose name contains these words, e.g. 'threshold'")] = None,
+    search: Annotated[str | None, Field(description="Only parameters whose name contains these words, e.g. 'filter cutoff'")] = None,
     offset: int = 0,
     limit: int = 100,
+    include_midi_cc: Annotated[bool, Field(description="Also list VST3 'MIDI CC' placeholder parameters (normally hidden)")] = False,
 ) -> dict:
     """Lists an FX's parameters with their current value (0-1) and displayed value
-    (e.g. '-18.0 dB'). Plugins can have hundreds of parameters, so search narrows it."""
-    return call("get_fx_parameters", track=track, fx=fx, search=search, offset=offset, limit=limit)
+    (e.g. '-18.0 dB'). Switches and menus show how many positions they have, and their
+    options when the plugin can name them. Synths can have hundreds of parameters, so
+    search narrows it."""
+    return call("get_fx_parameters", track=track, fx=fx, search=search, offset=offset, limit=limit,
+                include_midi_cc=include_midi_cc)
 
 
 @tool(annotations=READ_ONLY)
 def list_installed_fx(
-    search: Annotated[str | None, Field(description="Words to match, e.g. 'compressor', 'eq', 'reverb', 'synth'")] = None,
+    search: Annotated[str | None, Field(description="Words to match in name, developer or category, e.g. 'tape delay', 'arturia'")] = None,
+    kind: Annotated[Literal["instrument", "effect"] | None, Field(description="Only instruments (synths, samplers, drum machines) or only effects")] = None,
+    category: Annotated[str | None, Field(description="REAPER's category, e.g. 'Synth', 'Dynamics', 'EQ', 'Reverb', 'Delay', 'Modulation'")] = None,
+    developer: Annotated[str | None, Field(description="e.g. 'Arturia', 'FabFilter', 'Cockos'")] = None,
+    format: Annotated[str | None, Field(description="Only plugins available as this format: 'VST3', 'VST', 'CLAP', 'AU', 'JS'")] = None,
     limit: int = 50,
 ) -> dict:
-    """Searches the user's installed plugins (VST, VST3, AU, CLAP, JS). Use the returned
-    names with add_fx or create_track's instrument. REAPER's own ReaPlugs (ReaEQ,
-    ReaComp, ReaVerbate, ReaDelay, ReaSynth, ReaLimit...) are always available."""
-    return call("list_installed_fx", search=search, limit=limit)
+    """Browses the user's installed plugins. Each appears once (the same plugin in
+    several formats is listed as one) with its kind, format, developer, category and
+    output channels. 'categories' counts every match by category, which helps answer
+    'what reverbs do I have?'. Pass the name to add_fx or create_track's instrument."""
+    return call("list_installed_fx", search=search, kind=kind, category=category, developer=developer,
+                format=format, limit=limit)
+
+
+@tool(annotations=READ_ONLY)
+def list_fx_presets(
+    track: TrackRef,
+    fx: FxRef,
+    search: Annotated[str | None, Field(description="Words to match in preset names, e.g. 'bass', 'pad'")] = None,
+    limit: int = 200,
+) -> dict:
+    """Lists the presets REAPER can see for a plugin (factory programs and presets saved
+    in REAPER), then puts the plugin back exactly as it was. Many commercial plugins
+    keep their presets in their own browser instead; the result says so."""
+    return call("list_fx_presets", timeout=120.0, track=track, fx=fx, search=search, limit=limit)
+
+
+@tool(annotations=READ_ONLY)
+def get_instrument_notes(
+    track: TrackRef,
+    channel: Annotated[int, Field(ge=1, le=16)] = 1,
+) -> dict:
+    """Note names the track's instrument reports (drum kits and samplers often name
+    their notes: 'Kick', 'Snare Rim'...), plus any saved drum map for it."""
+    result = call("get_instrument_notes", track=track, channel=channel)
+    for n in result["note_names"]:
+        n["note"] = theory.midi_to_note(n["pitch"])
+    saved = drum_maps.find(result.get("instrument"))
+    if saved:
+        result["drum_map"] = {"name": saved[0], "lanes": _describe_map(saved[1])}
+    return result
 
 
 @tool(annotations=READ_ONLY)
@@ -168,12 +234,14 @@ def set_tempo(
 @tool()
 def create_track(
     name: str,
-    instrument: Annotated[str | None, Field(description="Instrument plugin to load, e.g. 'ReaSynth' or a name from list_installed_fx")] = None,
+    instrument: Annotated[str | None, Field(description="Instrument plugin to load, e.g. 'Analog Lab V', 'Pigments', 'ReaSynth' (see list_installed_fx kind='instrument')")] = None,
     position: Annotated[int | None, Field(description="Track number it should become; default: last")] = None,
     color: Annotated[str | None, Field(description="#RRGGBB")] = None,
+    show_instrument: Annotated[bool, Field(description="Open the instrument's window so the user can pick a sound")] = False,
 ) -> dict:
     """Adds a track, optionally with an instrument so MIDI on it makes sound."""
-    return call("create_track", name=name, instrument=instrument, position=position, color=color)
+    return call("create_track", timeout=60.0, name=name, instrument=instrument, position=position,
+                color=color, show_instrument=show_instrument)
 
 
 @tool()
@@ -306,10 +374,11 @@ def add_chord_progression(
 def add_drum_pattern(
     item_id: ItemId,
     pattern: Annotated[dict[str, str], Field(description=(
-        "Lane name -> steps. Names are General MIDI drums (kick, snare, clap, closed hat, open hat, "
-        "pedal hat, ride, crash, low/mid/high tom, floor tom, rim, shaker, tambourine...) or note "
-        "names/numbers for other kits. Steps: x hit, X accent, o ghost, 1-9 velocity level, . rest; "
-        "spaces and | are ignored. Example: {'kick': 'x...x...x...x...', 'snare': '....x.......x...'}"
+        "Lane name -> steps. Name lanes by drum (kick, snare, clap, closed hat, open hat, pedal hat, "
+        "ride, crash, low/mid/high tom, rim, shaker...); they're matched to the instrument's own note "
+        "names, then a saved drum map, then General MIDI. Note names/numbers (C1, 36) also work. "
+        "Steps: x hit, X accent, o ghost, 1-9 velocity level, . rest; spaces and | are ignored. "
+        "Example: {'kick': 'x...x...x...x...', 'snare': '....x.......x...'}"
     ))],
     step: Annotated[float, Field(gt=0, description="Length of one step in QN: 0.25 = 16ths, 0.5 = 8ths, 1/3 = 8th triplets")] = 0.25,
     repeats: Annotated[int, Field(ge=1, le=256, description="How many times to play the pattern back to back")] = 1,
@@ -319,10 +388,63 @@ def add_drum_pattern(
     channel: Annotated[int, Field(ge=1, le=16, description="MIDI channel; GM drums use 10")] = 10,
     replace: bool = False,
 ) -> dict:
-    """Programs drums step-sequencer style."""
-    notes = theory.drum_pattern_notes(pattern, step=step, repeats=repeats, swing=swing,
-                                      start=start, channel=channel, humanize=humanize)
-    return call("add_midi_notes", item_id=item_id, notes=notes, replace=replace)
+    """Programs drums step-sequencer style on whatever drum instrument the track has.
+    The result's 'lanes' shows which note each lane landed on and why."""
+    context = call("get_instrument_notes", item_id=item_id, channel=channel)
+    instrument = context.get("instrument")
+    note_names = {n["pitch"]: n["name"] for n in context["note_names"]}
+    saved = drum_maps.find(instrument)
+    lanes: dict[str, dict] = {}
+
+    def resolve(lane: str) -> theory.DrumLane:
+        found = theory.resolve_drum_lane(lane, saved[1] if saved else None, note_names)
+        lanes[lane] = {"note": theory.midi_to_note(found.pitch), "pitch": found.pitch,
+                       "channel": found.channel or channel, "source": found.source}
+        return found
+
+    notes = theory.drum_pattern_notes(pattern, step=step, repeats=repeats, swing=swing, start=start,
+                                      channel=channel, humanize=humanize, resolve=resolve)
+    result = call("add_midi_notes", item_id=item_id, notes=notes, replace=replace)
+    result["instrument"] = instrument
+    result["lanes"] = lanes
+    if instrument and all(lane["source"] == "General MIDI" for lane in lanes.values()):
+        result["note"] = (f"Used General MIDI notes; {instrument} didn't report note names and has no "
+                          "saved drum map. If its kit is laid out differently, save one with save_drum_map.")
+    return result
+
+
+def _describe_map(mapping: dict[str, dict]) -> dict[str, str]:
+    return {lane: theory.midi_to_note(e["pitch"]) + (f" ch {e['channel']}" if e.get("channel") else "")
+            for lane, e in mapping.items()}
+
+
+@tool()
+def save_drum_map(
+    instrument: Annotated[str, Field(description="Instrument name as it appears in the FX name, e.g. 'Analog Rytm', 'Digitakt II', 'ReaSamplOmatic5000'")],
+    mapping: Annotated[dict[str, str | int | dict], Field(description=(
+        "Drum name -> note, e.g. {'kick': 'C1', 'snare': 'D1'}; or {'note': 'C1', 'channel': 2} "
+        "for instruments that put each drum on its own MIDI channel"
+    ))],
+) -> dict:
+    """Remembers which notes an instrument's drums are on, so add_drum_pattern gets them
+    right on every track that uses it, in this and future sessions. Replaces any map
+    with the same name."""
+    entries = drum_maps.save(instrument, mapping)
+    return {"saved": instrument, "lanes": _describe_map(entries), "file": str(drum_maps.path)}
+
+
+@tool(annotations=READ_ONLY)
+def list_drum_maps() -> dict:
+    """Lists saved drum maps."""
+    return {name: _describe_map(m) for name, m in drum_maps.all().items()}
+
+
+@tool(annotations=DESTRUCTIVE)
+def delete_drum_map(instrument: str) -> dict:
+    """Deletes a saved drum map."""
+    if not drum_maps.delete(instrument):
+        raise ValueError(f"there's no drum map named '{instrument}'")
+    return {"deleted": instrument}
 
 
 @tool(annotations=DESTRUCTIVE)
@@ -353,11 +475,12 @@ def add_midi_cc(
 @tool()
 def add_fx(
     track: TrackRef,
-    fx_name: Annotated[str, Field(description="Plugin name, e.g. 'ReaEQ', 'ReaComp', 'Pro-Q 3'")],
+    fx_name: Annotated[str, Field(description="Plugin name, e.g. 'Comp FET-76', 'Pro-Q 3', 'ReaEQ'; loose names work if they're unambiguous")],
     position: Annotated[int | None, Field(ge=1, description="Chain position (1 = first); default: end")] = None,
+    show: Annotated[bool, Field(description="Open the plugin's window")] = False,
 ) -> dict:
     """Adds a plugin to a track's FX chain (use 'master' for the master bus)."""
-    return call("add_fx", track=track, name=fx_name, position=position)
+    return call("add_fx", timeout=60.0, track=track, name=fx_name, position=position, show=show)
 
 
 @tool()
@@ -366,11 +489,25 @@ def set_fx_parameter(
     fx: FxRef,
     parameter: Annotated[str | int, Field(description="Parameter number (from get_fx_parameters) or name, e.g. 'Threshold'")],
     display_value: Annotated[float | None, Field(description="Target in the plugin's displayed units: -18 for '-18 dB', 4 for '4:1', 2500 for '2.5 kHz'")] = None,
-    value: Annotated[float | None, Field(ge=0, le=1, description="Raw normalized value 0-1, instead of display_value")] = None,
+    display_text: Annotated[str | None, Field(description="For menus and switches: the text the plugin shows, e.g. 'Saw', 'Low Pass', 'On'")] = None,
+    value: Annotated[float | None, Field(ge=0, le=1, description="Raw normalized value 0-1")] = None,
 ) -> dict:
-    """Sets one FX parameter. display_value is usually easiest; creaper searches for the
-    setting that shows that number. Returns what the plugin now displays."""
-    return call("set_fx_parameter", track=track, fx=fx, parameter=parameter, value=value, display_value=display_value)
+    """Sets one FX parameter in the plugin's own terms; creaper finds the setting that
+    displays that number or text. Returns what the plugin now displays."""
+    return call("set_fx_parameter", track=track, fx=fx, parameter=parameter, value=value,
+                display_value=display_value, display_text=display_text)
+
+
+@tool()
+def set_fx_parameters(
+    track: TrackRef,
+    fx: FxRef,
+    changes: Annotated[list[ParamChange], Field(min_length=1)],
+) -> dict:
+    """Sets several parameters of one plugin as a single undo step, e.g. shaping a synth
+    patch or dialing in a compressor. Each change reports its result or its own error."""
+    return call("set_fx_parameters", track=track, fx=fx,
+                changes=[c.model_dump(exclude_none=True) for c in changes])
 
 
 @tool()
@@ -378,11 +515,25 @@ def update_fx(
     track: TrackRef,
     fx: FxRef,
     enabled: Annotated[bool | None, Field(description="False bypasses the FX")] = None,
-    preset: Annotated[str | None, Field(description="Preset name to load")] = None,
+    preset: Annotated[str | None, Field(description="Preset name to load (see list_fx_presets)")] = None,
+    preset_index: Annotated[int | None, Field(ge=1, description="Preset number from list_fx_presets, instead of the name")] = None,
     show: Annotated[bool | None, Field(description="Open (true) or close (false) the plugin window")] = None,
 ) -> dict:
     """Bypasses or enables an FX, loads a preset, or opens its window for the user."""
-    return call("update_fx", track=track, fx=fx, enabled=enabled, preset=preset, show=show)
+    return call("update_fx", track=track, fx=fx, enabled=enabled, preset=preset,
+                preset_index=preset_index, show=show)
+
+
+@tool()
+def split_instrument_outputs(
+    track: TrackRef,
+    fx: Annotated[str | int | None, Field(description="Which instrument (chain position or name), if the track has several; default: the first")] = None,
+    outputs: Annotated[list[str | int] | None, Field(description="Only these outputs, by name ('Track 3') or pair number (2 = outputs 3/4); default: all")] = None,
+) -> dict:
+    """Gives each stereo output of a multi-output instrument its own track (drum
+    machines, Elektron Overbridge, multitimbral synths, samplers). The main pair stays
+    on the instrument's track; new tracks are named after the plugin's outputs."""
+    return call("split_instrument_outputs", track=track, fx=fx, outputs=outputs)
 
 
 @tool(annotations=DESTRUCTIVE)
@@ -434,7 +585,10 @@ def analyze_audio(
         for point, pos in zip(timeline, positions):
             point["bar"], point["beat"] = pos["bar"], pos["beat"]
             del point["t"]
-    return {"measured": render["track"], "range": {"start": render["start"], "end": render["end"]}, **result}
+    measured = {"measured": render["track"], "range": {"start": render["start"], "end": render["end"]}}
+    if render.get("warning"):
+        measured["warning"] = render["warning"]
+    return {**measured, **result}
 
 
 def run() -> None:

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import random
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 
 NOTE_NAMES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
@@ -188,6 +189,112 @@ def drum_pitch(name: str | int) -> int:
         ) from None
 
 
+# Drum-kit vocabulary, so "closed hat" matches "HH Closed" or "Hi-Hat Cls".
+_DRUM_SYNONYMS: dict[str, tuple[str, ...]] = {
+    "bd": ("kick",), "kik": ("kick",), "kck": ("kick",), "bassdrum": ("kick",), "kicks": ("kick",),
+    "sd": ("snare",), "snr": ("snare",), "sn": ("snare",), "snares": ("snare",),
+    "hh": ("hat",), "hihat": ("hat",), "hats": ("hat",), "hat": ("hat",),
+    "chh": ("closed", "hat"), "ch": ("closed", "hat"), "ohh": ("open", "hat"), "oh": ("open", "hat"),
+    "phh": ("pedal", "hat"),
+    "cl": ("closed",), "cls": ("closed",), "clsd": ("closed",), "op": ("open",), "opn": ("open",),
+    "cym": ("cymbal",), "cy": ("cymbal",), "cr": ("crash",), "rd": ("ride",),
+    "clp": ("clap",), "claps": ("clap",), "toms": ("tom",), "perc": ("percussion",),
+    "rimshot": ("rim",), "sidestick": ("side", "stick"),
+}
+
+
+def drum_tokens(text: str) -> frozenset[str]:
+    s = re.sub(r"([a-z])(\d)", r"\1 \2", text.lower())
+    s = re.sub(r"(\d)([a-z])", r"\1 \2", s)
+    raw = re.findall(r"[a-z]+|\d+", s)
+    tokens: list[str] = []
+    i = 0
+    while i < len(raw):
+        word, nxt = raw[i], raw[i + 1] if i + 1 < len(raw) else None
+        if word == "hi" and nxt == "hat":  # "hi hat" / "hi-hat"
+            i += 1
+            continue
+        if word == "bass" and nxt == "drum":
+            tokens.append("kick")
+            i += 2
+            continue
+        tokens.extend(_DRUM_SYNONYMS.get(word, (word,)))
+        i += 1
+    return frozenset(tokens)
+
+
+def best_name_match(lane: str, names: dict[int, str], hint: int | None = None) -> int | None:
+    """The key of the name that contains all of the lane's words with the fewest
+    extra words; ties go to the key closest to `hint` (the General MIDI note)."""
+    wanted = drum_tokens(lane)
+    if not wanted:
+        return None
+    best: tuple[tuple[int, int], int] | None = None
+    for key, name in names.items():
+        tokens = drum_tokens(name)
+        if wanted <= tokens:
+            rank = (len(tokens - wanted), abs(key - hint) if hint is not None else key)
+            if best is None or rank < best[0]:
+                best = (rank, key)
+    return best[1] if best else None
+
+
+@dataclass(frozen=True)
+class DrumLane:
+    pitch: int
+    channel: int | None  # None: use the pattern's channel
+    source: str
+
+
+def resolve_drum_lane(
+    lane: str | int,
+    drum_map: dict[str, dict] | None = None,
+    note_names: dict[int, str] | None = None,
+) -> DrumLane:
+    """Finds the note a lane should play.
+
+    Order: an explicit note (36, C1), the saved drum map for this instrument,
+    the instrument's own note names, then General MIDI.
+    """
+    text = str(lane).strip()
+    if re.fullmatch(r"-?\d+", text) or _NOTE_RE.match(text):
+        return DrumLane(note_to_midi(text), None, "explicit note")
+    hint = _GM_LOOKUP.get(_norm(text))
+    if drum_map:
+        keys = list(drum_map)
+        exact = {_norm(k): k for k in keys}.get(_norm(text))
+        if exact is None:
+            index = best_name_match(text, dict(enumerate(keys)))
+            exact = keys[index] if index is not None else None
+        if exact is not None:
+            entry = drum_map[exact]
+            return DrumLane(entry["pitch"], entry.get("channel"), f"drum map ({exact})")
+    if note_names:
+        pitch = best_name_match(text, note_names, hint)
+        if pitch is not None:
+            return DrumLane(pitch, None, f"instrument note name '{note_names[pitch]}'")
+    if hint is not None:
+        return DrumLane(hint, None, "General MIDI")
+    choices = sorted(set((drum_map or {}).keys()) | set((note_names or {}).values())) or sorted(GM_DRUMS)
+    raise ValueError(f"unknown drum '{lane}'. Available: {', '.join(choices[:60])}")
+
+
+def drum_map_entry(value: int | str | dict) -> dict:
+    """36, 'C1' or {'note': 'C1', 'channel': 2} -> {'pitch': 36, 'channel': 2}."""
+    if isinstance(value, dict):
+        note = value.get("note", value.get("pitch"))
+        if note is None:
+            raise ValueError("drum map entries need a note, e.g. {'note': 'C1', 'channel': 2}")
+        entry = {"pitch": note_to_midi(note)}
+        if value.get("channel") is not None:
+            channel = int(value["channel"])
+            if not 1 <= channel <= 16:
+                raise ValueError("MIDI channels go from 1 to 16")
+            entry["channel"] = channel
+        return entry
+    return {"pitch": note_to_midi(value)}
+
+
 # Step characters in drum patterns.
 STEP_VELOCITY = {"x": 100, "X": 127, "o": 45, "g": 45}
 REST_STEPS = set(".-_")
@@ -203,6 +310,7 @@ def drum_pattern_notes(
     channel: int = 10,
     humanize: float = 0.0,
     seed: int | None = None,
+    resolve: Callable[[str], DrumLane] = resolve_drum_lane,
 ) -> list[dict]:
     """Step-sequencer patterns -> notes.
 
@@ -210,6 +318,7 @@ def drum_pattern_notes(
     1-9 = velocity level, . or - = rest; spaces and | are ignored.
     swing follows the MPC convention: 50 = straight, ~66 = triplet feel.
     humanize (0-1) randomizes velocities by up to +/-20 at 1.
+    resolve maps lane names to notes (and optionally a per-lane channel).
     """
     if step <= 0:
         raise ValueError("step must be positive")
@@ -222,12 +331,13 @@ def drum_pattern_notes(
         for c in cells:
             if c not in REST_STEPS and c not in STEP_VELOCITY and not c.isdigit():
                 raise ValueError(f"unknown step '{c}' in the '{name}' lane (use x X o . or 1-9)")
-        lanes.append((drum_pitch(name), cells))
-    cycle_steps = max((len(cells) for _, cells in lanes), default=0)
+        resolved = resolve(name)
+        lanes.append((resolved.pitch, resolved.channel or channel, cells))
+    cycle_steps = max((len(cells) for _, _, cells in lanes), default=0)
     swing_delay = 2 * step * swing / 100 - step
     notes = []
     for r in range(max(1, repeats)):
-        for pitch, cells in lanes:
+        for pitch, lane_channel, cells in lanes:
             for i, c in enumerate(cells):
                 if c in REST_STEPS:
                     continue
@@ -240,6 +350,6 @@ def drum_pattern_notes(
                     pos += swing_delay
                 notes.append({
                     "pitch": pitch, "start": round(pos, 6), "length": round(step * 0.5, 6),
-                    "velocity": velocity, "channel": channel,
+                    "velocity": velocity, "channel": lane_channel,
                 })
     return notes

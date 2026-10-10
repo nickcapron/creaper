@@ -1,6 +1,6 @@
 -- @description creaper bridge: lets Claude work in REAPER through the creaper MCP server
 -- @author nickcapron
--- @version 0.1.0
+-- @version 0.2.0
 -- @link https://github.com/nickcapron/creaper
 -- @about
 --   Keep this script running while you use creaper. It watches a folder in
@@ -10,7 +10,7 @@
 --   Every change it makes is a named undo point ("creaper: ..."), so Ctrl+Z
 --   reverts anything Claude did.
 
-local BRIDGE_VERSION = "0.1.0"
+local BRIDGE_VERSION = "0.2.0"
 local PROTOCOL = 1
 
 ----------------------------------------------------------------------- JSON
@@ -469,6 +469,13 @@ local function get_fx(t, ref)
   fail("no FX matching '" .. tostring(ref) .. "' on track '" .. track_name(t) .. "'")
 end
 
+-- Many VST3 plugins expose thousands of placeholder parameters for MIDI CC
+-- mapping ("MIDI CC helper 85 [1]", "MIDI CC 0|60"). They aren't real
+-- controls, so they're hidden from listings and name searches.
+local function is_midi_cc_helper(name)
+  return name:find("^MIDI CC helper") ~= nil or name:find("^MIDI CC %d+|%d+$") ~= nil
+end
+
 local function find_param(t, fx, ref)
   local count = reaper.TrackFX_GetNumParams(t, fx)
   local n = tonumber(ref)
@@ -481,12 +488,23 @@ local function find_param(t, fx, ref)
   local partial
   for i = 0, count - 1 do
     local _, name = reaper.TrackFX_GetParamName(t, fx, i, "")
-    name = name:lower()
-    if name == wanted then return i end
-    if not partial and name:find(wanted, 1, true) then partial = i end
+    if not is_midi_cc_helper(name) then
+      name = name:lower()
+      if name == wanted then return i end
+      if not partial and name:find(wanted, 1, true) then partial = i end
+    end
   end
   if partial then return partial end
   fail("no parameter matching '" .. tostring(ref) .. "' (get_fx_parameters lists them)")
+end
+
+local function real_param_count(t, fx)
+  local n = 0
+  for i = 0, reaper.TrackFX_GetNumParams(t, fx) - 1 do
+    local _, name = reaper.TrackFX_GetParamName(t, fx, i, "")
+    if not is_midi_cc_helper(name) then n = n + 1 end
+  end
+  return n
 end
 
 -- "-18.0 dB" -> -18, "1.2 kHz" -> 1200, "-inf" -> -inf
@@ -501,21 +519,59 @@ local function parse_display_number(s)
   return num
 end
 
--- Finds the normalized value whose displayed value is `target`, assuming the
--- display is monotonic. Uses FormatParamValueNormalized when the plugin
--- supports it, otherwise sets the parameter and reads it back.
-local function solve_display_value(t, fx, param, target)
-  local function display_at(v)
-    local ok, s = reaper.TrackFX_FormatParamValueNormalized(t, fx, param, v, "")
-    if not ok or s == "" then
-      reaper.TrackFX_SetParamNormalized(t, fx, param, v)
-      _, s = reaper.TrackFX_GetFormattedParamValue(t, fx, param, "")
-    end
-    return parse_display_number(s)
+-- What the plugin would display for normalized value v. Uses
+-- FormatParamValueNormalized when the plugin supports it, otherwise sets the
+-- parameter and reads it back (callers restore it on failure).
+local function display_string_at(t, fx, param, v)
+  local ok, s = reaper.TrackFX_FormatParamValueNormalized(t, fx, param, v, "")
+  if not ok or s == "" then
+    reaper.TrackFX_SetParamNormalized(t, fx, param, v)
+    _, s = reaper.TrackFX_GetFormattedParamValue(t, fx, param, "")
   end
+  return s
+end
+
+-- Number of positions for stepped parameters (switches, menus), else nil.
+local function param_positions(t, fx, param)
+  local ok, step, _, _, toggle = reaper.TrackFX_GetParameterStepSizes(t, fx, param)
+  if not ok then return nil end
+  if toggle then return 2 end
+  if step and step > 0 and step <= 0.5 then return math.tointeger(math.floor(1 / step + 0.5)) + 1 end
+  return nil
+end
+
+local function trim_lower(s) return (s:lower():gsub("^%s+", ""):gsub("%s+$", "")) end
+
+-- Finds the value whose display text is `text` ("Saw", "Low Pass", "On").
+local function solve_display_text(t, fx, param, text)
+  local wanted = trim_lower(text)
+  local n = param_positions(t, fx, param) or 129
+  local options, seen, prefix_match, contains_match = {}, {}, nil, nil
+  for k = 0, n - 1 do
+    local v = k / (n - 1)
+    local s = display_string_at(t, fx, param, v)
+    if s and s ~= "" then
+      local ls = trim_lower(s)
+      if ls == wanted then return v end
+      if not prefix_match and ls:sub(1, #wanted) == wanted then prefix_match = v end
+      if not contains_match and ls:find(wanted, 1, true) then contains_match = v end
+      if not seen[s] then
+        seen[s] = true
+        options[#options + 1] = s
+      end
+    end
+  end
+  if prefix_match or contains_match then return prefix_match or contains_match end
+  fail("no setting shows '" .. text .. "'. It shows: " .. table.concat(options, ", ", 1, math.min(#options, 40)))
+end
+
+-- Finds the normalized value whose displayed value is `target`, assuming the
+-- display is monotonic.
+local function solve_display_value(t, fx, param, target)
+  local function display_at(v) return parse_display_number(display_string_at(t, fx, param, v)) end
   local at_min, at_max = display_at(0), display_at(1)
   if not at_min or not at_max then
-    fail("this parameter doesn't show a number; set 'value' (0 to 1) instead")
+    fail("this parameter doesn't show a number; use display_text (e.g. 'Saw') or value (0 to 1)")
   end
   local rising = at_max >= at_min
   if (rising and target <= at_min) or (not rising and target >= at_min) then return 0.0, true end
@@ -533,14 +589,260 @@ local function solve_display_value(t, fx, param, target)
   return hi, false
 end
 
-local function param_info(t, fx, i)
+local function param_info(t, fx, i, with_options)
   local _, name = reaper.TrackFX_GetParamName(t, fx, i, "")
   local _, display = reaper.TrackFX_GetFormattedParamValue(t, fx, i, "")
-  return {
+  local info = {
     index = i + 1,
     name = name,
     value = round(reaper.TrackFX_GetParamNormalized(t, fx, i), 4),
     display = display,
+  }
+  local positions = param_positions(t, fx, i)
+  if positions then
+    info.positions = positions
+    -- List a menu's choices when the plugin can name them without being changed.
+    if with_options and positions <= 24 then
+      local options = {}
+      for k = 0, positions - 1 do
+        local ok, s = reaper.TrackFX_FormatParamValueNormalized(t, fx, i, k / (positions - 1), "")
+        if not ok or s == "" then options = nil break end
+        options[#options + 1] = s
+      end
+      info.options = options
+    end
+  end
+  return info
+end
+
+-- One parameter change: {parameter, value | display_value | display_text}.
+-- Restores the parameter if anything goes wrong.
+local function apply_param_change(t, fx, change)
+  local param = find_param(t, fx, change.parameter)
+  local original = reaper.TrackFX_GetParamNormalized(t, fx, param)
+  local ok, result = pcall(function()
+    local value, clamped = change.value, false
+    if value == nil and change.display_text ~= nil then
+      value = solve_display_text(t, fx, param, tostring(change.display_text))
+    elseif value == nil and change.display_value ~= nil then
+      value, clamped = solve_display_value(t, fx, param, change.display_value)
+    elseif value == nil then
+      fail("give value (0 to 1), display_value or display_text")
+    end
+    reaper.TrackFX_SetParamNormalized(t, fx, param, math.max(0, math.min(1, value)))
+    local info = param_info(t, fx, param)
+    if clamped then info.note = "the requested value is outside this parameter's range, so it was set to the limit" end
+    return info
+  end)
+  if not ok then
+    reaper.TrackFX_SetParamNormalized(t, fx, param, original)
+    error(result, 0)
+  end
+  return result
+end
+
+---------------------------------------------------------- plugin catalog
+
+local FORMAT_RANK = { CLAP = 1, VST3 = 2, VST = 3, AU = 4, LV2 = 5, DX = 6, JS = 7 }
+
+local function named_config(t, fx, key)
+  local ok, v = reaper.TrackFX_GetNamedConfigParm(t, fx, key)
+  if ok and v ~= "" then return v end
+  return nil
+end
+
+local function fxtags_key(s) return (s:lower():gsub("[^%w%.]", "_")) end
+
+-- Developer and category tags REAPER keeps in reaper-fxtags.ini, keyed by plugin file.
+local function read_fxtags()
+  local tags = { developer = {}, category = {} }
+  local f = io.open(join(reaper.GetResourcePath(), "reaper-fxtags.ini"), "r")
+  if not f then return tags end
+  local section
+  for line in f:lines() do
+    local name = line:match("^%[(.-)%]")
+    if name then
+      section = tags[name:lower()]
+    elseif section then
+      local k, v = line:match("^(.-)=(.*)$")
+      if k and v ~= "" then section[fxtags_key(k)] = v end
+    end
+  end
+  f:close()
+  return tags
+end
+
+-- "VST3i: SILA (SILA) (18 out)" -> { format = "VST3", instrument = true,
+--   name = "SILA", developer = "SILA", channels = "18 out" }
+local function parse_fx_name(full_name)
+  local prefix, rest = full_name:match("^(%w+):%s*(.+)$")
+  if not prefix then return nil end
+  local instrument = prefix:sub(-1) == "i"
+  local entry = { full_name = full_name, format = instrument and prefix:sub(1, -2) or prefix, instrument = instrument }
+  local base = rest
+  while true do
+    local head, group = base:match("^(.-)%s*%(([^()]*)%)$")
+    if not head or head == "" then break end
+    if not entry.channels and not entry.developer
+        and (group:match("^%d+%s*out$") or group:match("^%d+%->%d+%s*ch$") or group:match("^%d+%s*ch$")) then
+      entry.channels, base = group, head
+    else
+      entry.developer, base = group, head
+      break
+    end
+  end
+  entry.name = base
+  return entry
+end
+
+-- REAPER's category tags mix real categories with flags, e.g.
+-- "Synth|External|OnlyRT|NoOfflineProcess".
+local CATEGORY_FLAGS = { external = "hardware", onlyrt = "realtime_only", noofflineprocess = "realtime_only" }
+
+local function split_category(raw)
+  if not raw then return nil, {} end
+  local categories, flags = {}, {}
+  for part in raw:gmatch("[^|]+") do
+    local flag = CATEGORY_FLAGS[part:lower()]
+    if flag then flags[flag] = true else categories[#categories + 1] = part end
+  end
+  return #categories > 0 and table.concat(categories, ", ") or nil, flags
+end
+
+local function ident_key(ident)
+  local file = (ident or ""):gsub("<.*$", ""):gsub("{.*$", "")
+  return fxtags_key(file:match("[^\\/]+$") or file), fxtags_key(file)
+end
+
+local function plugin_catalog()
+  local tags = read_fxtags()
+  local catalog, i = {}, 0
+  while true do
+    local ok, full_name, ident = reaper.EnumInstalledFX(i)
+    if not ok then break end
+    local entry = parse_fx_name(full_name)
+    if entry and entry.format ~= "ReWire" then
+      local key, full_key = ident_key(ident)
+      entry.developer = tags.developer[key] or entry.developer
+      local flags
+      entry.category, flags = split_category(tags.category[key] or tags.category[full_key])
+      entry.hardware = flags.hardware
+      entry.realtime_only = flags.realtime_only
+      catalog[#catalog + 1] = entry
+    end
+    i = i + 1
+  end
+  return catalog
+end
+
+-- FX on these tracks that REAPER says can't be rendered faster than real time
+-- (hardware bridges such as Elektron Overbridge). Offline renders miss their audio.
+local function realtime_only_fx(tracks)
+  local tags = read_fxtags()
+  local found, seen = {}, {}
+  for _, t in ipairs(tracks) do
+    for i = 0, reaper.TrackFX_GetCount(t) - 1 do
+      local key, full_key = ident_key(named_config(t, i, "fx_ident"))
+      local _, flags = split_category(tags.category[key] or tags.category[full_key])
+      local name = fx_name(t, i)
+      if flags.realtime_only and reaper.TrackFX_GetEnabled(t, i) and not seen[name] then
+        seen[name] = true
+        found[#found + 1] = name
+      end
+    end
+  end
+  return found
+end
+
+local function better_format(a, b)
+  return (FORMAT_RANK[a.format] or 9) < (FORMAT_RANK[b.format] or 9)
+end
+
+-- Groups the same plugin in several formats; the preferred format represents it.
+local function group_catalog(catalog)
+  local groups, order = {}, {}
+  for _, e in ipairs(catalog) do
+    local key = e.name:lower() .. (e.instrument and "|i" or "|")
+    local g = groups[key]
+    if not g then
+      g = { best = e, formats = {} }
+      groups[key] = g
+      order[#order + 1] = key
+    elseif better_format(e, g.best) then
+      g.best = e
+    end
+    g.formats[#g.formats + 1] = e.format
+  end
+  local list = {}
+  for _, key in ipairs(order) do list[#list + 1] = groups[key] end
+  return list
+end
+
+local function words_of(s)
+  local words = {}
+  for w in tostring(s or ""):lower():gmatch("%S+") do words[#words + 1] = w end
+  return words
+end
+
+local function has_all_words(haystack, words)
+  for _, w in ipairs(words) do
+    if not haystack:find(w, 1, true) then return false end
+  end
+  return true
+end
+
+-- Turns what the user called a plugin into REAPER's exact name, preferring
+-- instruments when one is wanted and CLAP/VST3 over VST2 duplicates. Returns
+-- nil when nothing in the catalog matches (FX chains, renamed plugins, ...).
+local function resolve_plugin(query, want_instrument)
+  local q = trim_lower(query)
+  local catalog = plugin_catalog()
+  for _, e in ipairs(catalog) do
+    if e.full_name:lower() == q then return e.full_name end
+  end
+  local groups = group_catalog(catalog)
+  local function choose(candidates)
+    if #candidates == 1 then return candidates[1].best.full_name end
+    if want_instrument ~= nil then
+      local filtered = {}
+      for _, g in ipairs(candidates) do
+        if g.best.instrument == want_instrument then filtered[#filtered + 1] = g end
+      end
+      if #filtered == 1 then return filtered[1].best.full_name end
+      if #filtered > 1 then candidates = filtered end
+    end
+    local names = {}
+    for k = 1, math.min(#candidates, 12) do names[k] = candidates[k].best.name end
+    fail("'" .. query .. "' matches several plugins: " .. table.concat(names, ", ")
+      .. (#candidates > 12 and ", ..." or "") .. ". Use a more specific name.")
+  end
+  local exact = {}
+  for _, g in ipairs(groups) do
+    if g.best.name:lower() == q then exact[#exact + 1] = g end
+  end
+  if #exact > 0 then return choose(exact) end
+  local words, partial = words_of(q), {}
+  for _, g in ipairs(groups) do
+    if has_all_words((g.best.name .. " " .. (g.best.developer or "")):lower(), words) then partial[#partial + 1] = g end
+  end
+  if #partial > 0 then return choose(partial) end
+  return nil
+end
+
+local function fx_details(t, i)
+  local _, preset = reaper.TrackFX_GetPreset(t, i, "")
+  local fx_type = named_config(t, i, "fx_type")
+  local _, _, outputs = reaper.TrackFX_GetIOSize(t, i)
+  return {
+    index = i + 1,
+    name = fx_name(t, i),
+    format = fx_type and fx_type:gsub("i$", "") or nil,
+    instrument = fx_type and fx_type:sub(-1) == "i" or nil,
+    outputs = outputs and outputs > 2 and outputs or nil,
+    enabled = reaper.TrackFX_GetEnabled(t, i),
+    offline = reaper.TrackFX_GetOffline(t, i) or nil,
+    preset = preset ~= "" and preset or nil,
+    parameter_count = real_param_count(t, i),
   }
 end
 
@@ -626,17 +928,7 @@ function commands.get_track_details(p)
   local t = get_track(p.track)
   local info = track_summary(t)
   local fx = {}
-  for i = 0, reaper.TrackFX_GetCount(t) - 1 do
-    local _, preset = reaper.TrackFX_GetPreset(t, i, "")
-    fx[#fx + 1] = {
-      index = i + 1,
-      name = fx_name(t, i),
-      enabled = reaper.TrackFX_GetEnabled(t, i),
-      offline = reaper.TrackFX_GetOffline(t, i) or nil,
-      preset = preset ~= "" and preset or nil,
-      parameter_count = reaper.TrackFX_GetNumParams(t, i),
-    }
-  end
+  for i = 0, reaper.TrackFX_GetCount(t) - 1 do fx[#fx + 1] = fx_details(t, i) end
   info.fx = fx
   local instrument = reaper.TrackFX_GetInstrument(t)
   if instrument >= 0 then info.instrument_fx = instrument + 1 end
@@ -659,43 +951,204 @@ function commands.get_fx_parameters(p)
   local t = get_track(p.track)
   local fx = get_fx(t, p.fx)
   local count = reaper.TrackFX_GetNumParams(t, fx)
-  local words = {}
-  for w in tostring(p.search or ""):lower():gmatch("%S+") do words[#words + 1] = w end
+  local words = words_of(p.search)
   local offset, limit = p.offset or 0, p.limit or 100
-  local params, matched = {}, 0
+  local params, matched, hidden = {}, 0, 0
   for i = 0, count - 1 do
     local _, name = reaper.TrackFX_GetParamName(t, fx, i, "")
-    local lower, ok = name:lower(), true
-    for _, w in ipairs(words) do
-      if not lower:find(w, 1, true) then ok = false break end
-    end
-    if ok then
+    if is_midi_cc_helper(name) and not p.include_midi_cc then
+      hidden = hidden + 1
+    elseif has_all_words(name:lower(), words) then
       matched = matched + 1
-      if matched > offset and #params < limit then params[#params + 1] = param_info(t, fx, i) end
+      if matched > offset and #params < limit then params[#params + 1] = param_info(t, fx, i, true) end
     end
   end
-  return { fx = fx_name(t, fx), fx_index = fx + 1, parameter_count = count, matched = matched, parameters = params }
+  return {
+    fx = fx_name(t, fx), fx_index = fx + 1, parameter_count = count - hidden, matched = matched,
+    hidden_midi_cc_placeholders = hidden > 0 and hidden or nil, parameters = params,
+  }
 end
 
 function commands.list_installed_fx(p)
-  local words = {}
-  for w in tostring(p.search or ""):lower():gmatch("%S+") do words[#words + 1] = w end
+  local words = words_of(p.search)
+  local category = p.category and trim_lower(p.category)
+  local developer = p.developer and trim_lower(p.developer)
   local limit = p.limit or 50
-  local matches, total, i = {}, 0, 0
-  while true do
-    local ok, name = reaper.EnumInstalledFX(i)
-    if not ok then break end
-    local lower, hit = name:lower(), true
-    for _, w in ipairs(words) do
-      if not lower:find(w, 1, true) then hit = false break end
-    end
+  local plugins, total, categories = {}, 0, {}
+  for _, g in ipairs(group_catalog(plugin_catalog())) do
+    local e = g.best
+    local haystack = (e.name .. " " .. (e.developer or "") .. " " .. (e.category or "")):lower()
+    local hit = has_all_words(haystack, words)
+      and (p.kind == nil or (p.kind == "instrument") == e.instrument)
+      and (not category or (e.category or ""):lower():find(category, 1, true))
+      and (not developer or (e.developer or ""):lower():find(developer, 1, true))
+      and (not p.format or #g.formats == 0 or table.concat(g.formats, " "):lower():find(trim_lower(p.format), 1, true))
     if hit then
       total = total + 1
-      if #matches < limit then matches[#matches + 1] = name end
+      for cat in (e.category or "Uncategorized"):gmatch("[^,]+") do
+        cat = cat:gsub("^%s+", "")
+        categories[cat] = (categories[cat] or 0) + 1
+      end
+      if #plugins < limit then
+        plugins[#plugins + 1] = {
+          name = e.name,
+          load_as = e.full_name,
+          kind = e.instrument and "instrument" or "effect",
+          format = e.format,
+          formats = #g.formats > 1 and g.formats or nil,
+          developer = e.developer,
+          category = e.category,
+          channels = e.channels,
+          hardware = e.hardware,
+          realtime_only = e.realtime_only,
+        }
+      end
     end
-    i = i + 1
   end
-  return { matches = matches, total_matches = total }
+  return { plugins = plugins, total_matches = total, categories = json.object(categories) }
+end
+
+function commands.list_fx_presets(p)
+  local t = get_track(p.track)
+  local fx = get_fx(t, p.fx)
+  local current_index, count = reaper.TrackFX_GetPresetIndex(t, fx)
+  local _, current = reaper.TrackFX_GetPreset(t, fx, "")
+  local result = { fx = fx_name(t, fx), current = current ~= "" and current or nil, presets = {} }
+  local browser_note = "this plugin keeps its presets in its own browser, not in REAPER's list; "
+    .. "open its window with update_fx(show=true) to browse them"
+  if count == 0 then
+    result.note = browser_note
+    return result
+  end
+
+  -- Stepping through presets changes the plugin, so save its state and put it back.
+  local chunk_ok, fx_chunk = reaper.TrackFX_GetNamedConfigParm(t, fx, "vst_chunk")
+  local track_chunk
+  if not chunk_ok then _, track_chunk = reaper.GetTrackStateChunk(t, "", false) end
+
+  local words, limit = words_of(p.search), p.limit or 200
+  local matched, examined, numbered = 0, 0, 0
+  reaper.PreventUIRefresh(1)
+  local ok, err = pcall(function()
+    for k = 0, math.min(count, 5000) - 1 do
+      reaper.TrackFX_SetPresetByIndex(t, fx, k)
+      local _, name = reaper.TrackFX_GetPreset(t, fx, "")
+      examined = examined + 1
+      if name:match("^Program %d+$") then numbered = numbered + 1 end
+      if examined == 16 and numbered == 16 then break end -- placeholder slots, not real presets
+      if has_all_words(name:lower(), words) then
+        matched = matched + 1
+        if #result.presets < limit then result.presets[#result.presets + 1] = { index = k + 1, name = name } end
+      end
+    end
+  end)
+  if chunk_ok then
+    reaper.TrackFX_SetNamedConfigParm(t, fx, "vst_chunk", fx_chunk)
+  elseif track_chunk then
+    reaper.SetTrackStateChunk(t, track_chunk, false)
+  end
+  reaper.PreventUIRefresh(-1)
+  if not ok then error(err, 0) end
+
+  if numbered == examined then
+    result.presets = {}
+    result.note = "only numbered program slots (Program 1, 2, ...) are visible to REAPER; " .. browser_note
+    return result
+  end
+  result.total_matches = matched
+  return result
+end
+
+-- Splits a multi-output instrument (drum machines, Overbridge, multitimbral
+-- synths) onto one track per stereo output. Outputs 1/2 stay on the instrument
+-- track; each new track receives one output pair post-FX.
+function commands.split_instrument_outputs(p)
+  local t = get_track(p.track)
+  local fx = p.fx and get_fx(t, p.fx) or reaper.TrackFX_GetInstrument(t)
+  if fx < 0 then fail("track '" .. track_name(t) .. "' has no instrument") end
+  local _, _, outs = reaper.TrackFX_GetIOSize(t, fx)
+  local name = fx_name(t, fx)
+  if outs <= 2 then fail(name .. " has only " .. outs .. " outputs") end
+
+  local function pin_name(pin)
+    local s = named_config(t, fx, "out_pin_" .. pin) or ("Out " .. (pin + 1))
+    return (s:gsub("%s*%([LR]%)$", ""):gsub("%s+[LR]$", ""):gsub("%s+[Ll]eft$", ""):gsub("%s+[Rr]ight$", ""))
+  end
+  local wanted
+  if p.outputs then
+    wanted = {}
+    for _, o in ipairs(p.outputs) do wanted[trim_lower(tostring(o))] = true end
+  end
+  local outputs = {}
+  for pin = 2, outs - 1, 2 do
+    local label = pin_name(pin)
+    local number = tostring(pin // 2 + 1)
+    if label ~= "(unused)" and (not wanted or wanted[trim_lower(label)] or wanted[number]) then
+      outputs[#outputs + 1] = { channel = pin, name = label, mono = pin + 1 >= outs, pair = pin // 2 + 1 }
+    end
+  end
+  if #outputs == 0 then fail("no matching outputs; " .. name .. " has " .. outs .. " output channels") end
+
+  -- Leave pairs that already feed another track alone.
+  local taken = {}
+  for i = 0, reaper.GetTrackNumSends(t, 0) - 1 do
+    taken[int(reaper.GetTrackSendInfo_Value(t, 0, i, "I_SRCCHAN")) & 1023] = true
+  end
+
+  return with_undo("split outputs of " .. name, function()
+    local nchan = math.min(128, outs + outs % 2)
+    if reaper.GetMediaTrackInfo_Value(t, "I_NCHAN") < nchan then
+      reaper.SetMediaTrackInfo_Value(t, "I_NCHAN", nchan)
+    end
+    -- Only the main pair goes to the parent/master; the rest go to the new tracks.
+    reaper.SetMediaTrackInfo_Value(t, "C_MAINSEND_NCH", 2)
+    local source_name = track_name(t)
+    local color = reaper.GetTrackColor(t)
+    local insert_at = int(reaper.GetMediaTrackInfo_Value(t, "IP_TRACKNUMBER"))
+    local created, skipped = {}, {}
+    for _, o in ipairs(outputs) do
+      if taken[o.channel] then
+        skipped[#skipped + 1] = o.name
+      else
+        reaper.InsertTrackAtIndex(insert_at, true)
+        local dest = reaper.GetTrack(0, insert_at)
+        insert_at = insert_at + 1
+        reaper.GetSetMediaTrackInfo_String(dest, "P_NAME", source_name .. " - " .. o.name, true)
+        if color ~= 0 then reaper.SetTrackColor(dest, color) end
+        local send = reaper.CreateTrackSend(t, dest)
+        reaper.SetTrackSendInfo_Value(t, 0, send, "I_SRCCHAN", o.channel | (o.mono and 1024 or 0))
+        reaper.SetTrackSendInfo_Value(t, 0, send, "I_DSTCHAN", 0)
+        reaper.SetTrackSendInfo_Value(t, 0, send, "I_SENDMODE", 3)
+        created[#created + 1] = {
+          track = track_ref(dest), output = o.name,
+          channels = o.mono and tostring(o.channel + 1) or ((o.channel + 1) .. "/" .. (o.channel + 2)),
+        }
+      end
+    end
+    return {
+      instrument = name,
+      created = created,
+      already_routed = #skipped > 0 and skipped or nil,
+      main_output = pin_name(0) .. " stays on '" .. source_name .. "'",
+      note = "sounds only reach these tracks once they're assigned to those outputs inside the plugin",
+    }
+  end)
+end
+
+function commands.get_instrument_notes(p)
+  local t = p.item_id and reaper.GetMediaItem_Track(find_item(p.item_id)) or get_track(p.track)
+  local instrument = reaper.TrackFX_GetInstrument(t)
+  local chan = int((p.channel or 1) - 1)
+  local names = {}
+  for pitch = 0, 127 do
+    local name = reaper.GetTrackMIDINoteNameEx(0, t, pitch, chan)
+    if name and name ~= "" then names[#names + 1] = { pitch = pitch, name = name } end
+  end
+  return {
+    track = track_ref(t),
+    instrument = instrument >= 0 and fx_name(t, instrument) or nil,
+    note_names = names,
+  }
 end
 
 function commands.set_tempo(p)
@@ -724,6 +1177,8 @@ function commands.set_tempo(p)
 end
 
 function commands.create_track(p)
+  -- Resolve first, so an ambiguous name fails before anything changes.
+  local instrument_name = p.instrument and (resolve_plugin(p.instrument, true) or p.instrument)
   return with_undo("create track " .. (p.name or ""), function()
     local count = reaper.CountTracks(0)
     local index = count
@@ -734,10 +1189,13 @@ function commands.create_track(p)
     if p.color then set_color(t, p.color) end
     local result = {}
     if p.instrument then
-      local fx = reaper.TrackFX_AddByName(t, p.instrument, false, -1)
+      local fx = reaper.TrackFX_AddByName(t, instrument_name, false, -1)
       if fx < 0 then
         result.warning = "couldn't find an instrument named '" .. p.instrument
           .. "'; the track was created without one (list_installed_fx can search)"
+      else
+        result.instrument = fx_details(t, fx)
+        if p.show_instrument then reaper.TrackFX_Show(t, fx, 3) end
       end
     end
     result.track = track_summary(t)
@@ -796,38 +1254,47 @@ end
 
 function commands.add_fx(p)
   local t = get_track(p.track)
+  local name = resolve_plugin(p.name) or p.name
   local index = with_undo("add " .. p.name .. " to " .. track_name(t), function()
     local instantiate = -1
     if p.position then instantiate = -1000 - math.max(0, int(p.position) - 1) end
-    local i = reaper.TrackFX_AddByName(t, p.name, false, instantiate)
+    local i = reaper.TrackFX_AddByName(t, name, false, instantiate)
     if i < 0 then
       fail("couldn't find an installed FX named '" .. p.name .. "' (list_installed_fx can search)")
     end
+    if p.show then reaper.TrackFX_Show(t, i, 3) end
     return i
   end)
-  return {
-    track = track_ref(t),
-    fx_index = index + 1,
-    name = fx_name(t, index),
-    parameter_count = reaper.TrackFX_GetNumParams(t, index),
-  }
+  local result = fx_details(t, index)
+  result.track = track_ref(t)
+  return result
 end
 
 function commands.set_fx_parameter(p)
   local t = get_track(p.track)
   local fx = get_fx(t, p.fx)
-  local param = find_param(t, fx, p.parameter)
-  if p.value == nil and p.display_value == nil then fail("give either value (0 to 1) or display_value") end
   return with_undo("set " .. fx_name(t, fx) .. " parameter", function()
-    local value, clamped = p.value, false
-    if value == nil then
-      value, clamped = solve_display_value(t, fx, param, p.display_value)
-    end
-    reaper.TrackFX_SetParamNormalized(t, fx, param, math.max(0, math.min(1, value)))
-    local info = param_info(t, fx, param)
+    local info = apply_param_change(t, fx, p)
     info.fx = fx_name(t, fx)
-    if clamped then info.note = "the requested value is outside this parameter's range, so it was set to the limit" end
     return info
+  end)
+end
+
+-- Several changes as one undo step; each one succeeds or reports its own error.
+function commands.set_fx_parameters(p)
+  local t = get_track(p.track)
+  local fx = get_fx(t, p.fx)
+  return with_undo("set " .. fx_name(t, fx) .. " parameters", function()
+    local results = {}
+    for i, change in ipairs(p.changes or {}) do
+      local ok, info = pcall(apply_param_change, t, fx, change)
+      if ok then
+        results[i] = info
+      else
+        results[i] = { parameter = change.parameter, error = type(info) == "table" and info.message or tostring(info) }
+      end
+    end
+    return { fx = fx_name(t, fx), results = results }
   end)
 end
 
@@ -839,8 +1306,13 @@ function commands.update_fx(p)
     if p.enabled ~= nil then reaper.TrackFX_SetEnabled(t, fx, p.enabled) end
     if p.preset then
       if not reaper.TrackFX_SetPreset(t, fx, p.preset) then
-        result.warning = "no preset named '" .. p.preset .. "' was found"
+        result.warning = "no preset named '" .. p.preset .. "' was found (list_fx_presets lists them)"
       end
+    end
+    if p.preset_index then
+      local _, count = reaper.TrackFX_GetPresetIndex(t, fx)
+      if p.preset_index < 1 or p.preset_index > count then fail("preset_index must be 1 to " .. count) end
+      reaper.TrackFX_SetPresetByIndex(t, fx, int(p.preset_index) - 1)
     end
     if p.show ~= nil then reaper.TrackFX_Show(t, fx, p.show and 3 or 2) end
     local _, preset = reaper.TrackFX_GetPreset(t, fx, "")
@@ -1120,11 +1592,28 @@ function commands.render_audio(p)
     if reaper.file_exists(path) then files[#files + 1] = path end
   end
   if #files == 0 then fail("REAPER didn't produce a render file (expected: " .. tostring(result) .. ")") end
+
+  -- The tracks whose audio is in this render: everything for the master, else
+  -- the track and anything in its folder.
+  local rendered = { t }
+  for i = 0, reaper.CountTracks(0) - 1 do
+    local tr = reaper.GetTrack(0, i)
+    local parent = reaper.GetParentTrack(tr)
+    while parent and not master do
+      if parent == t then rendered[#rendered + 1] = tr break end
+      parent = reaper.GetParentTrack(parent)
+    end
+    if master then rendered[#rendered + 1] = tr end
+  end
+  local realtime = realtime_only_fx(rendered)
   return {
     files = files,
     track = track_ref(t),
     start = time_to_pos(start_t),
     ["end"] = time_to_pos(end_t),
+    warning = #realtime > 0 and ("these plugins only produce sound in real time, so this offline render "
+      .. "may be missing their audio: " .. table.concat(realtime, ", ")
+      .. ". To measure them, record or render their output to an audio track first.") or nil,
   }
 end
 
