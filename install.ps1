@@ -1,0 +1,104 @@
+# creaper installer for Windows.
+#
+# Run this in PowerShell:
+#     irm https://raw.githubusercontent.com/nickcapron/creaper/main/install.ps1 | iex
+#
+# It installs Python if you don't have it (from winget or python.org), puts creaper in
+# its own folder (%LOCALAPPDATA%\creaper), offers to install Claude Code (Anthropic's
+# official installer), then runs `creaper setup`: ReaImGui for the chat panel (from its
+# official GitHub release), creaper's scripts in REAPER, and the Claude connections.
+# It never asks for or stores a Claude password or key: you sign in to Claude yourself.
+# Running it again upgrades creaper.
+
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+
+function Say($text) { Write-Host $text -ForegroundColor Cyan }
+function Warn($text) { Write-Host $text -ForegroundColor Yellow }
+function Refresh-Path {
+    $env:Path = [Environment]::GetEnvironmentVariable('Path', 'User') + ';' +
+                [Environment]::GetEnvironmentVariable('Path', 'Machine')
+}
+
+Say "`ncreaper installer`n"
+
+# REAPER has to have been opened once, so its settings folder exists.
+$reaper = Join-Path $env:APPDATA 'REAPER'
+if (-not (Test-Path $reaper)) {
+    Warn "REAPER's settings folder wasn't found ($reaper)."
+    Warn "Install REAPER from https://www.reaper.fm, open it once, then run this again."
+    return
+}
+
+# Python 3.10 or newer.
+function Find-Python {
+    foreach ($candidate in @(@('py', '-3'), @('python'))) {
+        $exe = $candidate[0]
+        $rest = @($candidate | Select-Object -Skip 1)
+        if (-not (Get-Command $exe -ErrorAction SilentlyContinue)) { continue }
+        try {
+            $out = & $exe @rest -c "import sys; print('%d.%d' % sys.version_info[:2]); print(sys.executable)" 2>$null
+        } catch { continue }
+        if ($out -and $out.Count -ge 2 -and [version]$out[0] -ge [version]'3.10' -and $out[1] -notmatch 'WindowsApps') {
+            return $out[1]
+        }
+    }
+    return $null
+}
+
+$python = Find-Python
+if (-not $python) {
+    Say "Installing Python 3.12 (creaper needs it)..."
+    if (Get-Command winget -ErrorAction SilentlyContinue) {
+        winget install -e --id Python.Python.3.12 --scope user --silent --accept-package-agreements --accept-source-agreements | Out-Null
+    } else {
+        $setup = Join-Path $env:TEMP 'python-3.12.7-amd64.exe'
+        Invoke-WebRequest 'https://www.python.org/ftp/python/3.12.7/python-3.12.7-amd64.exe' -OutFile $setup
+        Start-Process $setup -ArgumentList '/quiet', 'InstallAllUsers=0', 'PrependPath=1', 'Include_launcher=1' -Wait
+    }
+    Refresh-Path
+    $python = Find-Python
+    if (-not $python) {
+        Warn "Python didn't install. Install Python 3.10 or newer from https://www.python.org, then run this again."
+        return
+    }
+}
+Say "Python: $python"
+
+# creaper in its own environment, so it can't clash with anything else.
+$root = Join-Path $env:LOCALAPPDATA 'creaper'
+$venv = Join-Path $root 'venv'
+$venvPython = Join-Path $venv 'Scripts\python.exe'
+if (-not (Test-Path $venvPython)) {
+    Say "Creating creaper's environment in $venv..."
+    & $python -m venv $venv
+}
+Say "Installing creaper (this takes a minute)..."
+& $venvPython -m pip install --upgrade --quiet pip
+& $venvPython -m pip install --upgrade --quiet 'https://github.com/nickcapron/creaper/archive/refs/heads/main.zip'
+if ($LASTEXITCODE -ne 0) {
+    Warn "pip couldn't install creaper. Check your internet connection and run this again."
+    return
+}
+
+# Claude Code runs the chat panel on your own Claude account.
+$haveClaude = (Get-Command claude -ErrorAction SilentlyContinue) -or
+              (Test-Path (Join-Path $env:USERPROFILE '.local\bin\claude.exe'))
+if (-not $haveClaude) {
+    Write-Host ""
+    Write-Host "creaper's chat panel runs on Claude Code, signed in with your own Claude account."
+    $answer = Read-Host "Install Claude Code now, with Anthropic's official installer? [Y/n]"
+    if ($answer -eq '' -or $answer -match '^[yY]') {
+        Invoke-RestMethod https://claude.ai/install.ps1 | Invoke-Expression
+        Refresh-Path
+    }
+}
+
+# Everything else: ReaImGui, creaper's scripts in REAPER, Claude Desktop / Claude Code.
+& (Join-Path $venv 'Scripts\creaper.exe') setup
+
+Write-Host ""
+Say "Done. Last steps:"
+Write-Host "  1. If you haven't signed in to Claude Code yet: open a new terminal and run  claude"
+Write-Host "  2. Restart REAPER. The creaper panel opens by itself."
+Write-Host "To update creaper later, run this installer again."

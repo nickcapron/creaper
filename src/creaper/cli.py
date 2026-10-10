@@ -145,6 +145,15 @@ def main(argv: list[str] | None = None) -> None:
     install.add_argument("--no-chat", action="store_true",
                          help="start only the bridge at launch, not the chat panel")
     install.add_argument("--autostart", action="store_true", help=argparse.SUPPRESS)  # the default now
+    setup = sub.add_parser("setup", help="set everything up: ReaImGui, REAPER scripts, Claude Code and Claude Desktop")
+    setup.add_argument("--reaper-resource-path", type=Path, default=None)
+    setup.add_argument("--yes", action="store_true", help="answer yes to every question")
+    setup.add_argument("--dry-run", action="store_true", help="say what would happen, change nothing")
+    setup.add_argument("--skip-reaimgui", action="store_true")
+    setup.add_argument("--skip-claude-desktop", action="store_true")
+    setup.add_argument("--skip-claude-code", action="store_true")
+    setup.add_argument("--no-autostart", action="store_true")
+    setup.add_argument("--no-chat", action="store_true")
     sub.add_parser("doctor", help="check that the server can reach REAPER")
     turn = sub.add_parser("chat-turn", help="run one chat-panel turn (started by creaper_chat.lua)")
     turn.add_argument("request", type=Path)
@@ -153,6 +162,13 @@ def main(argv: list[str] | None = None) -> None:
     if args.command == "install-bridge":
         install_bridge(args.reaper_resource_path or default_bridge_dir().parent,
                        autostart=not args.no_autostart, chat=not args.no_chat)
+    elif args.command == "setup":
+        from .installer import run_setup
+
+        sys.exit(run_setup(args.reaper_resource_path or default_bridge_dir().parent, yes=args.yes,
+                           dry_run=args.dry_run, reaimgui=not args.skip_reaimgui,
+                           desktop=not args.skip_claude_desktop, code=not args.skip_claude_code,
+                           autostart=not args.no_autostart, chat=not args.no_chat))
     elif args.command == "doctor":
         sys.exit(doctor())
     elif args.command == "chat-turn":

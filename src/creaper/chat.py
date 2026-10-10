@@ -18,6 +18,7 @@ event lines the panel reads as they arrive:
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -124,8 +125,24 @@ def resolve_windows_shim(path: str) -> str:
     return str(exe) if exe.exists() else path
 
 
+def _claude_candidates() -> list[Path]:
+    """Where Claude Code's installers put it, for when it isn't on PATH yet (a fresh
+    install only reaches PATH in new terminals)."""
+    home = Path.home()
+    exe = "claude.exe" if sys.platform == "win32" else "claude"
+    out = [home / ".local" / "bin" / exe, home / ".claude" / "local" / exe]
+    if sys.platform == "win32":
+        appdata = Path(os.environ.get("APPDATA", home / "AppData" / "Roaming"))
+        out += [appdata / "npm" / "claude.cmd", appdata / "npm" / "node_modules" / "@anthropic-ai" / "claude-code" / "bin" / "claude.exe"]
+    else:
+        out += [Path("/opt/homebrew/bin/claude"), Path("/usr/local/bin/claude")]
+    return out
+
+
 def find_claude(configured: str | None = None) -> str | None:
     found = configured if configured and Path(configured).exists() else shutil.which("claude")
+    if not found:
+        found = next((str(p) for p in _claude_candidates() if p.exists()), None)
     return resolve_windows_shim(found) if found else None
 
 

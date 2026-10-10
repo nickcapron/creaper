@@ -162,9 +162,44 @@ delete them.
 
 ## Install
 
-You need **REAPER 7** (tested on 7.58) and **Python 3.10 or newer**.
+You need **REAPER 7** (opened at least once) and a **Claude** account.
 
-**1. Install creaper**
+### Windows: one command
+
+Open PowerShell and run:
+
+```powershell
+irm https://raw.githubusercontent.com/nickcapron/creaper/main/install.ps1 | iex
+```
+
+It installs Python if needed, puts creaper in its own folder (`%LOCALAPPDATA%\creaper`),
+offers to install Claude Code with Anthropic's official installer, then runs
+`creaper setup`, which:
+
+- installs **ReaImGui** (for the chat panel) from its official GitHub release, if you
+  don't have it;
+- installs creaper's scripts in REAPER and starts them with REAPER;
+- offers to connect creaper to **Claude Desktop** and to **Claude Code**.
+
+Then sign in to Claude Code once (run `claude` in a new terminal) and restart REAPER:
+the creaper panel opens by itself. Run the same command again to update.
+
+The installer never asks for a Claude password or key; signing in happens in Claude's
+own apps. To see what it does first, [read install.ps1](install.ps1).
+
+### macOS, Linux, or by hand
+
+You need Python 3.10 or newer.
+
+```bash
+pip install https://github.com/nickcapron/creaper/archive/refs/heads/main.zip
+creaper setup
+```
+
+`creaper setup --dry-run` shows what it would do without changing anything. The
+individual steps are below if you'd rather do them yourself.
+
+**1. Install creaper** (manual steps)
 
 ```bash
 pip install git+https://github.com/nickcapron/creaper
@@ -346,6 +381,7 @@ python -m venv .venv
 - `src/creaper/project_tools.py`: tempo map, program changes and controllers, routing
 - `src/creaper/samplelib.py`, `sample_tools.py`: the sample library, loop tempo/key analysis, sampler kits
 - `src/creaper/export_tools.py`: saving the project, exporting the mix and stems
+- `src/creaper/installer.py`, `install.ps1`: `creaper setup` and the one-command Windows installer
 - `assets/make_brand.py`: regenerates the logo, banner and thumbnail in `assets/brand/`
 - `src/creaper/drums.py`: saved drum maps
 - `src/creaper/analysis.py`: loudness (ITU-R BS.1770-4 / EBU R128), true peak, spectrum, stereo
