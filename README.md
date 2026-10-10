@@ -89,9 +89,20 @@ The one-call jobs were checked against real renders, not just set up:
   after them, because an instrument lets a trigger arriving on channels 3/4 through to
   its output. Sidechain-capable plugins (e.g. compressors with an "SC Source: External"
   switch) are switched over automatically.
-- **Mastering** renders, measures and adjusts the limiter and master level until the
-  integrated loudness is within 0.5 LU of the target, and warns when the limiter is
-  working hard.
+- **Mastering** builds EQ → glue compressor → limiter on the master. A glue compressor
+  creaper knows is set up and calibrated by measurement until it takes about 1.5 dB
+  off the loud moments (how much the gap between loud and quiet moments shrinks, which
+  make-up gain can't fake). Then the limiter and master level are adjusted until the
+  integrated loudness is within 0.5 LU of the target, the true peak is checked against
+  the ceiling (tightened if needed), and it warns when peaks and loudness are less
+  than 7 dB apart (squashed). Tested with Arturia's Bus FORCE, Comp VCA-65, FET-76 and
+  TUBE-STA and REAPER's ReaComp.
+- **Plugin profiles** describe how specific plugins work, e.g. Bus FORCE's parallel
+  dry/compressor/saturation paths (its compressor path is muted by default), or that
+  FET-76 compresses more as its input goes up. Built in for REAPER's ReaComp and
+  Arturia's Bus FORCE, Comp VCA-65/FET-76/TUBE-STA, EQ SITRAL-295 and Pre 1973/TridA/V76.
+- **Plugin plumbing is off-limits.** Parameters that browse or save presets, drive
+  hardware controllers or undo inside the plugin are hidden and refused.
 - The jobs take your own plugins (`compressor=`, `eq=`, `glue_compressor=`, `fx=`);
   creaper configures REAPER's stock plugins itself and tells Claude what to set on
   others.

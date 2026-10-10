@@ -1,6 +1,6 @@
 -- @description creaper bridge: lets Claude work in REAPER through the creaper MCP server
 -- @author nickcapron
--- @version 0.6.0
+-- @version 0.6.1
 -- @link https://github.com/nickcapron/creaper
 -- @provides
 --   [nomain] creaper_json.lua
@@ -13,7 +13,7 @@
 --   Every change it makes is a named undo point ("creaper: ..."), so Ctrl+Z
 --   reverts anything Claude did.
 
-local BRIDGE_VERSION = "0.6.0"
+local BRIDGE_VERSION = "0.6.1"
 local PROTOCOL = 2
 
 ----------------------------------------------------------------------- JSON
@@ -305,8 +305,25 @@ end
 -- Many VST3 plugins expose thousands of placeholder parameters for MIDI CC
 -- mapping ("MIDI CC helper 85 [1]", "MIDI CC 0|60"). They aren't real
 -- controls, so they're hidden from listings and name searches.
+-- Plugins (Arturia's among them) also expose host/controller plumbing as
+-- parameters: preset browsing, hardware controller hooks, undo/redo, MPE and
+-- program-change placeholders. Setting one could save over a preset or undo
+-- the user's work inside the plugin, so they're hidden too.
+local PLUMBING = {
+  "^vst_programchange_", "^mpe_", "^hardwaredisplaycontrol", "^hardwarebackcontrol", "^hw controller",
+  "^select preset", "^navigate through", "^add/remove selected filter", "^select multi filter",
+  "^clear filters", "^active filter", "^browse back", "^sendvaluestomidicontroller", "^previous preset$",
+  "^next preset$", "^select keylab", "^oct minus$", "^oct plus$", "^saves the current preset",
+  "^undo the last action", "^redo the last action",
+}
+
 local function is_midi_cc_helper(name)
-  return name:find("^MIDI CC helper") ~= nil or name:find("^MIDI CC %d+|%d+$") ~= nil
+  if name:find("^MIDI CC helper") or name:find("^MIDI CC %d+|%d+$") then return true end
+  local lower = name:lower()
+  for _, pattern in ipairs(PLUMBING) do
+    if lower:find(pattern) then return true end
+  end
+  return false
 end
 
 local function find_param(t, fx, ref)
@@ -452,6 +469,10 @@ end
 -- Restores the parameter if anything goes wrong.
 local function apply_param_change(t, fx, change)
   local param = find_param(t, fx, change.parameter)
+  local _, param_name = reaper.TrackFX_GetParamName(t, fx, param, "")
+  if is_midi_cc_helper(param_name) then
+    fail("'" .. param_name .. "' isn't a sound control (it's preset/controller plumbing), so creaper won't set it")
+  end
   local original = reaper.TrackFX_GetParamNormalized(t, fx, param)
   local ok, result = pcall(function()
     local value, clamped = change.value, false
@@ -798,7 +819,7 @@ function commands.get_fx_parameters(p)
   end
   return {
     fx = fx_name(t, fx), fx_index = fx + 1, parameter_count = count - hidden, matched = matched,
-    hidden_midi_cc_placeholders = hidden > 0 and hidden or nil, parameters = params,
+    hidden_placeholders = hidden > 0 and hidden or nil, parameters = params,
   }
 end
 

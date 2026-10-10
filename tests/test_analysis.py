@@ -88,3 +88,19 @@ def test_overs_are_counted(tmp_path):
     result = analysis.analyze_file(path)
     assert result["levels"]["samples_over_0dbfs"] > 0
     assert result["levels"]["sample_peak_dbfs"] == pytest.approx(3.52, abs=0.05)
+
+
+def test_envelope_range_shrinks_under_compression_and_ignores_level():
+    # A loud/quiet alternating tone; "compressed" turns the loud parts down 6 dB.
+    t = np.arange(4 * FS) / FS
+    loud = (np.floor(t * 2) % 2 == 0)
+    gain = np.where(loud, 1.0, 10 ** (-12 / 20))
+    tone = 0.5 * gain * np.sin(2 * np.pi * 220 * t)
+    squashed = tone * np.where(loud, 10 ** (-6 / 20), 1.0)
+    a = analysis.envelope_range(np.stack([tone, tone], axis=1), FS)
+    b = analysis.envelope_range(np.stack([squashed, squashed], axis=1), FS)
+    assert a == pytest.approx(12, abs=0.5)
+    assert a - b == pytest.approx(6, abs=0.5)
+    c = analysis.envelope_range(np.stack([tone, tone], axis=1) * 0.25, FS)  # 12 dB quieter, same spread
+    assert c == pytest.approx(a, abs=1e-6)
+    assert analysis.envelope_range(np.zeros((FS, 2)), FS) is None

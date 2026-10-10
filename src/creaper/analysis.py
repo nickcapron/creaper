@@ -123,6 +123,23 @@ def true_peak(x: np.ndarray, fs: float, chunk: int = 1 << 20) -> float:
     return peak
 
 
+def envelope_range(audio: np.ndarray, fs: float, window_s: float = 0.05) -> float | None:
+    """Spread (dB) between loud and quiet moments: the 95th minus the 10th percentile
+    of short-window RMS level over audible sound. A compressor turns the loud moments
+    down relative to the quiet ones, so this shrinks by roughly the gain reduction it
+    applies to loud parts, whatever the output level (make-up gain doesn't change it)."""
+    n = int(window_s * fs)
+    count = audio.shape[0] // n
+    if count < 4:
+        return None
+    power = np.mean(np.square(audio[: count * n].astype(np.float64)).reshape(count, n, -1), axis=(1, 2))
+    audible = power > 1e-6  # above about -60 dBFS RMS
+    if audible.sum() < 4:
+        return None
+    level = 10 * np.log10(power[audible])
+    return float(np.percentile(level, 95) - np.percentile(level, 10))
+
+
 def spectrum(mono: np.ndarray, fs: float) -> dict:
     nperseg = min(8192, mono.size)
     freqs, psd = signal.welch(mono, fs=fs, nperseg=nperseg)
@@ -205,6 +222,7 @@ def analyze_file(path: str | Path, timeline_points: int = 32) -> dict:
             "true_peak_dbtp": _db(tp),
             "rms_dbfs": _db(rms),
             "crest_factor_db": _round(20 * math.log10(peak / rms)) if rms > 0 else None,
+            "envelope_range_db": _round(envelope_range(audio, fs)),
             "samples_over_0dbfs": int(np.count_nonzero(np.abs(audio) > 1.0)),
             "dc_offset_dbfs": _db(float(np.max(np.abs(audio.mean(axis=0, dtype=np.float64))))),
         },

@@ -6,6 +6,7 @@ import functools
 import json
 import math
 import os
+import re
 import threading
 import time
 import uuid
@@ -15,7 +16,7 @@ from typing import Annotated, Any, Literal
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
 
-from . import analysis, styles, theory
+from . import analysis, plugin_profiles, styles, theory
 from .bridge import Bridge, BridgeError
 from .knowledge import Knowledge
 from .drums import BUILTIN_DRUM_MAPS, DrumMaps, builtin_entries
@@ -50,6 +51,11 @@ Plugins (VST, VST3, CLAP, AU, JS):
   master_to_target glue_compressor=, create_bus fx=); set third-party plugins'
   parameters yourself afterwards, and save_note what you learn about each plugin's
   controls (topic "plugin") so it's faster next time.
+- get_plugin_profile explains plugins creaper knows (e.g. Arturia's Bus FORCE has
+  parallel dry/compressor/saturation paths, with the compressor path muted by default;
+  FET-76 compresses more as its input goes up). Read it before configuring one.
+- For mastering, master_to_target takes the user's plugins (eq=, glue_compressor=) and
+  calibrates known compressors by measurement; check true_peak_ok in the result.
   Plugin names can be loose ("FET-76", "Analog Lab"); duplicates in several formats
   load as CLAP/VST3 first.
 - Look up parameter names with get_fx_parameters before setting them. Set values in
@@ -235,7 +241,7 @@ def get_fx_parameters(
     search: Annotated[str | None, Field(description="Only parameters whose name contains these words, e.g. 'filter cutoff'")] = None,
     offset: int = 0,
     limit: int = 100,
-    include_midi_cc: Annotated[bool, Field(description="Also list VST3 'MIDI CC' placeholder parameters (normally hidden)")] = False,
+    include_midi_cc: Annotated[bool, Field(description="Also list placeholder parameters (VST3 'MIDI CC' helpers, preset/controller plumbing; normally hidden)")] = False,
 ) -> dict:
     """Lists an FX's parameters with their current value (0-1) and displayed value
     (e.g. '-18.0 dB'). Switches and menus show how many positions they have, and their
@@ -577,8 +583,13 @@ def add_fx(
     position: Annotated[int | None, Field(ge=1, description="Chain position (1 = first); default: end")] = None,
     show: Annotated[bool, Field(description="Open the plugin's window")] = False,
 ) -> dict:
-    """Adds a plugin to a track's FX chain (use 'master' for the master bus)."""
-    return call("add_fx", timeout=60.0, track=track, name=fx_name, position=position, show=show)
+    """Adds a plugin to a track's FX chain (use 'master' for the master bus). For
+    plugins creaper knows, the result includes how they work."""
+    result = call("add_fx", timeout=60.0, track=track, name=fx_name, position=position, show=show)
+    profile = plugin_profiles.find_profile(result.get("name"))
+    if profile:
+        result["profile"] = {"how_it_works": profile.summary, "key_controls": profile.controls}
+    return result
 
 
 @tool()
@@ -1192,15 +1203,21 @@ def master_to_target(
     style: Annotated[str | None, Field(description="Or aim for the middle of this style's typical loudness")] = None,
     platform: Annotated[str | None, Field(description="Or a platform: spotify, youtube, apple music, club...")] = None,
     ceiling_dbtp: Annotated[float, Field(le=0, ge=-6)] = -1.0,
-    glue: Annotated[bool, Field(description="Also add a gentle bus compressor before the limiter")] = True,
-    glue_compressor: Annotated[str | None, Field(description="Bus compressor plugin to use for glue instead of ReaComp, e.g. one of the user's")] = None,
+    glue: Annotated[bool, Field(description="Also add a bus compressor before the limiter")] = True,
+    glue_compressor: Annotated[str | None, Field(description="Bus compressor to use for glue, e.g. the user's 'Bus FORCE' or 'Comp VCA-65'; default ReaComp")] = None,
+    glue_db: Annotated[float, Field(ge=0.5, le=6, description="How much the glue compressor should tame the peaks, in dB")] = 1.5,
+    eq: Annotated[str | None, Field(description="Also put this EQ first on the master (added flat, for shaping tone), e.g. 'EQ SITRAL-295'")] = None,
     start_bar: Bar = None,
     end_bar: Annotated[float | None, Field(description="Measure only this range (e.g. the loudest section) to save time")] = None,
     passes: Annotated[int, Field(ge=1, le=5)] = 3,
 ) -> dict:
-    """Masters the mix to a loudness target: puts a glue compressor and ReaLimit on the
-    master (or reuses them), then renders, measures and adjusts the limiter until the
-    integrated loudness is within 0.5 LU of the target. Each pass renders the range."""
+    """Masters the mix: optional EQ, then a glue compressor and ReaLimit on the master
+    (reusing ones already there). Plugins with a built-in profile (REAPER's ReaComp,
+    Arturia's Bus FORCE, Comp VCA-65, FET-76, TUBE-STA) are set up and calibrated by
+    measurement so the glue takes about glue_db off the peaks. Then the limiter and
+    master fader are adjusted until the integrated loudness is within 0.5 LU of the
+    target, and the true peak is checked against the ceiling. Each step renders the
+    range, so a short loud section is much faster than the whole song."""
     if target_lufs is None:
         if style:
             lo, hi = styles.find_style(style).lufs
@@ -1211,26 +1228,49 @@ def master_to_target(
             target_lufs = styles.STREAMING_TARGETS[platform.lower()]
         else:
             target_lufs = -14.0
-    details = call("get_track_details", track="master")
-    names = [f["name"] for f in details["fx"]]
-    glue_name = glue_compressor or "ReaComp"
-    glue_note = None
-    if glue and not any(glue_name.lower() in n.lower() for n in names):
-        # Glue goes before a limiter that's already there; otherwise at the end.
-        limiter_at = next((i + 1 for i, n in enumerate(names) if "ReaLimit" in n), None)
-        comp = call("add_fx", track="master", name=glue_name, position=limiter_at or len(names) + 1)
-        if "ReaComp" in comp["name"]:
-            call("set_fx_parameters", track="master", fx=comp["index"], changes=[
-                {"parameter": "Threshold", "display_value": -18}, {"parameter": "Ratio", "display_value": 2},
-                {"parameter": "Attack", "display_value": 30}, {"parameter": "Release", "display_value": 150}])
+    result: dict[str, Any] = {"target_lufs": target_lufs}
+
+    def master_fx() -> list[dict]:
+        return call("get_track_details", track="master")["fx"]
+
+    def find_fx(name: str) -> dict | None:
+        return next((f for f in master_fx() if name.lower() in f["name"].lower()), None)
+
+    # Chain order: EQ -> glue -> limiter. Reuse what's there; insert before the limiter.
+    def insert_before_limiter(name: str) -> dict:
+        fx = master_fx()
+        limiter_at = next((f["index"] for f in fx if "ReaLimit" in f["name"]), None)
+        return call("add_fx", track="master", name=name, position=limiter_at or len(fx) + 1)
+
+    if eq and not find_fx(eq):
+        added = call("add_fx", track="master", name=eq, position=1)
+        result["eq"] = f"{added['name']} is first on the master, flat; shape the tone with set_fx_parameters"
+
+    limiter = find_fx("ReaLimit") or call("add_fx", track="master", name="ReaLimit")
+    if glue:
+        glue_name = glue_compressor or "ReaComp"
+        comp = find_fx(glue_name) or insert_before_limiter(glue_name)
+        profile = plugin_profiles.find_profile(comp["name"])
+        if profile and profile.drive:
+            changes = [dict(c) for c in profile.setup + profile.glue]
+            if changes:
+                call("set_fx_parameters", track="master", fx=comp["index"], changes=changes)
+            limiter = find_fx("ReaLimit")
+            # Calibrate without the limiter in the way.
+            call("update_fx", track="master", fx=limiter["index"], enabled=False)
+            try:
+                result["glue"] = {"plugin": comp["name"],
+                                  **_calibrate_compressor("master", comp["index"], profile, glue_db, start_bar, end_bar)}
+            finally:
+                call("update_fx", track="master", fx=limiter["index"], enabled=True)
         else:
-            glue_note = f"{comp['name']} was added for glue at its default settings; aim for 1-2 dB of gain reduction"
-    limiter = next((f for f in call("get_track_details", track="master")["fx"] if "ReaLimit" in f["name"]), None)
-    if limiter is None:
-        limiter = call("add_fx", track="master", name="ReaLimit")
+            result["glue"] = {"plugin": comp["name"],
+                              "note": "no built-in profile for this plugin: it was added at its defaults; set it for "
+                                      "1-2 dB of gain reduction with get_fx_parameters / set_fx_parameters"}
+    limiter = find_fx("ReaLimit")
     lim = limiter["index"]
     call("set_fx_parameters", track="master", fx=lim, changes=[{"parameter": "Ceiling", "display_value": ceiling_dbtp}])
-    threshold = float(call("get_fx_parameters", track="master", fx=lim, search="Threshold")["parameters"][0]["display"])
+    threshold = _number(call("get_fx_parameters", track="master", fx=lim, search="Threshold")["parameters"][0]["display"])
     # Two controls: the limiter threshold pushes loudness up; the master fader (after
     # the limiter) brings it down, so a mix that's already too loud can be tamed.
     fader = call("describe_track", track="master").get("volume_db")
@@ -1257,13 +1297,133 @@ def master_to_target(
         call("set_fx_parameters", track="master", fx=lim, changes=[{"parameter": "Threshold", "display_value": threshold}])
         call("set_track_properties", track="master", volume_db=fader)
     final = history[-1]
-    result = {"target_lufs": target_lufs, "passes": history, "reached": abs(final["integrated_lufs"] - target_lufs) <= 0.5}
-    if glue_note:
-        result["glue"] = glue_note
-    if threshold <= -8:
-        result["warning"] = (f"the limiter is working hard ({threshold:.1f} dB): the mix may sound squashed; "
-                             "turning up the mix itself, or a lower target, keeps more punch")
+    # The limiter catches sample peaks; peaks between samples can still poke over the
+    # ceiling. Measure, and if so, lower the ceiling by the overshoot and check again.
+    if final["true_peak_dbtp"] is not None and final["true_peak_dbtp"] > ceiling_dbtp + 0.05:
+        over = final["true_peak_dbtp"] - ceiling_dbtp
+        tighter = max(-6.0, ceiling_dbtp - over - 0.2)
+        call("set_fx_parameters", track="master", fx=lim, changes=[{"parameter": "Ceiling", "display_value": tighter}])
+        measured = analyze_audio(track="master", start_bar=start_bar, end_bar=end_bar)
+        history.append({"limiter_threshold_db": round(threshold, 2), "master_fader_db": round(fader, 2),
+                        "limiter_ceiling_db": round(tighter, 2), "integrated_lufs": measured["loudness"]["integrated_lufs"],
+                        "true_peak_dbtp": measured["levels"]["true_peak_dbtp"]})
+        final = history[-1]
+    result["passes"] = history
+    result["reached"] = abs(final["integrated_lufs"] - target_lufs) <= 0.5
+    result["true_peak_ok"] = final["true_peak_dbtp"] is None or final["true_peak_dbtp"] <= ceiling_dbtp + 0.05
+    result["chain"] = [f["name"] for f in master_fx()]
+    # Squashed = little room between peaks and loudness (loud commercial masters sit
+    # around 8-9 dB). A high limiter drive alone isn't a problem: it may just be
+    # making up the level the glue compressor took away.
+    if final["true_peak_dbtp"] is not None:
+        plr = round(final["true_peak_dbtp"] - final["integrated_lufs"], 1)
+        result["peak_to_loudness_db"] = plr
+        if plr < 7:
+            result["warning"] = (f"only {plr} dB between peaks and loudness: the master is likely squashed; "
+                                 "a lower target or less glue keeps more punch")
     return result
+
+
+def _number(display: str) -> float:
+    m = re.search(r"[-+]?\d*\.?\d+", display or "")
+    if not m:
+        raise ValueError(f"can't read a number from '{display}'")
+    value = float(m.group())
+    return value * 1000 if re.search(r"\d\s*k", display.lower()) else value
+
+
+def _measure(track: str | int, start_bar: float | None, end_bar: float | None) -> dict:
+    m = analyze_audio(track=track, start_bar=start_bar, end_bar=end_bar)
+    if m.get("silent") or m.get("loudness", {}).get("integrated_lufs") is None:
+        raise ValueError("that range is silent, so there's nothing to measure")
+    return m
+
+
+def _crest(m: dict) -> float:
+    value = m.get("levels", {}).get("envelope_range_db")
+    if value is None:
+        raise ValueError(f"too little sound in that range to calibrate a compressor (measured: {m.get('levels')})")
+    return value
+
+
+def _calibrate_compressor(track: str | int, fx_index: int, profile: plugin_profiles.Profile, target_db: float,
+                          start_bar: float | None, end_bar: float | None, passes: int = 7) -> dict:
+    """Moves a compressor's drive until it takes about target_db off the transients,
+    measured as the drop in average short-window crest factor against the compressor
+    bypassed (independent of output level, so make-up gain and output links don't
+    fool it). Steps grow while nothing changes, so it finds where compression starts."""
+    call("update_fx", track=track, fx=fx_index, enabled=False)
+    try:
+        base = _crest(_measure(track, start_bar, end_bar))
+    finally:
+        call("update_fx", track=track, fx=fx_index, enabled=True)
+    params = call("get_fx_parameters", track=track, fx=fx_index, search=profile.drive)["parameters"]
+    exact = next((p for p in params if p["name"] == profile.drive), None)
+    if exact is None:
+        raise ValueError(f"{profile.name} has no '{profile.drive}' control; its profile may be out of date")
+    drive = _number(exact["display"])
+    if base < 2 * target_db:
+        # Little difference between loud and quiet moments (sustained, already
+        # squashed material): chasing a reduction would only crush it.
+        return {"control": profile.drive, "value": round(drive, 2), "loud_part_reduction_db": 0.0,
+                "target_db": target_db, "calibration": [],
+                "note": f"the material has little dynamic movement ({base:.1f} dB between loud and quiet moments), "
+                        "so the compressor was left at its gentle starting settings instead of being pushed"}
+    steps: list[dict] = []
+    boost, previous = 1.0, None
+    reduction = 0.0
+    for _ in range(passes):
+        reduction = round(base - _crest(_measure(track, start_bar, end_bar)), 2)
+        steps.append({"drive": round(drive, 2), "loud_part_reduction_db": reduction})
+        if abs(reduction - target_db) <= 0.3:
+            break
+        if previous is not None and abs(reduction - previous) < 0.15 and reduction < target_db:
+            boost = min(boost * 2, 8.0)  # nothing happened: search further
+        else:
+            boost = 1.0
+        previous = reduction
+        new_drive = plugin_profiles.next_drive(drive, reduction, target_db, profile, scale=boost)
+        if len(steps) >= 2:
+            # Secant step: how much reduction the last move of the drive bought.
+            d_drive = steps[-1]["drive"] - steps[-2]["drive"]
+            d_red = steps[-1]["loud_part_reduction_db"] - steps[-2]["loud_part_reduction_db"]
+            if d_drive and abs(d_red) > 0.05:
+                lo, hi = profile.drive_range or (-60, 60)
+                jump = (target_db - reduction) * d_drive / d_red
+                jump = max(-0.25 * (hi - lo), min(0.25 * (hi - lo), jump))
+                new_drive = max(lo, min(hi, drive + jump))
+        if new_drive == drive:
+            break  # at the end of the control's range
+        drive = new_drive
+        call("set_fx_parameters", track=track, fx=fx_index,
+             changes=[{"parameter": profile.drive, "display_value": drive}])
+    result = {"control": profile.drive, "value": round(drive, 2), "loud_part_reduction_db": reduction,
+              "target_db": target_db, "calibration": steps}
+    best = min(steps, key=lambda s_: abs(s_["loud_part_reduction_db"] - target_db))
+    if abs(best["loud_part_reduction_db"] - target_db) > 0.3:
+        # Couldn't get there: settle on the closest setting rather than a pinned control.
+        call("set_fx_parameters", track=track, fx=fx_index,
+             changes=[{"parameter": profile.drive, "display_value": best["drive"]}])
+        result.update(value=best["drive"], loud_part_reduction_db=best["loud_part_reduction_db"],
+                      note=f"{profile.name} couldn't reach {target_db} dB here; kept the closest setting "
+                           f"({best['loud_part_reduction_db']} dB). Its other controls (ratio/amount) can go further.")
+    return result
+
+
+@tool(annotations=READ_ONLY)
+def get_plugin_profile(
+    plugin: Annotated[str, Field(description="Plugin name, e.g. 'Bus FORCE', 'Comp FET-76', 'EQ SITRAL-295'")],
+) -> dict:
+    """How a plugin works, for plugins creaper knows: its role, signal flow quirks,
+    setup it needs and which controls do what. For others, inspect it with
+    get_fx_parameters and save_note what you learn."""
+    profile = plugin_profiles.find_profile(plugin)
+    if profile is None:
+        known = ", ".join(p.name for p in plugin_profiles.PROFILES)
+        return {"plugin": plugin, "known": False,
+                "note": f"no built-in profile (creaper knows: {known}); use get_fx_parameters, and find_notes / "
+                        "save_note for what you've learned about it"}
+    return {"known": True, **plugin_profiles.describe(profile)}
 
 
 # ------------------------------------------------------------ style profiles
