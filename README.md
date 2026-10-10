@@ -80,6 +80,12 @@ These are rules of thumb drawn from the records that define each style, not laws
 
 creaper uses whatever is installed: VST, VST3, CLAP, AU and JS, instruments and effects.
 
+- **Learns what your plugins do by testing them.** `scan_plugins` loads each plugin on a
+  hidden temporary track, plays notes into instruments and a test signal through effects,
+  and measures the result: pitched synth or drum kit, range and character; reverb or delay
+  tail, compression or gating, EQ curve, saturation, modulation, pitch shift, stereo width,
+  latency. The findings go into a catalog (`get_plugin_catalog`, and alongside each plugin
+  in `list_installed_fx`), so Claude picks plugins by what they do, not by their names.
 - **Knows your library.** Claude can browse plugins by kind, category ("what reverbs do I
   have?") and developer. A plugin installed in several formats shows up once and loads
   as CLAP or VST3 first. Loose names work: "FET-76" finds *Comp FET-76*. Ambiguous names
@@ -332,6 +338,7 @@ python -m venv .venv
 - `src/creaper/genres/`: the genre library, one module per family (`genres/__init__.py` has the schema and validator)
 - `src/creaper/music_tools.py`: the theory, genre, composition and listening tools
 - `src/creaper/listen.py`: per-note audio features, drum classification and kit mapping
+- `src/creaper/pluginscan.py`, `scan_tools.py`: testing plugins and the plugin catalog
 - `assets/make_brand.py`: regenerates the logo, banner and thumbnail in `assets/brand/`
 - `src/creaper/drums.py`: saved drum maps
 - `src/creaper/analysis.py`: loudness (ITU-R BS.1770-4 / EBU R128), true peak, spectrum, stereo

@@ -20,6 +20,7 @@ from . import analysis, composer, harmony, plugin_profiles, styles, theory
 from .bridge import Bridge, BridgeError
 from .knowledge import Knowledge
 from .drums import BUILTIN_DRUM_MAPS, DrumMaps, builtin_entries
+from .pluginscan import PluginCatalog
 from .sounds import SoundLibrary, describe as describe_sound
 
 try:  # mcp 2.x
@@ -81,11 +82,18 @@ Plugins (VST, VST3, CLAP, AU, JS):
   When the user likes a sound (theirs or yours), offer to save_sound it with tags for
   its role and character (dark, bright, warm, airy, gritty...). Sounds picked in a
   plugin's own preset browser can be saved the same way.
-- Drums: use a real drum instrument rather than ReaSynDr (a bare-bones synth). Look
-  with list_installed_fx(category="drum") and among samplers; skip plugins marked
-  hardware or realtime_only (they only sound with their device connected) unless the
-  user says it's plugged in. Instruments with a built-in drum map (see list_drum_maps,
-  e.g. SILA) work straight away; get_instrument_notes explains how to play them.
+- Know the plugins by testing them, not by their names. scan_plugins loads each plugin
+  on a hidden temporary track, plays notes into instruments and a test signal through
+  effects, and records what it measured (pitched synth or drum kit, range, character;
+  reverb, delay, compressor, EQ curve, saturation, modulation, latency...) in a catalog
+  that list_installed_fx and get_plugin_catalog show. Choose plugins for a job from
+  those results (and the user's saved preferences), and scan the relevant untested ones
+  first, e.g. scan_plugins(search="reverb"). Results describe default settings, so
+  configure the plugin for the job afterwards.
+- Drums: use a real drum instrument rather than ReaSynDr (a bare-bones synth), going by
+  the user's preference (find_notes) and the catalog's "drum kit" results; skip plugins
+  marked hardware or realtime_only (they only sound with their device connected) unless
+  the user says it's plugged in. get_instrument_notes explains how to play a kit.
 - Drum patterns follow the instrument's own note names when it reports them, then a
   saved or built-in drum map, then General MIDI. When a kit's layout is unknown (no saved
   map, generic note names, or the user changed kits), run map_drum_kit: it plays every key,
@@ -139,6 +147,7 @@ bridge = Bridge()
 drum_maps = DrumMaps(bridge.directory / "drum_maps.json")
 sound_library = SoundLibrary(bridge.directory / "sounds")
 knowledge = Knowledge(bridge.directory / "knowledge.json")
+plugin_catalog = PluginCatalog(bridge.directory / "plugin_catalog.json")
 
 READ_ONLY = ToolAnnotations(readOnlyHint=True)
 DESTRUCTIVE = ToolAnnotations(destructiveHint=True)
@@ -288,8 +297,16 @@ def list_installed_fx(
     several formats is listed as one) with its kind, format, developer, category and
     output channels. 'categories' counts every match by category, which helps answer
     'what reverbs do I have?'. Pass the name to add_fx or create_track's instrument."""
-    return call("list_installed_fx", search=search, kind=kind, category=category, developer=developer,
-                format=format, limit=limit)
+    result = call("list_installed_fx", search=search, kind=kind, category=category, developer=developer,
+                  format=format, limit=limit)
+    tested = plugin_catalog.all()
+    for plugin in result.get("plugins", []):
+        entry = tested.get(plugin.get("load_as"))
+        if entry and not entry.get("error"):
+            plugin["tested"] = {"roles": entry.get("roles"), "summary": entry.get("summary")}
+    if not tested:
+        result["tip"] = "No plugins have been tested yet: scan_plugins finds out what each one actually does."
+    return result
 
 
 @tool(annotations=READ_ONLY)
@@ -1585,6 +1602,7 @@ def design_sound(description: str, track: str = "") -> str:
 
 
 from . import music_tools  # noqa: E402,F401  (registers the theory and composition tools)
+from . import scan_tools  # noqa: E402,F401  (registers the plugin-testing tools)
 
 
 def run() -> None:

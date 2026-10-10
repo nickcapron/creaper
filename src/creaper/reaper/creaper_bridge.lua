@@ -1,6 +1,6 @@
 -- @description creaper bridge: lets Claude work in REAPER through the creaper MCP server
 -- @author nickcapron
--- @version 0.7.2
+-- @version 0.8.0
 -- @link https://github.com/nickcapron/creaper
 -- @provides
 --   [nomain] creaper_json.lua
@@ -13,7 +13,7 @@
 --   Every change it makes is a named undo point ("creaper: ..."), so Ctrl+Z
 --   reverts anything Claude did.
 
-local BRIDGE_VERSION = "0.7.2"
+local BRIDGE_VERSION = "0.8.0"
 local PROTOCOL = 2
 
 ----------------------------------------------------------------------- JSON
@@ -1507,15 +1507,9 @@ local RENDER_NUMBER_KEYS = {
 }
 local WAV_32_FLOAT = "ZXZhdyAA" -- base64 of the WAV sink config: 'evaw', 32-bit float
 
-function commands.render_audio(p)
-  local t = get_track(p.track or "master")
-  local master = t == reaper.GetMasterTrack(0)
-  local start_qn, end_qn = resolve_qn(p, "start"), resolve_qn(p, "end")
-  local start_t = start_qn and qn_to_time(start_qn) or 0
-  local end_t = end_qn and qn_to_time(end_qn) or reaper.GetProjectLength(0)
-  if end_t <= start_t then fail("nothing to render: the range is empty (is the project empty?)") end
-  if end_t - start_t > 1800 then fail("renders are limited to 30 minutes; pick a shorter range") end
-
+-- Renders [start_t, end_t] of a track (stem) or the master to a 32-bit float WAV in
+-- RENDER_DIR, restoring the user's render settings and track selection afterwards.
+local function render_range(t, master, start_t, end_t)
   local saved_strings, saved_numbers, saved_selection = {}, {}, {}
   for _, k in ipairs(RENDER_STRING_KEYS) do
     local _, v = reaper.GetSetProjectInfo_String(0, k, "", false)
@@ -1565,6 +1559,20 @@ function commands.render_audio(p)
   end
   if #files == 0 then fail("REAPER didn't produce a render file (expected: " .. tostring(result) .. ")") end
 
+  return files
+end
+
+function commands.render_audio(p)
+  local t = get_track(p.track or "master")
+  local master = t == reaper.GetMasterTrack(0)
+  local start_qn, end_qn = resolve_qn(p, "start"), resolve_qn(p, "end")
+  local start_t = start_qn and qn_to_time(start_qn) or 0
+  local end_t = end_qn and qn_to_time(end_qn) or reaper.GetProjectLength(0)
+  if end_t <= start_t then fail("nothing to render: the range is empty (is the project empty?)") end
+  if end_t - start_t > 1800 then fail("renders are limited to 30 minutes; pick a shorter range") end
+
+  local files = render_range(t, master, start_t, end_t)
+
   -- The tracks whose audio is in this render: everything for the master, else
   -- the track and anything in its folder.
   local rendered = { t }
@@ -1587,6 +1595,69 @@ function commands.render_audio(p)
       .. "may be missing their audio: " .. table.concat(realtime, ", ")
       .. ". To measure them, record or render their output to an audio track first.") or nil,
   }
+end
+
+-- Tests one plugin on a hidden temporary track after the end of the project:
+-- an instrument plays the given notes, an effect processes the given audio file.
+-- The track is rendered offline and deleted again, so the project is unchanged.
+function commands.probe_plugin(p)
+  if type(p.name) ~= "string" or p.name == "" then fail("probe_plugin needs a plugin name") end
+  local name = resolve_plugin(p.name, p.kind == "instrument") or p.name
+  local length = math.max(1, math.min(120, tonumber(p.length) or 10))
+  local start_t = reaper.GetProjectLength(0) + 2
+  local info, files = {}, nil
+  with_undo("test plugin " .. p.name .. " (no change)", function()
+    local count = reaper.CountTracks(0)
+    reaper.InsertTrackAtIndex(count, false)
+    local t = reaper.GetTrack(0, count)
+    reaper.GetSetMediaTrackInfo_String(t, "P_NAME", "creaper plugin test", true)
+    reaper.SetMediaTrackInfo_Value(t, "B_SHOWINTCP", 0)
+    reaper.SetMediaTrackInfo_Value(t, "B_SHOWINMIXER", 0)
+    local ok, err = pcall(function()
+      local fx = reaper.TrackFX_AddByName(t, name, false, -1)
+      if fx < 0 then fail("couldn't load '" .. p.name .. "'") end
+      info.fx = fx_name(t, fx)
+      local has_pdc, pdc = reaper.TrackFX_GetNamedConfigParm(t, fx, "pdc")
+      info.reported_latency_samples = has_pdc and tonumber(pdc) or nil
+      info.parameters = reaper.TrackFX_GetNumParams(t, fx)
+      local _, ins, outs = reaper.TrackFX_GetIOSize(t, fx)
+      info.inputs, info.outputs = ins, outs
+      info.is_instrument = reaper.TrackFX_GetInstrument(t) == fx
+      if p.kind == "instrument" then
+        local item = reaper.CreateNewMIDIItemInProj(t, start_t, start_t + length, false)
+        local take = reaper.GetActiveTake(item)
+        for _, n in ipairs(p.notes or {}) do
+          local s0 = reaper.MIDI_GetPPQPosFromProjTime(take, start_t + n.start)
+          local s1 = reaper.MIDI_GetPPQPosFromProjTime(take, start_t + n.start + n.length)
+          reaper.MIDI_InsertNote(take, false, false, s0, s1, int((n.channel or 1) - 1), int(n.pitch),
+            int(n.velocity or 100), true)
+        end
+        reaper.MIDI_Sort(take)
+      else
+        if type(p.audio_file) ~= "string" or not reaper.file_exists(p.audio_file) then
+          fail("the test signal file is missing")
+        end
+        local src = reaper.PCM_Source_CreateFromFile(p.audio_file)
+        if not src then fail("couldn't read the test signal") end
+        local item = reaper.AddMediaItemToTrack(t)
+        local take = reaper.AddTakeToMediaItem(item)
+        reaper.SetMediaItemTake_Source(take, src)
+        local offset = math.max(0, tonumber(p.offset) or 0)
+        reaper.SetMediaItemInfo_Value(item, "D_POSITION", start_t + offset)
+        reaper.SetMediaItemInfo_Value(item, "D_LENGTH", math.max(0.1, length - offset))
+        -- No fades: a default fade-in would erase the test signal's opening impulse.
+        for _, k in ipairs({ "D_FADEINLEN", "D_FADEOUTLEN", "D_FADEINLEN_AUTO", "D_FADEOUTLEN_AUTO" }) do
+          reaper.SetMediaItemInfo_Value(item, k, 0)
+        end
+      end
+      files = render_range(t, false, start_t, start_t + length)
+    end)
+    reaper.DeleteTrack(t)
+    if not ok then error(err, 0) end
+  end)
+  info.files = files
+  info.sample_rate = project_sample_rate()
+  return info
 end
 
 ------------------------------------------------------------ automation

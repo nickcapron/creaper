@@ -800,7 +800,8 @@ def _listen(track: str | int, pitches: list[int], channel: int | list[int], note
     results = []
     slot = int(slot_s * fs)
     for i, p in enumerate(pitches):
-        f = listen.features(audio[i * slot: (i + 1) * slot], fs, note_off=None if one_shots else note_seconds)
+        f = listen.features(audio[i * slot: (i + 1) * slot], fs, note_off=None if one_shots else note_seconds,
+                            expected_hz=None if one_shots else listen.note_freq(p))
         f.update({"note": theory.midi_to_note(p), "pitch": p, "channel": channels[i]})
         results.append(f)
     return results, context
@@ -811,7 +812,8 @@ LATE_MS = 8.0
 
 def _late_warning(results: list[dict]) -> str | None:
     """A note about sounds that start noticeably after their note-on."""
-    late = [r for r in results if not r.get("silent") and r.get("starts_late_ms", 0) >= LATE_MS]
+    late = [r for r in results if not r.get("silent") and r.get("starts_late_ms", 0) >= LATE_MS
+            and r.get("attack_ms", 0) < 25]
     if not late:
         return None
     worst = max(late, key=lambda r: r["starts_late_ms"])
@@ -899,7 +901,7 @@ def map_drum_kit(
         "instrument": instrument,
         "sounding_keys": len(sounding),
         "layout": ("named by the plugin" if len(named_lanes) >= 3 else
-                   "General MIDI (kick C1, snare D1, closed hat F#1): reliable" if gm_layout else
+                   "General MIDI (kick 36/C2, snare 38/D2, closed hat 42/F#2): reliable" if gm_layout else
                    "custom: lanes are educated guesses from the sound, so check them by ear"),
         "keys": [{"note": r["note"], **({"channel": r["channel"]} if per_channel else {}),
                   "sound": r["kind"], "confidence": r["confidence"],

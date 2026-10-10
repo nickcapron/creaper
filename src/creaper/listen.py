@@ -62,8 +62,55 @@ def _pitch(x: np.ndarray, fs: float, fmin: float = 35.0, fmax: float = 2500.0) -
     return f0, clarity
 
 
-def features(x: np.ndarray, fs: float, note_off: float | None = None) -> dict:
-    """Measurements of one note's audio (mono), starting at the note-on."""
+def harmonic_fit(x: np.ndarray, fs: float, expected_hz: float) -> tuple[int, float, float]:
+    """Which octave of the played note the sound's harmonics line up with.
+
+    Tries fundamentals expected_hz * 2**k (k = -4..2) and scores each by the share of
+    spectral energy on its harmonics; the lowest octave that explains the sound
+    nearly as well as the best one wins (so a sound an octave up isn't mistaken
+    for one at the played note). Returns (k, harmonicity 0-1, fundamental Hz).
+    Avoids the octave errors autocorrelation makes on rich waveforms."""
+    if len(x) < 2048:
+        return 0, 0.0, expected_hz
+    n = len(x)
+    spec = np.abs(np.fft.rfft(x * np.hanning(n), 2 * n)) ** 2
+    freqs = np.fft.rfftfreq(2 * n, 1 / fs)
+    top = min(5000.0, fs / 2 - 100)
+    band = (freqs >= 20) & (freqs <= top)
+    total = float(spec[band].sum()) or 1e-20
+    everything = float(spec[(freqs >= 20) & (freqs <= fs / 2)].sum()) or 1e-20
+    if total < 0.2 * everything:
+        return 0, 0.0, expected_hz  # mostly above 5 kHz: hats, cymbals, noise
+    fits = []
+    for k in range(-4, 3):
+        f0 = expected_hz * 2 ** k
+        if f0 < 20 or f0 > top / 2:
+            continue
+        on = np.zeros_like(freqs, dtype=bool)
+        for h in range(1, 200):
+            fh = f0 * h
+            if fh > top:
+                break
+            on |= np.abs(freqs - fh) <= max(3.0, fh * 0.008)
+        share = float(spec[on & band].sum()) / total
+        coverage = float((on & band).sum()) / float(band.sum())
+        # Normalise by what random energy would score with the same windows.
+        score = max(0.0, (share - coverage) / (1 - coverage)) if coverage < 1 else 0.0
+        fits.append((k, score, f0))
+    if not fits:
+        return 0, 0.0, expected_hz
+    best = max(f[1] for f in fits)
+    # The highest fundamental that explains almost all of what the lowest does:
+    # harmonics of f0 are also harmonics of f0/2, so a lower octave always scores at
+    # least as well; prefer the highest one within a whisker of the best score.
+    good = [f for f in fits if f[1] >= best - 0.05]
+    k, score, f0 = max(good, key=lambda f: f[0])
+    return k, score, f0
+
+
+def features(x: np.ndarray, fs: float, note_off: float | None = None, expected_hz: float | None = None) -> dict:
+    """Measurements of one note's audio (mono), starting at the note-on. With the
+    played note's frequency, also how well it's in tune (harmonic_fit)."""
     peak = float(np.max(np.abs(x))) if x.size else 0.0
     out: dict = {"peak_db": round(_db(peak), 1)}
     if _db(peak) < SILENT_DB:
@@ -116,6 +163,11 @@ def features(x: np.ndarray, fs: float, note_off: float | None = None) -> dict:
     out["clarity"] = round(clarity, 2)
     if f0 and clarity > 0.5:
         out["pitch_hz"] = round(f0, 1)
+    if expected_hz:
+        k, score, f0 = harmonic_fit(x[a + int(0.03 * fs): a + int(0.33 * fs)], fs, expected_hz)
+        out["harmonicity"] = round(score, 2)
+        out["octave_offset"] = k
+        out["richness"] = round(out["centroid_hz"] / f0, 1)  # brightness relative to the fundamental
     # Pitch glide: kicks and toms drop fast at the start; bass and synth notes hold.
     early, c1 = _pitch(x[a: a + int(0.07 * fs)], fs, fmin=30.0)
     late, c2 = _pitch(x[a + int(0.09 * fs): a + int(0.22 * fs)], fs, fmin=30.0)
@@ -195,8 +247,18 @@ def classify_drum(f: dict) -> tuple[str, float]:
 
 
 def tracks_pitch(results: list[dict]) -> tuple[bool, int | None]:
-    """Whether the detected pitch follows the played note, and the offset (semitones,
-    e.g. +12 if the patch sounds an octave up)."""
+    """Whether the sound follows the played note, and the offset (semitones, e.g. +12
+    if the patch sounds an octave up). Uses harmonic_fit when it was measured."""
+    fitted = [r for r in results if "harmonicity" in r and not r.get("silent")]
+    if len(fitted) >= 3:
+        # Clearly harmonic, or moderately harmonic with a clear pitch (detuned and
+        # chorused oscillators spread their harmonics but still have one pitch).
+        tonal = [r for r in fitted if r["harmonicity"] >= 0.6 or (r["harmonicity"] >= 0.3 and r.get("clarity", 0) >= 0.7)]
+        if len(tonal) < max(3, int(0.6 * len(fitted))):
+            return False, None
+        ks = [r["octave_offset"] for r in tonal]
+        common = max(set(ks), key=ks.count)
+        return ks.count(common) >= 0.6 * len(tonal), 12 * common
     offsets = []
     for r in results:
         f0 = r.get("pitch_hz")
@@ -248,11 +310,16 @@ def describe_patch(results: list[dict]) -> dict:
     decays = [r["decay_s"] for r in sounding]
     sustains = [r["sustain_db"] for r in sounding if r.get("sustain_db") is not None]
     centroid = float(np.median([r["centroid_hz"] for r in sounding]))
+    richness = [r["richness"] for r in sounding if r.get("richness")]
     attack = float(np.median(attacks))
     sustain = float(np.median(sustains)) if sustains else None
     held = sum(1 for d in decays if d is None)
     words = []
-    words.append("bright" if centroid > 3000 else ("dark" if centroid < 900 else "mid-toned"))
+    if richness:
+        rich = float(np.median(richness))
+        words.append("bright" if rich >= 6 else ("pure/dark" if rich < 1.8 else "warm" if rich < 3.5 else "mid-toned"))
+    else:
+        words.append("bright" if centroid > 3000 else ("dark" if centroid < 900 else "mid-toned"))
     if attack > 80:
         words.append("slow attack (pad/swell)")
     elif attack < 10:
@@ -304,8 +371,8 @@ W = {
 
 def _looks_gm(keys: list[dict], scores: dict[str, list[float]]) -> bool:
     """Whether the kit is laid out as General MIDI: at least two of these hold up: the
-    kit's most kick-like sound is on C1/B0; a better-than-most snare is on D1/E1; a
-    better-than-most closed hat is on F#1/G#1. Decided once for the whole kit, so one stray sound can't fool it."""
+    kit's most kick-like sound is on key 36/35; a better-than-most snare is on 38/40; a
+    better-than-most closed hat is on 42/44 (C2/B1, D2/E2, F#2/G#2 with middle C = C4). Decided once for the whole kit, so one stray sound can't fool it."""
     votes = 0
     for lane, gm_keys in (("kick", (36, 35)), ("snare", (38, 40)), ("closed hat", (42, 44))):
         raw = scores[lane]

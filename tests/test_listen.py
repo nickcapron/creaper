@@ -73,3 +73,12 @@ def test_late_start_is_measured_not_mistaken_for_attack():
     f = listen.features(late, d.FS)
     assert 295 <= f["starts_late_ms"] <= 305 and f["attack_ms"] < 5
     assert listen.features(hat, d.FS)["starts_late_ms"] < 2
+
+
+def test_harmonic_fit_finds_the_real_octave():
+    saw = d.tone(220.0, length=0.5, held=0.5)
+    assert listen.harmonic_fit(saw, d.FS, 220.0)[0] == 0
+    assert listen.harmonic_fit(saw, d.FS, 440.0)[0] == -1   # sounds an octave below the played note
+    assert listen.harmonic_fit(saw, d.FS, 110.0)[0] == 1    # sounds an octave above
+    k, score, _ = listen.harmonic_fit(d.closed_hat(0.5), d.FS, 220.0)
+    assert score < 0.5                                       # noise isn't harmonic
