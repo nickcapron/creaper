@@ -1,4 +1,10 @@
-from creaper import chat
+import json
+import threading
+import time
+
+import pytest
+
+from creaper import chat, server
 
 
 def collect():
@@ -47,13 +53,67 @@ def test_describe_tool_keeps_it_short():
     assert len(chat.describe_tool("mcp__creaper__create_track", {"name": "x" * 200})) <= 90
 
 
-def test_command_only_allows_creaper_tools(tmp_path):
-    cmd = chat.build_command("claude", tmp_path / "mcp.json", "sess", None)
+SESSION = "73e7216f-1dbf-4381-847c-df359cb6a7ef"
+
+
+def test_command_only_allows_creaper_tools():
+    cmd = chat.build_command("claude", "mcp.json", SESSION, None)
     assert cmd[cmd.index("--tools") + 1] == ""
     assert cmd[cmd.index("--allowedTools") + 1] == "mcp__creaper"
     assert cmd[cmd.index("--permission-mode") + 1] == "dontAsk"
     assert "--strict-mcp-config" in cmd
-    assert cmd[cmd.index("--resume") + 1] == "sess"
+    assert cmd[cmd.index("--resume") + 1] == SESSION
     assert "--model" not in cmd
-    # Passed to a Windows .cmd shim, so it must not contain characters cmd.exe interprets.
+    # If claude can only be reached through a .cmd shim, cmd.exe sees these arguments.
     assert not set(chat.PANEL_PROMPT) & set('&|<>^%!"')
+
+
+@pytest.mark.parametrize("session, model", [
+    ('x" & calc & "', None), ("../../etc", None), (SESSION, "opus & calc"), (SESSION, "a" * 200),
+])
+def test_command_rejects_odd_ids(session, model):
+    with pytest.raises(ValueError):
+        chat.build_command("claude", "mcp.json", session, model)
+
+
+def test_windows_shim_resolves_to_the_exe(tmp_path):
+    shim = tmp_path / "claude.CMD"
+    shim.write_text("@echo off")
+    assert chat.resolve_windows_shim(str(shim)) == str(shim)  # no exe next to it: keep the shim
+    exe = tmp_path / "node_modules" / "@anthropic-ai" / "claude-code" / "bin" / "claude.exe"
+    exe.parent.mkdir(parents=True)
+    exe.write_bytes(b"")
+    assert chat.resolve_windows_shim(str(shim)) == str(exe)
+    assert chat.resolve_windows_shim("/usr/local/bin/claude") == "/usr/local/bin/claude"
+
+
+def _answer_when_asked(confirm, allow):
+    """Plays the panel: waits for the question, then clicks Allow or Deny."""
+    for _ in range(200):
+        if confirm.exists():
+            request = json.loads(confirm.read_text())
+            confirm.with_suffix(".answer").write_text(json.dumps({"id": request["id"], "allow": allow}))
+            return request["action"]
+        time.sleep(0.01)
+
+
+@pytest.mark.parametrize("allow", [True, False])
+def test_risky_tools_wait_for_the_panel(tmp_path, monkeypatch, allow):
+    confirm = tmp_path / "turn_1.confirm.json"
+    monkeypatch.setenv(server.CONFIRM_FILE_ENV, str(confirm))
+    asked = []
+    clicker = threading.Thread(target=lambda: asked.append(_answer_when_asked(confirm, allow)))
+    clicker.start()
+    if allow:
+        server.confirm_with_user("delete track 3 \"Bass\"")
+    else:
+        with pytest.raises(ValueError, match="declined"):
+            server.confirm_with_user("delete track 3 \"Bass\"")
+    clicker.join()
+    assert asked == ['delete track 3 "Bass"']
+    assert not confirm.exists() and not confirm.with_suffix(".answer").exists()
+
+
+def test_no_confirmation_outside_the_panel(monkeypatch):
+    monkeypatch.delenv(server.CONFIRM_FILE_ENV, raising=False)
+    server.confirm_with_user("anything")  # Claude Desktop / Code ask on their own

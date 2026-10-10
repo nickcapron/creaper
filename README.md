@@ -149,6 +149,22 @@ The panel shows what Claude is doing as it works (each tool it runs) and how muc
 your plan's 5-hour limit you've used. **Stop** interrupts a turn, and **New chat**
 starts over. Conversations continue across REAPER restarts.
 
+Claude doesn't ask before routine edits in the panel (they're all undoable), but it
+shows **Allow / Deny** before anything riskier: running an arbitrary REAPER action
+(some can't be undone, like saving or deleting media) or deleting a track.
+
+## Security notes
+
+- creaper opens no network ports. The MCP server talks to its app over stdio, and the
+  bridge exchanges files in your own REAPER resource folder.
+- It never handles logins or API keys.
+- The bridge runs only its own fixed commands, never code sent to it.
+- The chat panel's Claude has no shell, file or web tools, only creaper's.
+- Projects can come from other people, and names inside them (tracks, markers,
+  presets) reach Claude as text. Claude is told to treat them as data, never as
+  instructions, and the riskier tools need your confirmation in the panel. In Claude
+  Desktop, keep per-tool approval on for `run_action` and `delete_track`.
+
 ## Conventions Claude uses
 
 - Tracks are named by number (1 = top), by name, or `master`.

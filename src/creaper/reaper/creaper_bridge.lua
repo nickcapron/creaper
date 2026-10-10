@@ -122,7 +122,9 @@ local function track_ref(t)
   return { number = track_number(t), name = track_name(t) }
 end
 
-local function get_track(ref)
+-- Tracks by number, "master", or name. Names match exactly first, then as a
+-- substring, unless `exact` is set (for destructive commands).
+local function get_track(ref, exact)
   if ref == nil then fail("a track is required") end
   local n = tonumber(ref)
   if n then
@@ -141,6 +143,11 @@ local function get_track(ref)
     name = name:lower()
     if name == wanted then return t end
     if not partial and name:find(wanted, 1, true) then partial = t end
+  end
+  if partial and exact then
+    local _, name = reaper.GetTrackName(partial)
+    fail("there is no track named exactly '" .. tostring(ref) .. "' (did you mean '" .. name
+      .. "'? Use its exact name or number)")
   end
   if partial then return partial end
   fail("there is no track named '" .. tostring(ref) .. "'")
@@ -1041,8 +1048,15 @@ function commands.set_track_properties(p)
   end)
 end
 
+-- What a destructive command would affect, so it can be confirmed first.
+function commands.describe_track(p)
+  local t = get_track(p.track, true)
+  local summary = track_summary(t)
+  return { number = summary.number, name = summary.name, item_count = summary.item_count, fx = summary.fx }
+end
+
 function commands.delete_track(p)
-  local t = get_track(p.track)
+  local t = get_track(p.track, true)
   if t == reaper.GetMasterTrack(0) then fail("the master track can't be deleted") end
   local name = track_name(t)
   with_undo("delete track " .. name, function() reaper.DeleteTrack(t) end)
@@ -1336,13 +1350,24 @@ function commands.undo(p)
   return { undone = undone }
 end
 
-function commands.run_action(p)
-  local id = tonumber(p.command)
-  if not id then id = reaper.NamedCommandLookup(tostring(p.command)) end
-  if not id or id == 0 then fail("no action with id '" .. tostring(p.command) .. "'") end
+local function lookup_action(command)
+  local id = tonumber(command)
+  if not id then id = reaper.NamedCommandLookup(tostring(command)) end
+  if not id or id == 0 then fail("no action with id '" .. tostring(command) .. "'") end
   local name = reaper.kbd_getTextFromCmd(id, 0)
+  if name == "" then fail("no action with id '" .. tostring(command) .. "'") end
+  return id, name
+end
+
+function commands.describe_action(p)
+  local id, name = lookup_action(p.command)
+  return { command_id = id, name = name }
+end
+
+function commands.run_action(p)
+  local id, name = lookup_action(p.command)
   reaper.Main_OnCommand(id, 0)
-  return { ran = name ~= "" and name or tostring(p.command), command_id = id }
+  return { ran = name, command_id = id }
 end
 
 function commands.time_to_positions(p)

@@ -109,8 +109,14 @@ end
 
 ------------------------------------------------------------------- turns
 
+local function answer_path(confirm_path) return (confirm_path:gsub("%.json$", ".answer")) end
+
 local function cleanup_turn(t)
   for _, path in ipairs({ t.request, t.events, t.cancel }) do os.remove(path) end
+  if t.confirm then
+    os.remove(t.confirm)
+    os.remove(answer_path(t.confirm))
+  end
 end
 
 local function start_turn(prompt)
@@ -123,6 +129,7 @@ local function start_turn(prompt)
     request = join(CHAT_DIR, "turn_" .. id .. ".json"),
     events = join(CHAT_DIR, "turn_" .. id .. ".jsonl"),
     cancel = join(CHAT_DIR, "turn_" .. id .. ".cancel"),
+    confirm = join(CHAT_DIR, "turn_" .. id .. ".confirm.json"),
     offset = 0,
     started = os.time(),
     got_event = false,
@@ -132,6 +139,7 @@ local function start_turn(prompt)
     session_id = state.session_id,
     events = t.events,
     cancel = t.cancel,
+    confirm = t.confirm,
     resource_path = reaper.GetResourcePath(),
     claude = config.claude,
     model = config.model,
@@ -223,6 +231,20 @@ local function stop_turn()
   if turn then write_file(turn.cancel, "stop") end
 end
 
+-- A risky tool (running an arbitrary action, deleting a track) waiting for the user.
+local function pending_confirmation()
+  if not turn or not turn.confirm then return nil end
+  local request = read_json(turn.confirm)
+  if request and request.id ~= turn.answered then return request end
+  return nil
+end
+
+local function answer_confirmation(request, allow)
+  write_file(answer_path(turn.confirm), json.encode({ id = request.id, allow = allow }))
+  turn.answered = request.id
+  add_message("info", (allow and "Allowed: " or "Declined: ") .. request.action)
+end
+
 local function new_chat()
   if turn then return end
   state.session_id = nil
@@ -270,7 +292,15 @@ local function draw_messages(ctx)
       wrapped(ctx, COLOR.info, m.text)
     end
   end
-  if turn then
+  local confirmation = pending_confirmation()
+  if confirmation then
+    ImGui.Spacing(ctx)
+    wrapped(ctx, COLOR.info, "Claude wants to " .. confirmation.action .. ". Allow it?")
+    if ImGui.Button(ctx, "Allow") then answer_confirmation(confirmation, true) end
+    ImGui.SameLine(ctx)
+    if ImGui.Button(ctx, "Deny") then answer_confirmation(confirmation, false) end
+    scroll_to_bottom = true
+  elseif turn then
     local dots = string.rep(".", math.floor(reaper.time_precise() * 2) % 4)
     wrapped(ctx, COLOR.muted, "Claude is working" .. dots)
   end
