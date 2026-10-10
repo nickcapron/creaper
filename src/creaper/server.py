@@ -49,12 +49,23 @@ Plugins (VST, VST3, CLAP, AU, JS):
   several at once.
 - Many commercial plugins keep presets in their own browser, invisible to REAPER.
   list_fx_presets says so; then offer to open the plugin window (update_fx show).
-- The sound library holds sounds the user saved from any plugin, including ones
-  picked in a plugin's own browser. When choosing a sound, check list_sounds first
-  and load_sound a fitting one. When the user likes a sound (theirs or one you
-  designed), offer to save_sound it, with tags for its role (pad, bass, lead, keys,
-  pluck, bell, arp, drums, fx) and character (dark, bright, warm, airy, gritty...).
-  To fill the library, the user picks a sound in the plugin's window and you save it.
+- Sounds: a freshly loaded synth plays its default patch, which rarely suits the
+  music. Whenever you add an instrument or the user asks for a sound, make it fit:
+  1. list_sounds: if the user's library has a fitting sound, load_sound it.
+  2. Otherwise design it yourself. Don't just suggest presets: you can program any
+     synth through its parameters (Arturia, ReaSynth and most VSTs expose their
+     controls). Find them with get_fx_parameters, searching by section ("osc",
+     "wave", "filter", "cutoff", "reson", "env", "attack", "release", "lfo", "chorus",
+     "delay", "reverb"), then set them in one go with set_fx_parameters, using
+     display_text for switches and menus. Shape oscillators, filter, envelopes and
+     effects toward the role (pad, bass, lead, keys, pluck, bell...) and style asked
+     for. In a sentence, say what you set (e.g. "two detuned saws, filter at 40%,
+     slow attack, chorus on").
+  3. Check it: play the passage with transport, or measure it with analyze_audio,
+     and adjust if it's too bright, too quiet or too busy.
+  When the user likes a sound (theirs or yours), offer to save_sound it with tags for
+  its role and character (dark, bright, warm, airy, gritty...). Sounds picked in a
+  plugin's own preset browser can be saved the same way.
 - Drum patterns follow the instrument's own note names when it reports them, then a
   saved drum map, then General MIDI. Check the "lanes" in the result; if a kit maps
   drums differently, ask the user and save_drum_map so it's right next time.
