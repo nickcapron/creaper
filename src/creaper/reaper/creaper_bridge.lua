@@ -1,6 +1,6 @@
 -- @description creaper bridge: lets Claude work in REAPER through the creaper MCP server
 -- @author nickcapron
--- @version 0.3.0
+-- @version 0.4.0
 -- @link https://github.com/nickcapron/creaper
 -- @provides
 --   [nomain] creaper_json.lua
@@ -13,7 +13,7 @@
 --   Every change it makes is a named undo point ("creaper: ..."), so Ctrl+Z
 --   reverts anything Claude did.
 
-local BRIDGE_VERSION = "0.3.0"
+local BRIDGE_VERSION = "0.4.0"
 local PROTOCOL = 1
 
 ----------------------------------------------------------------------- JSON
@@ -888,6 +888,105 @@ function commands.list_fx_presets(p)
   end
   result.total_matches = matched
   return result
+end
+
+-- The plugin file behind an FX, without REAPER's id suffixes, for matching
+-- the same plugin across tracks and sessions.
+local function fx_file(t, fx)
+  local ident = named_config(t, fx, "fx_ident") or ""
+  local file = ident:gsub("<.*$", ""):gsub("{.*$", "")
+  return (file:match("[^\\/]+$") or file):lower()
+end
+
+-- Everything needed to recreate an FX's current sound: its full state when
+-- the plugin shares one (most VST/VST3), and its parameter values as a fallback.
+function commands.capture_fx_state(p)
+  local t = get_track(p.track)
+  local fx
+  if p.fx then
+    fx = get_fx(t, p.fx)
+  else
+    local instrument = reaper.TrackFX_GetInstrument(t)
+    fx = instrument >= 0 and instrument or get_fx(t, 1)
+  end
+  local params = {}
+  for i = 0, reaper.TrackFX_GetNumParams(t, fx) - 1 do
+    local _, name = reaper.TrackFX_GetParamName(t, fx, i, "")
+    if not is_midi_cc_helper(name) then
+      params[#params + 1] = { index = i, name = name, value = reaper.TrackFX_GetParamNormalized(t, fx, i) }
+    end
+  end
+  local has_chunk, chunk = reaper.TrackFX_GetNamedConfigParm(t, fx, "vst_chunk")
+  local _, preset = reaper.TrackFX_GetPreset(t, fx, "")
+  local details = fx_details(t, fx)
+  return {
+    plugin = fx_name(t, fx),
+    file = fx_file(t, fx),
+    format = details.format,
+    instrument = details.instrument or false,
+    preset = preset ~= "" and preset or nil,
+    chunk = has_chunk and chunk ~= "" and chunk or nil,
+    params = params,
+    track = track_ref(t),
+  }
+end
+
+-- Recreates a captured sound on a track: on a matching plugin already there,
+-- else on a new instance (an instrument replaces a different instrument).
+function commands.apply_fx_state(p)
+  local s = p.state or fail("no sound state given")
+  local t -- created inside the undo block when new_track_name is given
+  if not p.new_track_name then
+    t = get_track(p.track)
+    if t == reaper.GetMasterTrack(0) and s.instrument then fail("instruments can't go on the master track") end
+  end
+  return with_undo("load sound " .. (p.sound_name or s.plugin), function()
+    if not t then
+      local index = reaper.CountTracks(0)
+      reaper.InsertTrackAtIndex(index, true)
+      t = reaper.GetTrack(0, index)
+      reaper.GetSetMediaTrackInfo_String(t, "P_NAME", p.new_track_name, true)
+    end
+    local fx
+    if p.fx then
+      fx = get_fx(t, p.fx)
+    else
+      for i = 0, reaper.TrackFX_GetCount(t) - 1 do
+        if (s.file ~= "" and fx_file(t, i) == s.file) or fx_name(t, i) == s.plugin then fx = i break end
+      end
+    end
+    local replaced
+    if not fx then
+      if s.instrument and p.replace_instrument ~= false then
+        local old = reaper.TrackFX_GetInstrument(t)
+        if old >= 0 then
+          replaced = fx_name(t, old)
+          reaper.TrackFX_Delete(t, old)
+        end
+      end
+      fx = reaper.TrackFX_AddByName(t, s.plugin, false, s.instrument and -1000 or -1)
+      if fx < 0 then fail(s.plugin .. " isn't installed on this computer, so this sound can't be loaded") end
+    end
+
+    local restored
+    if s.chunk and reaper.TrackFX_SetNamedConfigParm(t, fx, "vst_chunk", s.chunk) then
+      restored = "full plugin state"
+    elseif s.params then
+      local set, count = 0, reaper.TrackFX_GetNumParams(t, fx)
+      for _, prm in ipairs(s.params) do
+        local index = int(prm.index)
+        if index < count then
+          local _, name = reaper.TrackFX_GetParamName(t, fx, index, "")
+          if name == prm.name then
+            reaper.TrackFX_SetParamNormalized(t, fx, index, prm.value)
+            set = set + 1
+          end
+        end
+      end
+      restored = set .. " of " .. #s.params .. " parameters"
+    end
+    return { track = track_ref(t), fx = fx_details(t, fx), restored = restored, replaced = replaced }
+  end)
 end
 
 -- Splits a multi-output instrument (drum machines, Overbridge, multitimbral

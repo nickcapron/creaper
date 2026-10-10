@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 from . import analysis, theory
 from .bridge import Bridge, BridgeError
 from .drums import DrumMaps
+from .sounds import SoundLibrary, describe as describe_sound
 
 try:  # mcp 2.x
     from mcp.server.mcpserver import MCPServer
@@ -48,6 +49,12 @@ Plugins (VST, VST3, CLAP, AU, JS):
   several at once.
 - Many commercial plugins keep presets in their own browser, invisible to REAPER.
   list_fx_presets says so; then offer to open the plugin window (update_fx show).
+- The sound library holds sounds the user saved from any plugin, including ones
+  picked in a plugin's own browser. When choosing a sound, check list_sounds first
+  and load_sound a fitting one. When the user likes a sound (theirs or one you
+  designed), offer to save_sound it, with tags for its role (pad, bass, lead, keys,
+  pluck, bell, arp, drums, fx) and character (dark, bright, warm, airy, gritty...).
+  To fill the library, the user picks a sound in the plugin's window and you save it.
 - Drum patterns follow the instrument's own note names when it reports them, then a
   saved drum map, then General MIDI. Check the "lanes" in the result; if a kit maps
   drums differently, ask the user and save_drum_map so it's right next time.
@@ -69,6 +76,7 @@ rather than guessing.
 mcp = MCPServer("creaper", instructions=INSTRUCTIONS)
 bridge = Bridge()
 drum_maps = DrumMaps(bridge.directory / "drum_maps.json")
+sound_library = SoundLibrary(bridge.directory / "sounds")
 
 READ_ONLY = ToolAnnotations(readOnlyHint=True)
 DESTRUCTIVE = ToolAnnotations(destructiveHint=True)
@@ -587,6 +595,101 @@ def split_instrument_outputs(
     machines, Elektron Overbridge, multitimbral synths, samplers). The main pair stays
     on the instrument's track; new tracks are named after the plugin's outputs."""
     return call("split_instrument_outputs", track=track, fx=fx, outputs=outputs)
+
+
+# ------------------------------------------------------------ sound library
+
+Tags = Annotated[list[str] | None, Field(description="Role and character, e.g. ['pad', 'dark', 'warm'] or ['bass', 'sub']")]
+
+
+@tool()
+def save_sound(
+    track: TrackRef,
+    name: Annotated[str, Field(description="A descriptive name, e.g. 'Dark Pad', 'Rubber Sub Bass'")],
+    fx: Annotated[str | int | None, Field(description="Which plugin on the track; default: its instrument, else the first FX")] = None,
+    tags: Tags = None,
+    description: Annotated[str | None, Field(description="What it sounds like and what it suits, in a sentence")] = None,
+    overwrite: Annotated[bool, Field(description="Replace an existing sound with the same name")] = False,
+) -> dict:
+    """Saves the plugin's current sound to the user's sound library, so it can be
+    loaded on any track in any project. Works for sounds picked in a plugin's own
+    preset browser (Arturia, etc.), which REAPER can't otherwise see."""
+    existing = next((e for e in sound_library.search() if e["name"].lower() == name.strip().lower()), None)
+    if existing and not overwrite:
+        raise ValueError(f"there's already a sound named '{existing['name']}'; pick another name or set overwrite=true")
+    if existing:
+        confirm_with_user(f"replace the saved sound \"{existing['name']}\" in your library")
+    captured = call("capture_fx_state", timeout=60.0, track=track, fx=fx)
+    entry = sound_library.save(name, captured, tags=tags, description=description, overwrite=overwrite)
+    result = describe_sound(entry)
+    result["saved_from"] = captured["track"]
+    if entry["restore"] == "parameters":
+        result["note"] = ("this plugin doesn't share its full state, so the sound was saved as its "
+                          "parameter values; sample-based or very complex patches may not come back exactly")
+    return result
+
+
+@tool(annotations=READ_ONLY)
+def list_sounds(
+    search: Annotated[str | None, Field(description="Words to match in names, tags, descriptions, e.g. 'dark pad'")] = None,
+    tag: Annotated[str | None, Field(description="Only sounds with this tag")] = None,
+    plugin: Annotated[str | None, Field(description="Only sounds from this plugin, e.g. 'Mini V3'")] = None,
+    kind: Literal["instrument", "effect"] | None = None,
+) -> dict:
+    """Browses the user's sound library. Check here before designing a sound from scratch."""
+    matches = sound_library.search(search, tag, plugin, kind)
+    tag_counts: dict[str, int] = {}
+    for entry in sound_library.search():
+        for t in entry.get("tags", []):
+            tag_counts[t] = tag_counts.get(t, 0) + 1
+    return {
+        "count": len(matches),
+        "sounds": [describe_sound(e) for e in matches[:200]],
+        "all_tags": dict(sorted(tag_counts.items(), key=lambda kv: -kv[1])),
+    }
+
+
+@tool()
+def load_sound(
+    name: Annotated[str, Field(description="Sound name from list_sounds")],
+    track: Annotated[str | int | None, Field(description='Track to load it on (number, name or "master")')] = None,
+    new_track: Annotated[str | None, Field(description="Instead of track: create a new track with this name")] = None,
+    fx: Annotated[str | int | None, Field(description="Load into this existing plugin on the track (must be the same plugin)")] = None,
+    replace_instrument: Annotated[bool, Field(description="For instrument sounds: swap out a different instrument on the track")] = True,
+) -> dict:
+    """Recalls a saved sound. Reuses the same plugin if it's already on the track,
+    otherwise adds it; an instrument sound replaces a different instrument unless
+    replace_instrument is false. Undoable."""
+    if (track is None) == (new_track is None):
+        raise ValueError("give either track or new_track")
+    _, entry = sound_library.find(name)
+    state = sound_library.state(entry)
+    result = call("apply_fx_state", timeout=60.0, track=track, new_track_name=new_track, fx=fx,
+                  replace_instrument=replace_instrument, sound_name=entry["name"], state=state)
+    result["sound"] = entry["name"]
+    return result
+
+
+@tool()
+def update_sound(
+    name: str,
+    new_name: str | None = None,
+    tags: Annotated[list[str] | None, Field(description="Replace all tags")] = None,
+    add_tags: Annotated[list[str] | None, Field(description="Add these tags")] = None,
+    description: str | None = None,
+) -> dict:
+    """Renames a saved sound or changes its tags or description."""
+    return describe_sound(sound_library.update(name, new_name=new_name, tags=tags, add_tags=add_tags,
+                                               description=description))
+
+
+@tool(annotations=DESTRUCTIVE)
+def delete_sound(name: Annotated[str, Field(description="The sound's exact name")]) -> dict:
+    """Deletes a sound from the library. This can't be undone."""
+    _, entry = sound_library.find(name)
+    confirm_with_user(f"delete \"{entry['name']}\" from your sound library (this can't be undone)")
+    sound_library.delete(name)
+    return {"deleted": entry["name"]}
 
 
 @tool(annotations=DESTRUCTIVE)

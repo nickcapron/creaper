@@ -29,6 +29,7 @@ own Claude account; no API key needed.
 | **Read the project** | Overview (tempo, time signature, markers, regions, tracks, selection), track details (items, FX, sends), FX parameters, installed plugins |
 | **Compose** | Create tracks with instruments, MIDI items, notes, chord progressions from symbols (`Am7`, `Cmaj7/E`, `F#m7b5`) with voice leading, step-sequenced drums with swing and humanize, sustain/mod/expression/pitch bend, tempo and time signature, markers and regions |
 | **Plugins** | Browse installed plugins by kind, category and developer; load instruments and effects by loose name; read and set parameters by value or by label, several at once; list and load presets; split multi-output instruments onto tracks |
+| **Sound library** | Save any plugin's current sound with a name and tags, browse, and recall it on any track in any project |
 | **Mix** | Add, remove, bypass FX; volume, pan, mute, solo, color; sends and buses |
 | **Analyze** | Render the mix or one track and measure integrated/short-term loudness (LUFS), loudness range, true peak, clipping, crest factor, stereo correlation (including the low end), and frequency balance by band and octave, with a loudness timeline in bars |
 | **Control** | Play a range of bars, stop, move the cursor, undo, run any REAPER action |
@@ -48,6 +49,11 @@ creaper uses whatever is installed: VST, VST3, CLAP, AU and JS, instruments and 
 - **Presets.** Factory programs and presets saved in REAPER can be listed and loaded.
   Plugins that keep presets in their own browser (Arturia, for example) are detected,
   and Claude offers to open the plugin window instead.
+- **Your own sound library.** Pick a sound in any plugin's own browser and tell Claude
+  "save this as Dark Pad". creaper captures the plugin's complete state with tags and a
+  description, and Claude can recall it on any track, in any project ("use a warm pad
+  from my library"). Plugins that don't share their state are saved as parameter
+  values instead. The library lives in `<REAPER resource path>/creaper/sounds/`.
 - **Drums on any kit.** Drum patterns follow the instrument's own note names when it
   reports them ("Kick", "HH Closed"…). Otherwise creaper uses a drum map you've saved
   for that instrument (which can also put each drum on its own MIDI channel), then
