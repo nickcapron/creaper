@@ -28,3 +28,15 @@ def test_find():
     assert genres.find("Deep House").name == "deep house" or genres.find("deep house")
     with pytest.raises(ValueError):
         genres.find("zzzz qqqq")
+
+
+def test_profiles_give_a_full_track_length():
+    from creaper import music_tools
+    length = music_tools.get_genre_profile("house")["length"]
+    assert length["bars"] == 160 and length["minutes"] == "5:12"
+
+
+def test_compose_prompt_defaults_to_full_length():
+    from creaper import server
+    assert "full-length" in server.compose("house")
+    assert "a 16-bar piece" in server.compose("house", bars="16")

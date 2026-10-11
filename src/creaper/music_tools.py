@@ -446,6 +446,9 @@ def get_genre_profile(
         except ValueError:
             progressions.append({"numerals": p})
     m = g.mix
+    form_bars = sum(b for _, b in g.form)
+    num, den = (int(x) for x in g.meter.split("/"))
+    seconds = form_bars * num * 4 / den * 60 / (sum(g.tempo) / 2)
     return {
         "genre": g.name, "family": g.family, "also": list(g.aliases), "parent": g.parent,
         "description": g.description, "era": g.era, "touchstones": list(g.touchstones),
@@ -457,6 +460,8 @@ def get_genre_profile(
         "melody": {"density": g.melody_density, "scale": g.melody_scale, "how": g.melody},
         "drums": {"groove": g.groove, "how": g.drums},
         "form": [{"section": s, "bars": b} for s, b in g.form],
+        "length": {"bars": form_bars, "minutes": f"{int(seconds // 60)}:{int(seconds % 60):02d}",
+                   "note": "a full track in this style; write all of it unless the user asks for a sketch or loop"},
         "instruments": list(g.instruments), "sound_design": g.sound_design, "production": g.production,
         "theory": g.theory,
         "mix": {"integrated_lufs": list(m.lufs), "loudness_range_lu": list(m.lra), "true_peak_dbtp": m.true_peak,
@@ -668,7 +673,8 @@ def sketch_song(
     """Builds a genre sketch in one call: tempo, then tracks with a drum groove,
     bassline, voiced and comped chords and a melody, all following the genre's
     profile (progression, harmonic rhythm, voicing, comping, bass style, melody
-    density and scale, swing). Every part is ordinary MIDI to edit afterwards."""
+    density and scale, swing). Every part is ordinary MIDI to edit afterwards. It's
+    one loop repeated: a starting point for a song, not the arrangement."""
     g = genres.find(genre)
     k = _key(key) or (harmony.parse_key(g.keys[0]) if g.keys else harmony.parse_key(f"A {g.modes[0]}"))
     overview = call("get_project_overview")

@@ -118,6 +118,31 @@ Arranging:
 - When the user says a part sounds bad, work out whether it's the tuning, the sound,
   the notes or the level (listen, measure, analyze_harmony), fix that one thing, and
   play it. Don't pile on doublings, octaves or brightness.
+- A song request means a finished-length track: follow the genre profile's form bar
+  for bar (its "length": club tracks run 5-7 minutes with DJ intro and outro, pop
+  and hip-hop about 3-4). Write a short sketch or loop only when the user asks for
+  one, and never shorten sections to save work. Say how long the result is.
+- One loop isn't a song. Besides the main hook, write a contrasting idea: a B part, a
+  counter-melody, a breakdown with different chords or a new bass line, a vocal-chop
+  answer. Sections should differ in content, not just in which tracks are playing.
+- Keep it developing: something changes at least every 8 bars (a part enters or
+  drops out, a drum variation such as an open hat, a percussion layer or ghost notes,
+  a different comping rhythm or inversion, a bass variation). Give each section its
+  own version of each part (another seed, edit_midi_notes variations, rewritten
+  bars) instead of copying one item everywhere.
+- Mark every section change: a fill or drop-out in the bar before, a riser or sweep
+  (a noise synth with automation, or find_samples for risers and reverse cymbals), a
+  crash on the downbeat. Long sections need slow movement: write_automation ramps on
+  filter cutoff, sends or levels across builds and breakdowns.
+- Generators (sketch_song, write_melody, write_bassline, add_genre_groove) give
+  competent starting points that sound generic as they are. Edit what they give you,
+  write the hook note by note when you have a stronger idea, and give the track at
+  least one signature element (a vocal chop, a found sample, an unusual sound or
+  rhythm) that makes it memorable.
+- Before calling it done, go through the arrangement section by section and say what
+  changes in each. Rework any section that only repeats an earlier one with nothing
+  new. You measure rather than hear, so ask the user for their reaction to specific
+  parts (the hook, the drop, the drums).
 
 Figure things out before asking. You can listen and measure: audition_instrument (what a
 patch does: range, pitch, envelope, tone), map_drum_kit, analyze_audio, get_fx_parameters,
@@ -1647,17 +1672,21 @@ def master(target: str = "", style: str = "") -> str:
 
 
 @mcp.prompt(title="Compose in a genre")
-def compose(genre: str, key: str = "", bars: str = "16") -> str:
+def compose(genre: str, key: str = "", bars: str = "") -> str:
     """Write a new piece in a genre, the way a seasoned composer of that style would."""
+    length = f"a {bars}-bar piece" if bars else "a full-length track (the genre's form, bar for bar)"
     return (
-        f"Compose a {bars}-bar piece in the style of {genre}" + (f" in {key}" if key else "") + " in my REAPER project.\n"
+        f"Compose {length} in the style of {genre}" + (f" in {key}" if key else "") + " in my REAPER project.\n"
         "1. find_notes for my taste; get_genre_profile for the style; list_installed_fx for instruments that fit it.\n"
         "2. Choose tempo, key/mode and a progression from the profile (suggest_progressions can add options); "
         "reharmonize if the style calls for richer harmony.\n"
         "3. Lay it down: sketch_song with my instruments, or build part by part (add_genre_groove, write_bassline, "
-        "add_chord_progression with the style's voicing and comping, write_melody: try a few seeds).\n"
+        "add_chord_progression with the style's voicing and comping, write_melody: try a few seeds). Then make "
+        "it your own: a contrasting B idea, each section's own variation of the parts, something changing every "
+        "8 bars, fills, risers and automation at the section changes, and one signature element.\n"
         "4. Shape each sound for the style, then analyze_harmony to check the result and fix anything off.\n"
-        "5. Tell me in a few lines what you wrote and why it fits the style, using theory terms sparingly."
+        "5. Tell me in a few lines what you wrote, how long it is, what changes from section to section, and why "
+        "it fits the style, using theory terms sparingly."
     )
 
 
