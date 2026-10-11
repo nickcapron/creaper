@@ -8,11 +8,11 @@ import random
 import re
 import time
 from pathlib import Path
-from typing import Annotated, Callable
+from typing import Annotated, Callable, Literal
 
 from pydantic import Field
 
-from . import composer, harmony, samplelib, speech
+from . import composer, harmony, samplelib, speech, talkbox
 from .sample_tools import _check_audio
 from .server import READ_ONLY, ItemId, call, tool
 
@@ -81,21 +81,23 @@ def add_robot_vocal(
         "several notes; a lone '_' holds the previous word over the next note"))],
     voice: Annotated[str | None, Field(description="A voice from list_speech_voices (part of its name), or 'female'/'male'")] = None,
     name: Annotated[str, Field(description="Name for the vocal track")] = "Robot Vocal",
-    carrier: Annotated[str | None, Field(description="Synth that sings (any instrument; default ReaSynth). Bright, buzzy sounds (saws) give the clearest words")] = None,
-    bands: Annotated[int, Field(ge=4, le=128, description="Vocoder bands: more = clearer words, fewer = more robotic")] = 32,
+    style: Annotated[Literal["talkbox", "vocoder"], Field(description=(
+        "talkbox (default): a synth shaped by the speech's mouth shapes, the clearest words (Zapp, Chromeo, "
+        "Daft Punk leads); one audio track. vocoder: ReaVocode over a synth you can change and play chords on; "
+        "more robotic and harder to understand"))] = "talkbox",
+    carrier: Annotated[str | None, Field(description="vocoder: synth that sings (default ReaSynth saw)")] = None,
+    bands: Annotated[int, Field(ge=4, le=128, description="vocoder: bands; more = clearer words")] = 32,
 ) -> dict:
-    """Makes a synth sing words, vocoder style: the computer's text-to-speech voice
-    speaks each word under its note of a melody item (top note of each chord), and
-    ReaVocode shapes a synth playing the melody (chords too) with that speech. Each
-    word's vowel is held over its notes while its consonants keep their natural speed.
-    Builds three tracks after the melody's track: the vocal (the vocoder), its voice
-    (the spoken words; it also plays their high-passed consonants for clarity) and its
-    carrier (the synth).
+    """Makes a synth sing words: the computer's text-to-speech voice speaks each word
+    under its note of a melody item (top note of each chord), each word's vowel held
+    over its notes while its consonants keep their natural speed.
+    talkbox (default) shapes a sawtooth playing the melody with the speech's formants,
+    with noise for the consonants, and puts the result on one audio track after the
+    melody's track. vocoder builds three tracks (the vocal with ReaVocode, its voice,
+    and a carrier synth that can play the melody's chords).
     Robot vocals are only understood when they're sparse: a short hook of a few words,
     repeated (think "one more time", "around the world"), at most one syllable per beat,
-    on quarter notes or longer. Dense, fast verses turn to mush. To make words clearer,
-    raise the voice track's fader (consonants) or the band count; don't blend the raw
-    voice in with ReaVocode's ModDry, which adds its out-of-key speaking pitch."""
+    on quarter notes or longer. Dense, fast verses turn to mush."""
     data = call("get_midi_notes", item_id=item_id)
     line = melody_line(data.get("notes", []))
     if not line:
@@ -107,21 +109,42 @@ def add_robot_vocal(
     folder = Path(call("project_paths")["default_folder"]) / "creaper vocals" / f"{slug}-{stamp}"
     files = speech.speak([w["text"] for w in words], folder, chosen)
     base = data["start"]["qn"]
-    times = call("qn_to_times", qns=[q for w in words for q in (base + w["start"], base + w["end"])])
+    qns = [q for w in words for q in (base + w["start"], base + w["end"])] + [base + n["start"] for n in line]
+    times = call("qn_to_times", qns=qns)
+    note_times = times[2 * len(words):]
     clips, rushed = [], []
     for i, (f, w) in enumerate(zip(files, words)):
         # Hold the vowel over the notes; consonants keep their natural speed.
-        speed = speech.fit_word(f, times[2 * i + 1] - times[2 * i])
+        start_s, end_s = times[2 * i], times[2 * i + 1]
+        speed = speech.fit_word(f, end_s - start_s)
         if speed > RUSHED:
             rushed.append(w["word"])
+        if style == "talkbox":
+            pitches = [(max(0.0, t - start_s), n["pitch"]) for n, t in zip(line, note_times)
+                       if w["start"] - 1e-6 <= n["start"] < w["end"] - 1e-6] or [(0.0, line[0]["pitch"])]
+            x, fs = speech._read(f)
+            speech._write(f, talkbox.cross_synthesize(x, fs, pitches, seed=i), talkbox.RATE)
         clips.append({"path": str(f), "start_qn": base + w["start"], "end_qn": base + w["end"], "word": w["word"]})
-    result = call("build_robot_vocal", timeout=120.0, melody_item=item_id, clips=clips, name=name,
-                  carrier=carrier, bands=bands)
-    result.pop("squeezed", None)
+    if style == "talkbox":
+        names = {t["name"] for t in call("get_project_overview").get("tracks", [])}
+        track_name, k = name, 2
+        while track_name in names:
+            track_name, k = f"{name} {k}", k + 1
+        call("create_track", name=track_name, position=int(data["track"]) + 1)
+        placed = call("place_audio_clips", timeout=120.0, track=track_name, clips=clips, name=f"talk box {track_name}")
+        result = {"vocal": placed["track"], "style": "talkbox", "words_placed": placed["placed"],
+                  "next": ("Play it. It's audio now: add EQ, compression, chorus or reverb like any vocal. For "
+                           "another melody or words, run it again. Mute the original melody track if it doubles it.")}
+    else:
+        result = call("build_robot_vocal", timeout=120.0, melody_item=item_id, clips=clips, name=name,
+                      carrier=carrier, bands=bands)
+        result.pop("squeezed", None)
+        result["style"] = "vocoder"
+        result["next"] = ("Play it. If words are hard to make out: more bands, a brighter carrier (saw, filter "
+                          "open), fewer syllables per beat, or style='talkbox'. Mute the original melody track if "
+                          "it doubles the vocal.")
     result["speech_voice"] = chosen or "system default"
     result["word_files"] = str(folder)
-    result["next"] = ("Play it. If words are hard to make out: more bands, a brighter carrier (saw, filter open), "
-                      "or fewer syllables per beat. Mute the original melody track if it doubles the vocal.")
     if rushed:
         result["note"] = (f"{len(rushed)} of {len(words)} words had to be sped up more than {RUSHED:g}x to fit "
                           "their notes, which blurs them: " + ", ".join(rushed[:12]) + (" ..." if len(rushed) > 12

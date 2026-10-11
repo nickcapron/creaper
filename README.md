@@ -40,7 +40,7 @@ own Claude account; no API key needed.
 | **Edit MIDI** | Quantize (grid, strength, swing), humanize, transpose, snap to a scale, set or ramp velocities, strum chords, legato, and motif development (diatonic transposition, inversion, retrograde, augmentation, harmony lines, sequences, negative harmony); on all notes, a pitch/time range, or what's selected in the MIDI editor |
 | **Automate** | Volume, pan and any plugin parameter: points, ramps (a filter sweep over the build) or LFOs (wobbles, tremolo), in real units; read and clear envelopes |
 | **Edit clips** | Move, trim, split, duplicate, fade, re-pitch, time-stretch and delete audio or MIDI items; import audio files |
-| **Robot vocals** | Sing lyrics on any melody, vocoder style: the computer's own text-to-speech voice speaks each word under its note and a synth (chords too) sings it through ReaVocode. Robotic by design: house, French touch, electro hooks |
+| **Vocals** | Uses the best source on your machine: chops real vocal samples into rhythmic, in-key chops; hands a melody and lyrics to singing synths (Synthesizer V, ACE Studio, VOCALOID, OpenUtau) as MIDI with the words on the notes; or sings lyrics itself as a talk box or vocoder from your computer's own voices |
 | **Record** | Audio interface inputs and MIDI devices; arm, monitor and set the record mode (input, resample the track's output, MIDI overdub/replace); record a bar range that stops by itself; pick, compare or explode takes. Claude warns you before REAPER asks which new files to keep, and waits while you answer |
 | **Save & deliver** | Save, save as, and snapshot copies; export the mix (or a region or bar range) to WAV/FLAC/MP3/OGG with loudness and true peak checked and no clipping; stems for every track, lined up |
 | **Arrange** | Tempo changes, ramps and time-signature changes over the song; markers and regions (add, rename, move, resize, recolor, delete); time selection, loop points and repeat; track templates; freeze and unfreeze heavy tracks |
@@ -384,7 +384,7 @@ python -m venv .venv
 - `src/creaper/samplelib.py`, `sample_tools.py`: the sample library, loop tempo/key analysis, sampler kits
 - `src/creaper/export_tools.py`: saving the project, exporting the mix and stems
 - `src/creaper/record_tools.py`: recording and takes, time selection, markers, track templates, freezing
-- `src/creaper/vocal_tools.py`, `speech.py`: robot vocals (lyrics to notes, built-in text-to-speech, vocoder routing)
+- `src/creaper/vocal_tools.py`, `speech.py`, `talkbox.py`: vocals (chops, singing-synth MIDI, text-to-speech, talk box and vocoder)
 - `src/creaper/installer.py`, `install.ps1`: `creaper setup` and the one-command Windows installer
 - `assets/make_brand.py`: regenerates the logo, banner and thumbnail in `assets/brand/`
 - `src/creaper/drums.py`: saved drum maps

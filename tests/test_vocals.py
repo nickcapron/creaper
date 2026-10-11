@@ -234,3 +234,32 @@ def test_singer_syllables_count_must_match():
     from creaper.vocal_tools import singer_syllables
     with pytest.raises(ValueError, match="3 syllables and holds but the melody has 2 notes"):
         singer_syllables("to-night _", [n(0), n(1)])
+
+
+def test_talkbox_saw_follows_the_notes():
+    from creaper import talkbox, samplelib
+    y = talkbox.saw([(0.0, 57), (0.5, 64)], 1.0)
+    assert len(y) == talkbox.RATE
+    for a, b, hz in ((0.1, 0.4, 220.0), (0.6, 0.9, 329.6)):
+        got, _ = samplelib.vocal_pitch(y[int(a * talkbox.RATE): int(b * talkbox.RATE)], talkbox.RATE)
+        assert abs(got - hz) / hz < 0.01
+
+
+def test_talkbox_sings_the_melody_and_keeps_consonants_noisy():
+    from creaper import talkbox, samplelib
+    fs = 16000
+    rng = np.random.default_rng(0)
+    t = np.arange(int(0.3 * fs)) / fs
+    vowel = sum(np.sin(2 * np.pi * 150 * k * t) / k for k in range(1, 30)) * 0.3   # a buzzy "voice" at 150 Hz
+    hiss = rng.standard_normal(int(0.15 * fs)) * 0.2                              # an "s"
+    y = talkbox.cross_synthesize(np.concatenate([vowel, hiss]), fs, [(0.0, 69)])  # sung on A4
+    assert abs(len(y) - int(0.45 * talkbox.RATE)) < 64
+    hz, _ = samplelib.vocal_pitch(y[int(0.05 * talkbox.RATE): int(0.25 * talkbox.RATE)], talkbox.RATE)
+    assert abs(hz - 440) < 5                                                       # the melody's pitch, not the voice's
+
+    def flatness(seg):
+        p = np.abs(np.fft.rfft(seg)) ** 2 + 1e-12
+        return np.exp(np.mean(np.log(p))) / np.mean(p)
+    voiced = flatness(y[int(0.05 * talkbox.RATE): int(0.25 * talkbox.RATE)])
+    hissed = flatness(y[int(0.33 * talkbox.RATE): int(0.43 * talkbox.RATE)])
+    assert hissed > 10 * voiced                                                    # the "s" stays noise

@@ -1,7 +1,9 @@
 """Text to speech with the voices built into the operating system, for robot vocals.
 
-Windows uses its speech voices (System.Speech through PowerShell), macOS `say`, and
-Linux espeak-ng or espeak. Each word becomes its own WAV file with the silence
+Windows uses both of its speech systems through PowerShell: the classic desktop voices
+(System.Speech, which also lists third-party voices) and the newer OneCore voices
+(Windows.Media, e.g. Mark, and natural voices installed for it). macOS uses `say`
+(including downloaded Enhanced and Premium voices), Linux espeak-ng or espeak. Each word becomes its own WAV file with the silence
 around it trimmed, so it starts exactly where it's placed.
 """
 
@@ -43,20 +45,41 @@ def _espeak() -> str | None:
     return shutil.which("espeak-ng") or shutil.which("espeak")
 
 
+_WINRT = (
+    "Add-Type -AssemblyName System.Runtime.WindowsRuntime;"
+    "$null = [Windows.Media.SpeechSynthesis.SpeechSynthesizer, Windows.Media.SpeechSynthesis, ContentType=WindowsRuntime];"
+    "$null = [Windows.Storage.Streams.DataReader, Windows.Storage.Streams, ContentType=WindowsRuntime];"
+)
+
+
+def _windows_voices() -> list[dict]:
+    out = _powershell(
+        "Add-Type -AssemblyName System.Speech;"
+        "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer;"
+        "$s.GetInstalledVoices() | Where-Object { $_.Enabled } | ForEach-Object "
+        "{ 'sapi|' + $_.VoiceInfo.Name + '|' + $_.VoiceInfo.Gender + '|' + $_.VoiceInfo.Culture };"
+        "try {" + _WINRT +
+        "[Windows.Media.SpeechSynthesis.SpeechSynthesizer]::AllVoices | ForEach-Object "
+        "{ 'onecore|' + $_.DisplayName + '|' + $_.Gender + '|' + $_.Language } } catch {}", timeout=60)
+    found: list[dict] = []
+    seen = set()
+    for line in out.splitlines():
+        parts = line.strip().split("|")
+        if len(parts) != 4:
+            continue
+        engine, name, gender, language = parts
+        base = re.sub(r"\s+Desktop$", "", name).lower()
+        if base in seen:
+            continue  # the same voice in both systems: the desktop one comes first
+        seen.add(base)
+        found.append({"name": name, "gender": gender.lower(), "language": language, "engine": engine})
+    return found
+
+
 def voices() -> list[dict]:
     """The installed voices: name, and gender or language where the system says."""
     if sys.platform == "win32":
-        out = _powershell(
-            "Add-Type -AssemblyName System.Speech;"
-            "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer;"
-            "$s.GetInstalledVoices() | Where-Object { $_.Enabled } | ForEach-Object "
-            "{ $_.VoiceInfo.Name + '|' + $_.VoiceInfo.Gender + '|' + $_.VoiceInfo.Culture }", timeout=60)
-        found = []
-        for line in out.splitlines():
-            parts = line.strip().split("|")
-            if len(parts) == 3:
-                found.append({"name": parts[0], "gender": parts[1].lower(), "language": parts[2]})
-        return found
+        return _windows_voices()
     if sys.platform == "darwin":
         out = subprocess.run(["say", "-v", "?"], capture_output=True, text=True, timeout=60).stdout
         found = []
@@ -98,7 +121,29 @@ def speak(texts: list[str], folder: Path, voice: str | None = None) -> list[Path
     """Speaks each text into its own trimmed WAV file in `folder`, in order."""
     folder.mkdir(parents=True, exist_ok=True)
     paths = [folder / f"{i + 1:03d} {_safe(t)}.wav" for i, t in enumerate(texts)]
-    if sys.platform == "win32":
+    if sys.platform == "win32" and voice and any(
+            v["name"] == voice and v.get("engine") == "onecore" for v in _windows_voices()):
+        job = folder / "speech-job.json"
+        job.write_text(json.dumps({"voice": voice, "items": [
+            {"text": t, "path": str(p)} for t, p in zip(texts, paths)]}), encoding="utf-8")
+        _powershell(
+            _WINRT +
+            "$asTask = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object { $_.Name -eq 'AsTask' "
+            "-and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1' })[0];"
+            "function Await($op, [Type]$t) { $task = $asTask.MakeGenericMethod($t).Invoke($null, @($op)); "
+            "$task.Wait(-1) | Out-Null; $task.Result };"
+            f"$job = Get-Content -Raw -Encoding UTF8 -LiteralPath {_ps_quote(str(job))} | ConvertFrom-Json;"
+            "$s = New-Object Windows.Media.SpeechSynthesis.SpeechSynthesizer;"
+            "$s.Voice = [Windows.Media.SpeechSynthesis.SpeechSynthesizer]::AllVoices | "
+            "Where-Object { $_.DisplayName -eq $job.voice } | Select-Object -First 1;"
+            "foreach ($w in $job.items) {"
+            "  $stream = Await ($s.SynthesizeTextToStreamAsync($w.text)) ([Windows.Media.SpeechSynthesis.SpeechSynthesisStream]);"
+            "  $reader = New-Object Windows.Storage.Streams.DataReader($stream.GetInputStreamAt(0));"
+            "  $n = [uint32]$stream.Size; $null = Await ($reader.LoadAsync($n)) ([uint32]);"
+            "  $bytes = New-Object byte[] $n; $reader.ReadBytes($bytes);"
+            "  [System.IO.File]::WriteAllBytes($w.path, $bytes) }")
+        job.unlink(missing_ok=True)
+    elif sys.platform == "win32":
         job = folder / "speech-job.json"
         job.write_text(json.dumps({"voice": voice or "", "items": [
             {"text": t, "path": str(p)} for t, p in zip(texts, paths)]}), encoding="utf-8")
