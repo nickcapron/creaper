@@ -203,8 +203,12 @@ Vocals: use the best source the user has, and say which you used and why:
    one-shots). chop_vocal turns one into rhythmic chops moved onto the chords
    (chords_item), the house and future-bass way; place_loop puts a whole phrase in
    at the song's tempo and key. A real voice beats any synthetic one.
-2. Robot vocals (talk-box / vocoder style) when there's nothing to chop or the song
-   wants words: add_robot_vocal makes a synth sing lyrics. Write the melody as a
+2. A singing synth for sung words with a human-like voice (Synthesizer V, ACE Studio,
+   VOCALOID, OpenUtau): write the melody, then export_vocal_midi writes it with the
+   lyrics on the notes, says which singers are installed and how to load the file.
+   The user renders it there; insert_audio_file the result at bar 1 and mix it.
+3. Robot vocals (talk-box / vocoder style) when there's no singer or the song wants
+   that sound: add_robot_vocal makes a synth sing lyrics. Write the melody as a
    MIDI item first (singable, about one syllable per note), then pass the words, one
    per note. It uses the computer's own text-to-speech voices (list_speech_voices),
    so it sounds robotic: right for house, French touch, electro and synth-pop hooks,

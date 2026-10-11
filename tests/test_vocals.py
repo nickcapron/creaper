@@ -182,3 +182,55 @@ def test_slice_vocal_finds_syllables_and_their_pitch(tmp_path):
     assert len(slices) == 2
     assert abs(slices[0]["pitch"] - 57) < 0.3 and abs(slices[1]["pitch"] - 64.02) < 0.3   # A3, E4
     assert 0.1 < slices[0]["start"] < 0.2
+
+
+def _read_midi(data):
+    """Minimal reader for the files midi_with_lyrics writes: [(track, tick, kind, value)]."""
+    assert data[:4] == b"MThd"
+    ntracks, ppq = int.from_bytes(data[10:12], "big"), int.from_bytes(data[12:14], "big")
+    pos, events = 14, []
+    for t in range(ntracks):
+        assert data[pos:pos + 4] == b"MTrk"
+        end = pos + 8 + int.from_bytes(data[pos + 4:pos + 8], "big")
+        pos += 8
+        tick = 0
+        while pos < end:
+            delta = 0
+            while True:
+                b = data[pos]; pos += 1
+                delta = (delta << 7) | (b & 0x7F)
+                if b < 0x80:
+                    break
+            tick += delta
+            status = data[pos]
+            if status == 0xFF:
+                kind, length = data[pos + 1], data[pos + 2]
+                value = data[pos + 3:pos + 3 + length]
+                pos += 3 + length
+                events.append((t, tick, f"meta{kind:02x}", value))
+            else:
+                events.append((t, tick, "on" if status & 0xF0 == 0x90 else "off", data[pos + 1]))
+                pos += 3
+    return ppq, events
+
+
+def test_midi_with_lyrics_puts_each_syllable_on_its_note():
+    from creaper.vocal_tools import midi_with_lyrics, singer_syllables
+    line = [n(0, 1, 64), n(1, 0.5, 67), n(1.5, 1.5, 69), n(3, 1, 67)]
+    words = singer_syllables("dan-cing in _", line)
+    assert words == ["dan", "cing", "in", "-"]
+    notes = [dict(x, start=x["start"] + 4, velocity=90, lyric=w) for x, w in zip(line, words)]
+    ppq, events = _read_midi(midi_with_lyrics(notes, [(0, 120.0), (8, 100.0)], (4, 4)))
+    tempos = [(tick, int.from_bytes(v, "big")) for t, tick, k, v in events if k == "meta51"]
+    assert tempos == [(0, 500000), (8 * ppq, 600000)]
+    lyrics = [(tick, v.decode()) for t, tick, k, v in events if k == "meta05"]
+    ons = [(tick, p) for t, tick, k, p in events if k == "on"]
+    assert lyrics == [(4 * ppq, "dan"), (5 * ppq, "cing"), (int(5.5 * ppq), "in"), (7 * ppq, "-")]
+    assert ons == [(4 * ppq, 64), (5 * ppq, 67), (int(5.5 * ppq), 69), (7 * ppq, 67)]
+    assert sum(1 for e in events if e[2] == "off") == 4
+
+
+def test_singer_syllables_count_must_match():
+    from creaper.vocal_tools import singer_syllables
+    with pytest.raises(ValueError, match="3 syllables and holds but the melody has 2 notes"):
+        singer_syllables("to-night _", [n(0), n(1)])

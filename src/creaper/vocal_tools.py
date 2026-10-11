@@ -235,3 +235,147 @@ def chop_vocal(
                    "chops": len(plan), "largest_shift": max(shifts) if shifts else 0,
                    "fit_to": "chords" if (chords or chords_item) else ("key" if key else "unchanged pitch")})
     return result
+
+
+# ------------------------------------------------------- singing synthesizers
+
+# Singing synths creaper recognizes, as plugins or installed apps, and how each takes
+# a MIDI file with lyrics.
+SINGERS = {
+    "Synthesizer V": ("synthesizer v|synthv|dreamtonics", "File > Import (or drag the .mid in); lyrics come in on the notes"),
+    "ACE Studio": ("ace studio|ace bridge", "drag the .mid onto a track; lyrics come in on the notes"),
+    "VOCALOID": ("vocaloid", "File > Import > MIDI; lyrics come in on the notes"),
+    "OpenUtau": ("openutau|utau", "drag the .mid into the window; set the hold symbol to '+' for OpenUtau"),
+    "Alter/Ego": ("alter.?ego|plogue", "load it as an instrument on the melody's track and type the lyrics in its window"),
+    "Emvoice": ("emvoice", "load it as an instrument on the melody's track and type the lyrics in its window"),
+}
+_APP_DIRS = {
+    "Synthesizer V": ["Dreamtonics", "Synthesizer V Studio 2 Pro", "Synthesizer V Studio Pro"],
+    "ACE Studio": ["ACE Studio"],
+    "VOCALOID": ["VOCALOID6", "VOCALOID5"],
+    "OpenUtau": ["OpenUtau"],
+}
+
+
+def singing_synths() -> list[str]:
+    """The singing synths installed here: as plugins REAPER knows, or as apps."""
+    found = set()
+    names = " ".join(p.get("name", "") for p in call("list_installed_fx", search=None, limit=2000).get("plugins", []))
+    for singer, (pattern, _) in SINGERS.items():
+        if re.search(pattern, names, re.I):
+            found.add(singer)
+    roots = [Path(p) for p in (r"C:\Program Files", r"C:\Program Files (x86)", str(Path.home() / "AppData/Local"),
+                               "/Applications", str(Path.home() / "Applications"))]
+    for singer, dirs in _APP_DIRS.items():
+        for root in roots:
+            if any((root / d).exists() or (root / f"{d}.app").exists() for d in dirs):
+                found.add(singer)
+    return sorted(found)
+
+
+def singer_syllables(lyrics: str, line: list[dict], hold: str = "-") -> list[str]:
+    """One lyric per note for a singing synth: each syllable of 'to-night' on its own
+    note, and `hold` (the singer's melisma mark) where '_' holds the previous word."""
+    out: list[str] = []
+    for token in lyrics.split():
+        if token in ("_", "-"):
+            if not out:
+                raise ValueError("the lyrics can't start with a hold ('_')")
+            out.append(hold)
+        else:
+            out += [p for p in token.split("-") if p] or [token]
+    if len(out) != len(line):
+        raise ValueError(f"the lyrics have {len(out)} syllables and holds but the melody has {len(line)} notes. "
+                         "One syllable per note: hyphenate words ('to-night'), '_' holds the previous one.")
+    return out
+
+
+def _vlq(n: int) -> bytes:
+    out = [n & 0x7F]
+    n >>= 7
+    while n:
+        out.append(0x80 | (n & 0x7F))
+        n >>= 7
+    return bytes(reversed(out))
+
+
+def _chunk(kind: bytes, data: bytes) -> bytes:
+    return kind + len(data).to_bytes(4, "big") + data
+
+
+def _track(events: list[tuple[int, int, bytes]]) -> bytes:
+    """events: (tick, order, data); order puts note-offs before note-ons on one tick."""
+    out, last = bytearray(), 0
+    for tick, _, data in sorted(events, key=lambda e: (e[0], e[1])):
+        out += _vlq(tick - last) + data
+        last = tick
+    out += _vlq(0) + b"\xff\x2f\x00"
+    return _chunk(b"MTrk", bytes(out))
+
+
+def _meta(kind: int, data: bytes) -> bytes:
+    return bytes([0xFF, kind]) + _vlq(len(data)) + data
+
+
+def midi_with_lyrics(notes: list[dict], tempos: list[tuple[float, float]], meter: tuple[int, int],
+                     name: str = "Vocal", ppq: int = 480) -> bytes:
+    """A standard MIDI file (type 1) singing synths import: a tempo track (tempos as
+    (QN, BPM)) and one track whose notes each carry their lyric. Notes: pitch, start
+    and length in QN from the song's start, velocity, lyric."""
+    num, den = meter
+    conductor = [(0, 0, _meta(0x03, b"Tempo")),
+                 (0, 1, _meta(0x58, bytes([num, max(0, den.bit_length() - 1), 24, 8])))]
+    for qn, bpm in tempos:
+        conductor.append((int(round(qn * ppq)), 2, _meta(0x51, int(round(60_000_000 / bpm)).to_bytes(3, "big"))))
+    voice = [(0, 0, _meta(0x03, name.encode("utf-8")))]
+    for n in notes:
+        on, off = int(round(n["start"] * ppq)), int(round((n["start"] + n["length"]) * ppq))
+        voice.append((on, 2, _meta(0x05, n["lyric"].encode("utf-8"))))
+        voice.append((on, 3, bytes([0x90, n["pitch"], max(1, min(127, n.get("velocity", 100)))])))
+        voice.append((max(on + 1, off), 1, bytes([0x80, n["pitch"], 0])))
+    header = _chunk(b"MThd", (1).to_bytes(2, "big") + (2).to_bytes(2, "big") + ppq.to_bytes(2, "big"))
+    return header + _track(conductor) + _track(voice)
+
+
+@tool()
+def export_vocal_midi(
+    item_id: ItemId,
+    lyrics: Annotated[str, Field(description="One syllable per note: 'dan-cing in the dark _' (hyphens split syllables, '_' holds)")],
+    name: Annotated[str, Field(description="File and part name")] = "Lead Vocal",
+    hold: Annotated[str, Field(description="The singer's melisma mark: '-' (Synthesizer V, ACE Studio, VOCALOID) or '+' (OpenUtau)")] = "-",
+) -> dict:
+    """For a real singing voice: writes a melody item and its lyrics as a MIDI file
+    that singing synths (Synthesizer V, ACE Studio, VOCALOID, OpenUtau) import with
+    the words on the notes, at the song's tempo and positions. Says which singers are
+    installed and how to load it. The singer renders the vocal; then insert_audio_file
+    it at bar 1 (the file starts at the song's start) and mix it like any vocal."""
+    data = call("get_midi_notes", item_id=item_id, limit=20000)
+    line = melody_line(data.get("notes", []))
+    if not line:
+        raise ValueError("that MIDI item has no notes to sing")
+    words = singer_syllables(lyrics, line, hold)
+    base = data["start"]["qn"]
+    notes = [{"pitch": n["pitch"], "start": base + n["start"], "length": n["length"], "velocity": n.get("velocity", 100),
+              "lyric": w} for n, w in zip(line, words)]
+    tempo = call("get_tempo_map")
+    tempos = [(0.0, float(tempo["start_tempo_bpm"]))]
+    ramps = False
+    for change in tempo.get("changes", []):
+        tempos.append((float(change["position"]["qn"]), float(change["bpm"])))
+        ramps = ramps or bool(change.get("ramp_to_next"))
+    num, den = (int(x) for x in tempo["start_time_signature"].split("/"))
+    folder = Path(call("project_paths")["default_folder"]) / "creaper vocals"
+    folder.mkdir(parents=True, exist_ok=True)
+    slug = re.sub(r"[^\w-]+", "-", name).strip("-") or "vocal"
+    path = folder / f"{slug}-{time.strftime('%Y%m%d-%H%M%S')}.mid"
+    path.write_bytes(midi_with_lyrics(notes, sorted(tempos), (num, den), name))
+    singers = singing_synths()
+    result = {"file": str(path), "notes": len(notes), "starts_at": "the song's start (bar 1)",
+              "singers_installed": singers or None,
+              "how_to_load": {s: SINGERS[s][1] for s in singers} or None}
+    if not singers:
+        result["note"] = ("No singing synth found. Free: OpenUtau with a DiffSinger voice; paid: Synthesizer V, ACE "
+                          "Studio. Meanwhile, add_robot_vocal can sing these lyrics robot-style.")
+    if ramps:
+        result["warning"] = "the song has tempo ramps; the file steps between tempos, so check the timing there"
+    return result
