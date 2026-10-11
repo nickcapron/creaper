@@ -201,7 +201,8 @@ Vocals:
   MIDI item first (singable, about one syllable per note), then pass the words, one
   per note. It uses the computer's own text-to-speech voices (list_speech_voices),
   so it sounds robotic: right for house, French touch, electro and synth-pop hooks,
-  not a human singer. Choir and vocal-pad instruments and vocal chops from
+  not a human singer. Keep robot lyrics sparse or nobody can follow them: a short
+  hook repeated, at most one syllable per beat, quarter notes or longer. Choir and vocal-pad instruments and vocal chops from
   find_samples cover wordless vocals.
 
 Recording and editing:

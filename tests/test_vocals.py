@@ -57,3 +57,58 @@ def test_trim_silence_cuts_the_gaps_and_evens_the_level(tmp_path):
     with wave.open(str(path), "rb") as w:
         out = np.frombuffer(w.readframes(w.getnframes()), dtype="<i2") / 32768
     assert abs(np.abs(out).max() - 10 ** (-3 / 20)) < 0.01
+
+
+RATE = 44100
+
+
+def _zero_crossing_hz(x):
+    crossings = np.nonzero(np.diff(np.signbit(x)))[0]
+    return (len(crossings) / 2) / (len(x) / RATE)
+
+
+def test_time_stretch_keeps_pitch_and_hits_the_length():
+    tone = 0.5 * np.sin(2 * np.pi * 220 * np.arange(int(0.2 * RATE)) / RATE)
+    for factor in (0.6, 2.0, 4.0):
+        out = speech.time_stretch(tone, int(len(tone) * factor), RATE)
+        assert len(out) == int(len(tone) * factor)
+        middle = out[len(out) // 4: -len(out) // 4]
+        assert abs(_zero_crossing_hz(middle) - 220) < 6
+
+
+def _word():
+    """A made-up word: a 40 ms noise consonant, a 200 ms vowel, a 30 ms noise ending."""
+    rng = np.random.default_rng(1)
+    head = 0.05 * rng.standard_normal(int(0.04 * RATE))
+    vowel = 0.6 * np.sin(2 * np.pi * 180 * np.arange(int(0.2 * RATE)) / RATE)
+    tail = 0.05 * rng.standard_normal(int(0.03 * RATE))
+    return head, vowel, tail
+
+
+def test_vowel_span_finds_the_sustained_part():
+    head, vowel, tail = _word()
+    start, end = speech.vowel_span(np.concatenate([head, vowel, tail]), RATE)
+    assert abs(start - len(head)) <= 0.011 * RATE
+    assert abs(end - (len(head) + len(vowel))) <= 0.011 * RATE
+
+
+def test_fit_word_holds_the_vowel_and_keeps_the_consonants(tmp_path):
+    head, vowel, tail = _word()
+    path = tmp_path / "word.wav"
+    speech._write(path, np.concatenate([head, vowel, tail]), RATE)
+    speed = speech.fit_word(path, 1.0)
+    out, rate = speech._read(path)
+    assert rate == RATE and abs(len(out) - RATE) <= 1
+    assert speed < 0.3  # slowed down overall...
+    # ...but the consonant at the start is untouched noise at its natural length, not smeared.
+    first = out[int(0.006 * RATE): int(0.035 * RATE)]
+    assert np.sqrt(np.mean(first ** 2)) < 0.1 and _zero_crossing_hz(first) > 2000
+
+
+def test_fit_word_speeds_up_a_word_that_is_too_long(tmp_path):
+    head, vowel, tail = _word()
+    path = tmp_path / "word.wav"
+    speech._write(path, np.concatenate([head, vowel, tail]), RATE)
+    speed = speech.fit_word(path, 0.15)
+    out, _ = speech._read(path)
+    assert abs(len(out) - int(0.15 * RATE)) <= 1 and speed > 1.7

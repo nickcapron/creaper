@@ -16,6 +16,8 @@ from .server import READ_ONLY, ItemId, call, tool
 
 # Notes starting this close together (in QN) count as one onset: the top one sings.
 ONSET_TOLERANCE = 1 / 64
+# Words spoken this much faster than natural to fit their notes start to blur.
+RUSHED = 1.6
 
 
 def melody_line(notes: list[dict]) -> list[dict]:
@@ -82,10 +84,16 @@ def add_robot_vocal(
 ) -> dict:
     """Makes a synth sing words, vocoder style: the computer's text-to-speech voice
     speaks each word under its note of a melody item (top note of each chord), and
-    ReaVocode shapes a synth playing the melody (chords too) with that speech.
-    Builds three tracks after the melody's track: the vocal (the one you hear), its
-    voice (the spoken words, stretched to the notes) and its carrier (the synth). Write
-    the melody first: a clear, mostly one-note-per-syllable line sings best."""
+    ReaVocode shapes a synth playing the melody (chords too) with that speech. Each
+    word's vowel is held over its notes while its consonants keep their natural speed.
+    Builds three tracks after the melody's track: the vocal (the vocoder), its voice
+    (the spoken words; it also plays their high-passed consonants for clarity) and its
+    carrier (the synth).
+    Robot vocals are only understood when they're sparse: a short hook of a few words,
+    repeated (think "one more time", "around the world"), at most one syllable per beat,
+    on quarter notes or longer. Dense, fast verses turn to mush. To make words clearer,
+    raise the voice track's fader (consonants) or the band count; don't blend the raw
+    voice in with ReaVocode's ModDry, which adds its out-of-key speaking pitch."""
     data = call("get_midi_notes", item_id=item_id)
     line = melody_line(data.get("notes", []))
     if not line:
@@ -97,15 +105,23 @@ def add_robot_vocal(
     folder = Path(call("project_paths")["default_folder"]) / "creaper vocals" / f"{slug}-{stamp}"
     files = speech.speak([w["text"] for w in words], folder, chosen)
     base = data["start"]["qn"]
-    clips = [{"path": str(f), "start_qn": base + w["start"], "end_qn": base + w["end"], "word": w["word"]}
-             for f, w in zip(files, words)]
+    times = call("qn_to_times", qns=[q for w in words for q in (base + w["start"], base + w["end"])])
+    clips, rushed = [], []
+    for i, (f, w) in enumerate(zip(files, words)):
+        # Hold the vowel over the notes; consonants keep their natural speed.
+        speed = speech.fit_word(f, times[2 * i + 1] - times[2 * i])
+        if speed > RUSHED:
+            rushed.append(w["word"])
+        clips.append({"path": str(f), "start_qn": base + w["start"], "end_qn": base + w["end"], "word": w["word"]})
     result = call("build_robot_vocal", timeout=120.0, melody_item=item_id, clips=clips, name=name,
                   carrier=carrier, bands=bands)
+    result.pop("squeezed", None)
     result["speech_voice"] = chosen or "system default"
     result["word_files"] = str(folder)
     result["next"] = ("Play it. If words are hard to make out: more bands, a brighter carrier (saw, filter open), "
                       "or fewer syllables per beat. Mute the original melody track if it doubles the vocal.")
-    if result.get("squeezed"):
-        result["note"] = ("These words are long for their notes and got cut short: "
-                          + ", ".join(result["squeezed"]) + ". Give them longer notes or more notes.")
+    if rushed:
+        result["note"] = (f"{len(rushed)} of {len(words)} words had to be sped up more than {RUSHED:g}x to fit "
+                          "their notes, which blurs them: " + ", ".join(rushed[:12]) + (" ..." if len(rushed) > 12
+                          else "") + ". Give them longer notes, or fewer words.")
     return result

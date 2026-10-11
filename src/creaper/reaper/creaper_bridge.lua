@@ -372,9 +372,24 @@ end
 -- What the plugin would display for normalized value v. Uses
 -- FormatParamValueNormalized when the plugin supports it, otherwise sets the
 -- parameter and reads it back (callers restore it on failure).
+-- Some plugins' formatters disagree with what they really display (ReaEQ's band
+-- gains), so each parameter's formatter is checked once against set-and-read.
+local formatter_ok = {}
 local function display_string_at(t, fx, param, v)
-  local ok, s = reaper.TrackFX_FormatParamValueNormalized(t, fx, param, v, "")
-  if not ok or s == "" then
+  local key = reaper.TrackFX_GetFXGUID(t, fx) .. ":" .. param
+  if formatter_ok[key] == nil then
+    local current = reaper.TrackFX_GetParamNormalized(t, fx, param)
+    local probe = current < 0.5 and 0.8 or 0.2
+    local ok, formatted = reaper.TrackFX_FormatParamValueNormalized(t, fx, param, probe, "")
+    reaper.TrackFX_SetParamNormalized(t, fx, param, probe)
+    local _, actual = reaper.TrackFX_GetFormattedParamValue(t, fx, param, "")
+    reaper.TrackFX_SetParamNormalized(t, fx, param, current)
+    formatter_ok[key] = ok and formatted ~= "" and formatted == actual
+  end
+  local s
+  if formatter_ok[key] then
+    _, s = reaper.TrackFX_FormatParamValueNormalized(t, fx, param, v, "")
+  else
     reaper.TrackFX_SetParamNormalized(t, fx, param, v)
     _, s = reaper.TrackFX_GetFormattedParamValue(t, fx, param, "")
   end
@@ -1512,6 +1527,12 @@ function commands.time_to_positions(p)
   return out
 end
 
+function commands.qn_to_times(p)
+  local out = {}
+  for i, qn in ipairs(p.qns or {}) do out[i] = qn_to_time(qn) end
+  return out
+end
+
 -- Render settings we touch, saved and restored around every render.
 local RENDER_STRING_KEYS = { "RENDER_FILE", "RENDER_PATTERN", "RENDER_FORMAT", "RENDER_FORMAT2" }
 local RENDER_NUMBER_KEYS = {
@@ -2618,8 +2639,13 @@ end
 
 -- ReaVocode's inputs (measured): the voice (modulator) on channels 1/2, the carrier on 3/4.
 local VOCODER_VOICE_CHAN, VOCODER_CARRIER_CHAN = 0, 2
+-- A saw carrier has no noise, so the vocoder loses s, t, k and f. The voice track
+-- itself plays only its top end (high-passed), under the vocoder, to put them back.
+local AIR_HIGHPASS_HZ, AIR_DB = 4500, -6
 local VOCAL_START_DB = -4 -- a saw carrier peaks around -1 dBFS at unity
-local SPEECH_RATE_MIN, SPEECH_RATE_MAX = 0.2, 2.5 -- stretched up to 5x: vocoded, it holds the vowel
+-- Clips arrive already fitted to their notes (vowels stretched, consonants kept), so the
+-- playrate only absorbs rounding; these limits guard against a clip that isn't.
+local SPEECH_RATE_MIN, SPEECH_RATE_MAX = 0.5, 2.0
 
 -- Builds a vocoded vocal under a melody item, as one undo step: a carrier track
 -- that plays the melody's notes on a synth, a voice track with one spoken clip per
@@ -2673,7 +2699,7 @@ function commands.build_robot_vocal(p)
     reaper.MIDI_Sort(take)
     reaper.GetSetMediaItemTakeInfo_String(take, "P_NAME", name .. " melody", true)
 
-    -- One clip per word, stretched (pitch kept) to last as long as its notes.
+    -- One clip per word, lasting as long as its notes.
     local placed, squeezed = 0, {}
     for _, c in ipairs(p.clips) do
       local start_t, end_t = qn_to_time(c.start_qn), qn_to_time(c.end_qn)
@@ -2698,16 +2724,29 @@ function commands.build_robot_vocal(p)
     end
     reaper.Main_OnCommand(40047, 0) -- Peaks: build any missing peaks
 
-    -- Voice and carrier feed the vocoder's two input pairs; only its output is heard.
+    -- Voice and carrier feed the vocoder's two input pairs. The voice goes in full
+    -- range (pre-FX, so its fader and filter don't change the vocoder); what the voice
+    -- track itself plays is only its high-passed consonants.
     reaper.SetMediaTrackInfo_Value(vocal, "I_NCHAN", 4)
     reaper.SetMediaTrackInfo_Value(vocal, "C_MAINSEND_NCH", 2)
     reaper.SetMediaTrackInfo_Value(vocal, "D_VOL", db_to_amp(VOCAL_START_DB))
-    for _, route in ipairs({ { voice, VOCODER_VOICE_CHAN }, { carrier, VOCODER_CARRIER_CHAN } }) do
-      local from, chan = route[1], route[2]
-      reaper.SetMediaTrackInfo_Value(from, "B_MAINSEND", 0)
+    for _, route in ipairs({ { voice, VOCODER_VOICE_CHAN, 1 }, { carrier, VOCODER_CARRIER_CHAN, 0 } }) do
+      local from, chan, mode = route[1], route[2], route[3]
       local send = reaper.CreateTrackSend(from, vocal)
       reaper.SetTrackSendInfo_Value(from, 0, send, "I_SRCCHAN", 0)
       reaper.SetTrackSendInfo_Value(from, 0, send, "I_DSTCHAN", chan)
+      reaper.SetTrackSendInfo_Value(from, 0, send, "I_SENDMODE", mode) -- 1 = pre-FX
+    end
+    reaper.SetMediaTrackInfo_Value(carrier, "B_MAINSEND", 0)
+    local air = reaper.TrackFX_AddByName(voice, "ReaEQ", false, -1)
+    if air >= 0 then
+      for band = 0, 3 do reaper.TrackFX_SetNamedConfigParm(voice, air, "BANDENABLED" .. band, "0") end
+      reaper.TrackFX_SetNamedConfigParm(voice, air, "BANDENABLED4", "1") -- band 5 is a high-pass, off by default
+      local freq = find_param(voice, air, "Freq-High Pass 5")
+      reaper.TrackFX_SetParamNormalized(voice, air, freq, solve_display_value(voice, air, freq, AIR_HIGHPASS_HZ))
+      reaper.SetMediaTrackInfo_Value(voice, "D_VOL", db_to_amp(AIR_DB))
+    else
+      reaper.SetMediaTrackInfo_Value(voice, "B_MAINSEND", 0)
     end
     local vocoder = reaper.TrackFX_AddByName(vocal, "ReaVocode", false, -1)
     if vocoder < 0 then fail("REAPER's ReaVocode isn't available") end
@@ -2719,6 +2758,8 @@ function commands.build_robot_vocal(p)
     if color ~= 0 then for _, t in ipairs({ vocal, voice, carrier }) do reaper.SetTrackColor(t, color) end end
     local _, band_text = reaper.TrackFX_GetFormattedParamValue(vocal, vocoder, bands or 2, "")
     return { vocal = track_ref(vocal), voice = track_ref(voice), carrier = track_ref(carrier),
+             consonants = air >= 0 and ("the voice track plays its consonants above " .. AIR_HIGHPASS_HZ
+               .. " Hz at " .. AIR_DB .. " dB; raise its fader for crisper words") or nil,
              carrier_instrument = fx_name(carrier, fx), words_placed = placed, bands = band_text,
              squeezed = #squeezed > 0 and squeezed or nil }
   end)

@@ -156,6 +156,100 @@ def trim_silence(path: Path, floor_db: float = -40.0, pad: float = 0.01) -> floa
     return len(audio) / rate
 
 
+def _read(path: Path) -> tuple[np.ndarray, int]:
+    with wave.open(str(path), "rb") as w:
+        rate, channels = w.getframerate(), w.getnchannels()
+        raw = w.readframes(w.getnframes())
+    return np.frombuffer(raw, dtype="<i2").reshape(-1, channels).mean(axis=1) / 32768.0, rate
+
+
+def _write(path: Path, audio: np.ndarray, rate: int) -> None:
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes((np.clip(audio, -1, 1) * 32767).astype("<i2").tobytes())
+
+
+def time_stretch(x: np.ndarray, length: int, rate: int) -> np.ndarray:
+    """Stretches or squeezes `x` to `length` samples without changing its pitch or
+    formants (WSOLA: overlapping windows, each placed where it best continues the last)."""
+    if length <= 0:
+        return np.zeros(0)
+    win = max(16, int(0.03 * rate))
+    if len(x) < win * 2:
+        idx = np.linspace(0, max(len(x) - 1, 0), length)
+        return np.interp(idx, np.arange(len(x)), x) if len(x) else np.zeros(length)
+    hop = win // 4
+    tolerance = hop // 2
+    window = np.hanning(win)
+    frames = max(2, int(np.ceil((length - win) / hop)) + 1)
+    sources = np.linspace(0, len(x) - win, frames)
+    out = np.zeros(frames * hop + win)
+    norm = np.zeros_like(out)
+    previous = None
+    for i, src in enumerate(sources):
+        pos = int(src)
+        if previous is not None:
+            # The natural continuation of the last frame; pick the nearby frame most like it.
+            target = x[previous + hop: previous + hop + win]
+            best, best_score = pos, -np.inf
+            for cand in range(max(0, pos - tolerance), min(len(x) - win, pos + tolerance) + 1, 2):
+                seg = x[cand: cand + win]
+                if len(target) == win:
+                    score = float(np.dot(seg, target))
+                    if score > best_score:
+                        best, best_score = cand, score
+            pos = best
+        out[i * hop: i * hop + win] += x[pos: pos + win] * window
+        norm[i * hop: i * hop + win] += window
+        previous = pos
+    norm[norm < 1e-6] = 1.0
+    return (out / norm)[:length]
+
+
+def vowel_span(x: np.ndarray, rate: int, below_peak_db: float = 10.0) -> tuple[int, int]:
+    """The word's sustained loud part (its main vowel): the longest run of 10 ms frames
+    within `below_peak_db` of the loudest. Consonants sit before and after it."""
+    frame = max(1, int(0.01 * rate))
+    n = len(x) // frame
+    if n < 3:
+        return 0, len(x)
+    rms = np.sqrt(np.mean(x[: n * frame].reshape(n, frame) ** 2, axis=1)) + 1e-12
+    loud = 20 * np.log10(rms / rms.max()) > -below_peak_db
+    best, run_start = (0, 0), None
+    for i, on in enumerate(list(loud) + [False]):
+        if on and run_start is None:
+            run_start = i
+        elif not on and run_start is not None:
+            if i - run_start > best[1] - best[0]:
+                best = (run_start, i)
+            run_start = None
+    return best[0] * frame, best[1] * frame
+
+
+def fit_word(path: Path, seconds: float) -> float:
+    """Rewrites a spoken word to last exactly `seconds` the way a singer would: the
+    consonants keep their natural speed and the vowel is held (or shortened) to fill
+    the notes. Returns how much faster than natural the word had to go (1 = natural)."""
+    x, rate = _read(path)
+    target = max(1, int(round(seconds * rate)))
+    start, end = vowel_span(x, rate)
+    head, vowel, tail = x[:start], x[start:end], x[end:]
+    room = target - len(head) - len(tail)
+    if len(vowel) >= int(0.03 * rate) and room >= max(int(0.04 * rate), len(vowel) * 0.4):
+        fitted = np.concatenate([head, time_stretch(vowel, room, rate), tail])
+    else:
+        fitted = time_stretch(x, target, rate)  # too short to hold back the consonants
+    fade = min(len(fitted) // 4, int(0.005 * rate))
+    if fade:
+        ramp = np.linspace(0, 1, fade)
+        fitted[:fade] *= ramp
+        fitted[-fade:] *= ramp[::-1]
+    _write(path, fitted, rate)
+    return len(x) / target
+
+
 def _run(cmd: list[str]) -> None:
     done = subprocess.run(cmd, capture_output=True, text=True, timeout=TIMEOUT)
     if done.returncode != 0:
