@@ -2614,6 +2614,116 @@ function commands.insert_audio_file(p)
   end)
 end
 
+------------------------------------------------------------ robot vocals
+
+-- ReaVocode's inputs (measured): the voice (modulator) on channels 1/2, the carrier on 3/4.
+local VOCODER_VOICE_CHAN, VOCODER_CARRIER_CHAN = 0, 2
+local VOCAL_START_DB = -4 -- a saw carrier peaks around -1 dBFS at unity
+local SPEECH_RATE_MIN, SPEECH_RATE_MAX = 0.2, 2.5 -- stretched up to 5x: vocoded, it holds the vowel
+
+-- Builds a vocoded vocal under a melody item, as one undo step: a carrier track
+-- that plays the melody's notes on a synth, a voice track with one spoken clip per
+-- word (each stretched over its notes), and the vocal track where ReaVocode makes
+-- the synth speak the words. Only the vocal track is heard.
+function commands.build_robot_vocal(p)
+  local source = find_item(p.melody_item)
+  local source_take = midi_take(source)
+  local carrier_name = p.carrier and (resolve_plugin(p.carrier, true) or p.carrier) or "ReaSynth"
+  if type(p.clips) ~= "table" or #p.clips == 0 then fail("no words to place") end
+  for _, c in ipairs(p.clips) do
+    if not reaper.file_exists(tostring(c.path)) then fail("there's no file at " .. tostring(c.path)) end
+  end
+  local name = p.name or "Robot Vocal"
+  return with_undo("robot vocal " .. name, function()
+    local source_track = reaper.GetMediaItemTrack(source)
+    local index = int(reaper.GetMediaTrackInfo_Value(source_track, "IP_TRACKNUMBER"))
+    if reaper.GetMediaTrackInfo_Value(source_track, "I_FOLDERDEPTH") == 1 then index = index - 1 end
+    local function add_track(track_name_, at)
+      reaper.InsertTrackAtIndex(at, true)
+      local t = reaper.GetTrack(0, at)
+      reaper.GetSetMediaTrackInfo_String(t, "P_NAME", track_name_, true)
+      return t
+    end
+    local vocal = add_track(name, index)
+    local voice = add_track(name .. " Voice", index + 1)
+    local carrier = add_track(name .. " Carrier", index + 2)
+
+    -- The carrier plays the melody item's notes.
+    local fx = reaper.TrackFX_AddByName(carrier, carrier_name, false, -1)
+    if fx < 0 then fail("couldn't find an instrument named '" .. tostring(p.carrier) .. "'") end
+    if not p.carrier then
+      -- ReaSynth starts as a pure sine, which leaves the vocoder almost nothing to
+      -- shape: a full saw gives every band something to work with.
+      reaper.TrackFX_SetParamNormalized(carrier, fx, find_param(carrier, fx, "Saw mix"), 1)
+    end
+    local item_start = reaper.GetMediaItemInfo_Value(source, "D_POSITION")
+    local item_end = item_start + reaper.GetMediaItemInfo_Value(source, "D_LENGTH")
+    local copy = reaper.CreateNewMIDIItemInProj(carrier, item_start, item_end, false)
+    local take = reaper.GetActiveTake(copy)
+    local _, count = reaper.MIDI_CountEvts(source_take)
+    for i = 0, count - 1 do
+      local _, _, muted, s, e, chan, pitch, vel = reaper.MIDI_GetNote(source_take, i)
+      if not muted then
+        local s_qn = reaper.MIDI_GetProjQNFromPPQPos(source_take, s)
+        local e_qn = reaper.MIDI_GetProjQNFromPPQPos(source_take, e)
+        reaper.MIDI_InsertNote(take, false, false, reaper.MIDI_GetPPQPosFromProjQN(take, s_qn),
+          reaper.MIDI_GetPPQPosFromProjQN(take, e_qn), chan, pitch, vel, true)
+      end
+    end
+    reaper.MIDI_Sort(take)
+    reaper.GetSetMediaItemTakeInfo_String(take, "P_NAME", name .. " melody", true)
+
+    -- One clip per word, stretched (pitch kept) to last as long as its notes.
+    local placed, squeezed = 0, {}
+    for _, c in ipairs(p.clips) do
+      local start_t, end_t = qn_to_time(c.start_qn), qn_to_time(c.end_qn)
+      local span = end_t - start_t
+      local src = reaper.PCM_Source_CreateFromFile(c.path)
+      local length = src and reaper.GetMediaSourceLength(src) or 0
+      if span > 0 and length > 0 then
+        local item = reaper.AddMediaItemToTrack(voice)
+        local clip = reaper.AddTakeToMediaItem(item)
+        reaper.SetMediaItemTake_Source(clip, src)
+        local rate = math.max(SPEECH_RATE_MIN, math.min(SPEECH_RATE_MAX, length / span))
+        if length / span > SPEECH_RATE_MAX then squeezed[#squeezed + 1] = c.word end
+        reaper.SetMediaItemTakeInfo_Value(clip, "D_PLAYRATE", rate)
+        reaper.SetMediaItemTakeInfo_Value(clip, "B_PPITCH", 1)
+        if c.word then reaper.GetSetMediaItemTakeInfo_String(clip, "P_NAME", c.word, true) end
+        reaper.SetMediaItemInfo_Value(item, "D_POSITION", start_t)
+        reaper.SetMediaItemInfo_Value(item, "D_LENGTH", math.min(span, length / rate))
+        reaper.SetMediaItemInfo_Value(item, "D_FADEINLEN", 0.005)
+        reaper.SetMediaItemInfo_Value(item, "D_FADEOUTLEN", 0.02)
+        placed = placed + 1
+      end
+    end
+    reaper.Main_OnCommand(40047, 0) -- Peaks: build any missing peaks
+
+    -- Voice and carrier feed the vocoder's two input pairs; only its output is heard.
+    reaper.SetMediaTrackInfo_Value(vocal, "I_NCHAN", 4)
+    reaper.SetMediaTrackInfo_Value(vocal, "C_MAINSEND_NCH", 2)
+    reaper.SetMediaTrackInfo_Value(vocal, "D_VOL", db_to_amp(VOCAL_START_DB))
+    for _, route in ipairs({ { voice, VOCODER_VOICE_CHAN }, { carrier, VOCODER_CARRIER_CHAN } }) do
+      local from, chan = route[1], route[2]
+      reaper.SetMediaTrackInfo_Value(from, "B_MAINSEND", 0)
+      local send = reaper.CreateTrackSend(from, vocal)
+      reaper.SetTrackSendInfo_Value(from, 0, send, "I_SRCCHAN", 0)
+      reaper.SetTrackSendInfo_Value(from, 0, send, "I_DSTCHAN", chan)
+    end
+    local vocoder = reaper.TrackFX_AddByName(vocal, "ReaVocode", false, -1)
+    if vocoder < 0 then fail("REAPER's ReaVocode isn't available") end
+    local bands = find_param(vocal, vocoder, "Band count")
+    if bands and p.bands then
+      reaper.TrackFX_SetParamNormalized(vocal, vocoder, bands, solve_display_value(vocal, vocoder, bands, p.bands))
+    end
+    local color = reaper.GetTrackColor(source_track)
+    if color ~= 0 then for _, t in ipairs({ vocal, voice, carrier }) do reaper.SetTrackColor(t, color) end end
+    local _, band_text = reaper.TrackFX_GetFormattedParamValue(vocal, vocoder, bands or 2, "")
+    return { vocal = track_ref(vocal), voice = track_ref(voice), carrier = track_ref(carrier),
+             carrier_instrument = fx_name(carrier, fx), words_placed = placed, bands = band_text,
+             squeezed = #squeezed > 0 and squeezed or nil }
+  end)
+end
+
 ------------------------------------------------------------ routing jobs
 
 local function find_send(src, dest)

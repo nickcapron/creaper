@@ -196,6 +196,14 @@ Samples and loops:
   MIDI keys, so patterns land without a drum map. When a plugin's own browser blocks
   you from picking its drum samples, its samples are often files you can use this way.
 
+Vocals:
+- add_robot_vocal makes a synth sing lyrics (vocoder style): write the melody as a
+  MIDI item first (singable, about one syllable per note), then pass the words, one
+  per note. It uses the computer's own text-to-speech voices (list_speech_voices),
+  so it sounds robotic: right for house, French touch, electro and synth-pop hooks,
+  not a human singer. Choir and vocal-pad instruments and vocal chops from
+  find_samples cover wordless vocals.
+
 Recording and editing:
 - list_inputs shows the audio interface's inputs and the MIDI devices. To record:
   set_record_settings (input, arm, monitoring), then record (a start bar and an
@@ -1709,6 +1717,7 @@ from . import project_tools  # noqa: E402,F401  (tempo map, MIDI extras, routing
 from . import sample_tools  # noqa: E402,F401  (samples, loops and sampler kits)
 from . import export_tools  # noqa: E402,F401  (saving and exporting)
 from . import record_tools  # noqa: E402,F401  (recording, takes, time selection, markers, templates)
+from . import vocal_tools  # noqa: E402,F401  (robot vocals: text-to-speech through a vocoder)
 
 
 def run() -> None:
