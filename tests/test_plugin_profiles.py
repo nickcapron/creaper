@@ -10,6 +10,8 @@ def test_profiles_match_fx_names():
     assert pp.find_profile("VST: ReaComp (Cockos)").drive == "Threshold"
     assert pp.find_profile("VST3: EQ SITRAL-295 (Arturia)").drive is None
     assert pp.find_profile("VST3: Some Other Plugin") is None
+    assert pp.find_profile("VST3i: Piano V3 (Arturia)").role == "instrument"
+    assert pp.find_profile("VST3i: Stage-73 V2 (Arturia)") is None
     assert pp.find_profile(None) is None
 
 
@@ -52,3 +54,13 @@ def test_next_drive_grows_with_scale_and_has_a_minimum_step():
     small = pp.next_drive(0.0, 1.45, 1.5, vca)              # tiny miss still moves >= 2% of the range
     assert 0.0 - small >= 0.02 * 60 - 1e-9
     assert pp.next_drive(0.0, 0.0, 1.5, vca, scale=4) < pp.next_drive(0.0, 0.0, 1.5, vca)
+
+
+def test_create_track_says_what_a_known_instrument_is(monkeypatch):
+    from creaper import server
+    monkeypatch.setattr(server, "call", lambda cmd, **kw: {
+        "track": {"name": kw["name"]}, "instrument": {"name": "VST3i: Piano V3 (Arturia)"}})
+    result = server.create_track(name="Keys", instrument="Piano V3")
+    assert "not the sampled" in result["instrument"]["profile"]["how_it_works"]
+    monkeypatch.setattr(server, "call", lambda cmd, **kw: {"track": {"name": kw["name"]}})
+    assert "instrument" not in server.create_track(name="Empty")

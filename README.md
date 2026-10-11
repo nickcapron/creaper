@@ -46,7 +46,7 @@ own Claude account; no API key needed.
 | **Samples & loops** | Search your sample folders by name, role, tempo and key, with each result checked by ear; place loops stretched to the project tempo and moved into key; build drum kits from any samples in REAPER's sampler |
 | **Routing** | A map of folders, sends, sidechains and outputs; folders; sends; master-send on/off |
 | **Mix** | Add, remove, bypass FX; volume, pan, mute, solo, color; sends; and one-call jobs: side-chain ducking (calibrated to a depth), submix buses, parallel compression, a starting vocal chain, mastering to a loudness target |
-| **Genres** | 264 genre profiles, from house and drill to bebop, flamenco, amapiano and Baroque: how each is composed, played, arranged and mixed, and a check of your mix against one |
+| **Genres** | 265 genre profiles, from house and drill to bebop, flamenco, amapiano and Baroque: how each is composed, played, arranged and mixed, and a check of your mix against one |
 | **Remember** | Notes Claude keeps between sessions: your taste, plugin quirks, mix lessons |
 | **Analyze** | Render the mix or one track and measure integrated/short-term loudness (LUFS), loudness range, true peak, clipping, crest factor, stereo correlation (including the low end), and frequency balance by band and octave, with a loudness timeline in bars |
 | **Control** | Play a range of bars, stop, move the cursor, undo, run any REAPER action |
@@ -73,7 +73,7 @@ creaper gives Claude a composer's toolkit, so it works from theory instead of gu
   voice-leading rules, basslines (walking, 808, tumbao, one-drop...), comping (stabs,
   skank, bossa, montuno, strum, arpeggios...), and melodies built from a motif developed
   over phrases.
-- **264 genres in 20 families.** Each profile has the style's era and touchstones,
+- **265 genres in 20 families.** Each profile has the style's era and touchstones,
   tempo, feel and swing, modes, typical progressions and harmonic rhythm, voicing,
   comping, bass and melody habits, a drum groove, song form with bar counts,
   instruments, sound design, production habits and mix targets. `sketch_song` turns a

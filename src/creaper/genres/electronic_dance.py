@@ -1228,6 +1228,70 @@ GENRES = [
     ),
     # ------------------------------------------------------------------ EDM and festival
     Genre(
+        name="piano house",
+        family="electronic dance",
+        aliases=("90s house", "italo house", "90s piano house"),
+        parent="house",
+        description="Late-80s and 90s club house built on a sampled piano riff: syncopated M1-piano chord stabs "
+                    "(or organ stabs), a big diva vocal and a pumping 909 groove, the sound of Italo house and the "
+                    "early-90s club anthems.",
+        era="Italy, the UK and the US club scene, 1988-1996",
+        touchstones=("Black Box", "Livin' Joy", "Robin S", "Crystal Waters", "CeCe Peniston", "Alison Limerick",
+                     "Ultra Naté", "Inner City"),
+        tempo=(118, 128),
+        feel="four-on-the-floor, punchy, with a light shuffle in the hats",
+        swing=53,
+        modes=("major", "minor", "dorian"),
+        keys=("C major", "G major", "F major", "A minor", "D minor"),
+        progressions=(
+            "major: I-IV",
+            "major: ii7-V7sus4-Imaj7-vi7",
+            "i7-iv7",
+            "dorian: i7-IV9",
+            "i-VI-VII-i",
+        ),
+        harmonic_rhythm=1,
+        harmony="Two- to four-chord loops: major triads with added 9ths and sus4s in the gospel-flavoured hits, "
+                "minor 7ths in darker ones. The piano riff is the harmony: right-hand chords between about C4 "
+                "and C5, the left hand doubling the root in octaves below, stabs syncopated and anticipating "
+                "the next chord by a 16th or an 8th. Key changes are rare.",
+        voicing="close",
+        comping="stabs",
+        bass_style="offbeat",
+        bass="Offbeat or octave-jumping synth or organ bass in the gaps between kicks, following the chord roots; "
+             "ducked by the kick.",
+        melody_density="sparse",
+        melody_scale="major pentatonic",
+        melody="The vocal (or a sampled diva phrase) carries the tune; the piano riff answers it. The "
+               "instrumental hook is the piano riff itself, one or two bars repeated, not a separate lead synth "
+               "line on top.",
+        groove={"step": 0.25, "swing": 53, "pattern": {
+            "kick":       "x... x... x... x...",
+            "clap":       ".... x... .... x...",
+            "closed hat": "x.x. x.x. x.x. x.x.",
+            "open hat":   "..x. ..x. ..x. ..x.",
+            "shaker":     "oxox oxox oxox oxox",
+        }},
+        drums="909 kick on every beat, clap on 2 and 4, open hats on the offbeats, closed hats or shaker in "
+              "16ths, tambourine on 2 and 4; snare rolls and drop-outs into the chorus.",
+        form=(("intro", 16), ("piano riff", 8), ("verse", 16), ("chorus", 16), ("breakdown", 16), ("chorus", 16),
+              ("piano riff", 8), ("outro", 16)),
+        instruments=("drum machine (909)", "M1-style house piano", "organ", "bass synth", "string pad",
+                     "diva vocal"),
+        sound_design="The Korg M1 'Piano 16'' preset is the sound: a bright, compressed, slightly synthetic sampled "
+                     "piano with a fast decay. Get close with a ROMpler or sample-based piano preset, or a "
+                     "plain piano layered with a quiet FM electric piano or organ; keep the release short. An "
+                     "acoustic piano model sounds too polite and turns harsh if brightened to compensate. Organ "
+                     "stabs (the M1 'Organ 2') for the Robin S side; lush strings in breakdowns.",
+        production="Piano riff forward in the mids but not harsh: high-pass it around 150-200 Hz so the bass owns "
+                   "the low end, light compression, a short plate or room; vocal on top; kick sidechain on bass "
+                   "and pads.",
+        theory="Gospel-derived major harmony (added 9ths, sus chords) over a dance groove. The syncopation of the "
+               "riff, with stabs on the 'and' and anticipated chord changes, supplies the drive, so the chords "
+               "themselves can stay simple.",
+        mix=Mix(lufs=(-9, -7), lra=(4, 7), low_end="heavy", tone="bright", width="wide"),
+    ),
+    Genre(
         name="eurodance",
         family="electronic dance",
         aliases=("euro dance", "90s eurodance"),
@@ -1250,7 +1314,9 @@ GENRES = [
         ),
         harmonic_rhythm=1,
         harmony="Simple diatonic minor progressions, one chord per bar, repeated through verse and chorus; "
-                "piano or synth stabs on the offbeat; occasional key change up a tone for the last chorus.",
+                "piano, organ or synth stabs on the offbeat, voiced around C4-C5 with the bass below. Some hits "
+                "jump up a tone for the last chorus, but it sounds dated and cheesy today: use it only when the "
+                "brief wants that.",
         voicing="close",
         comping="offbeat",
         bass_style="octaves",
@@ -1258,7 +1324,8 @@ GENRES = [
         melody_density="medium",
         melody_scale="minor",
         melody="A catchy instrumental synth hook alternating with a sung female chorus and a male rap verse; "
-               "melodies built from short repeated motifs within an octave.",
+               "the hook is a one- or two-bar motif repeated four to eight times within an octave, on its own "
+               "lead sound, above the stabs rather than doubling them.",
         groove={"step": 0.25, "swing": 50, "pattern": {
             "kick":       "x... x... x... x...",
             "snare":      ".... x... .... x...",
@@ -1271,8 +1338,9 @@ GENRES = [
         form=(("intro", 16), ("hook", 8), ("verse", 16), ("chorus", 16), ("hook", 8), ("verse", 16),
               ("chorus", 16), ("break", 8), ("chorus", 16), ("outro", 8)),
         instruments=("synth lead", "piano or stab synth", "bass synth", "drum machine", "vocals", "rap"),
-        sound_design="Bright synth leads and stabs (Korg M1, Roland JD-800), piano patches, gated pads, "
-                     "big reverb snares.",
+        sound_design="Workstation and ROMpler sounds (Korg M1, Roland JD-800/JD-990): M1-style sampled piano and "
+                     "organ stabs, detuned-saw or hoover leads, gated pads, big reverb snares. A sampled or preset "
+                     "'house piano' rather than an acoustic piano model.",
         production="Pop-oriented mixing: loud vocals, bright synths, clear radio-friendly structure; "
                    "compression for punch.",
         theory="Minor-key pop with dance rhythm: the i-VI-III-VII cycle and a strong instrumental hook; "

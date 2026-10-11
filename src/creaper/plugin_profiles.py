@@ -22,7 +22,7 @@ from typing import Any
 @dataclass(frozen=True)
 class Profile:
     name: str                         # matched against the FX name
-    role: str                         # "compressor", "bus processor", "eq", "preamp"
+    role: str                         # "compressor", "bus processor", "eq", "preamp", "instrument"
     summary: str
     setup: tuple[dict, ...] = ()      # changes that make it behave as a plain processor
     drive: str | None = None          # control that sets how hard a compressor works
@@ -124,6 +124,17 @@ PROFILES: tuple[Profile, ...] = (
         glue=(_set("Ratio", display_value=2), _set("Attack", display_value=30), _set("Release", display_value=150)),
         controls={"threshold": "Threshold", "ratio": "Ratio", "attack": "Attack", "release": "Release",
                   "knee": "Knee", "wet": "Wet", "dry": "Dry"},
+    ),
+    Profile(
+        "Piano V", "instrument",
+        "Arturia's physically modelled acoustic piano (grands and uprights). It makes a real piano, not "
+        "the sampled, compressed house piano of a Korg M1 or an electric piano: for those, use a sampled "
+        "or preset-based instrument. Hammer Hardness and Brightness near their maximum, plus its EQ's "
+        "presence and high-shelf boosts, make it harsh and cheap; small moves from the default are "
+        "usually enough. Other piano models are picked in its own preset browser.",
+        controls={"hardness": "Hammer Hardness", "brightness": "Brightness", "low shelf": "Low Shelf Gain",
+                  "presence": "Presence Gain", "high shelf": "High Shelf Gain", "width": "Stereo Width",
+                  "reverb": "Reverb Dry/Wet"},
     ),
 )
 

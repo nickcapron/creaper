@@ -67,8 +67,15 @@ Plugins (VST, VST3, CLAP, AU, JS):
   list_fx_presets says so; then offer to open the plugin window (update_fx show).
 - Sounds: a freshly loaded synth plays its default patch, which rarely suits the
   music. Whenever you add an instrument or the user asks for a sound, make it fit:
+  0. Choose an instrument that is that kind of sound. A named classic needs the same
+     kind of instrument: a sampled, ROMpler or preset-player patch for an M1 house
+     piano or organ, FM for DX7 electric pianos and bells, a Rhodes or Wurlitzer model
+     for those, an acoustic piano model only for a real piano. Tone controls can't
+     turn one into another. If nothing close is installed, say what you're using
+     instead; never call a sound something it isn't.
   1. list_sounds: if the user's library has a fitting sound, load_sound it.
-  2. Otherwise design it yourself. Don't just suggest presets: you can program any
+  2. Otherwise start from a factory preset close to the target when list_fx_presets
+     can see them, or design it yourself. Don't just suggest presets: you can program any
      synth through its parameters (Arturia, ReaSynth and most VSTs expose their
      controls). Find them with get_fx_parameters, searching by section ("osc",
      "wave", "filter", "cutoff", "reson", "env", "attack", "release", "lfo", "chorus",
@@ -76,7 +83,9 @@ Plugins (VST, VST3, CLAP, AU, JS):
      display_text for switches and menus. Shape oscillators, filter, envelopes and
      effects toward the role (pad, bass, lead, keys, pluck, bell...) and style asked
      for. In a sentence, say what you set (e.g. "two detuned saws, filter at 40%,
-     slow attack, chorus on").
+     slow attack, chorus on"). Move controls part way: brightness, hammer hardness,
+     resonance, drive and presence or high-shelf boosts at their extremes sound
+     harsh and cheap. Go further only if listening or measuring says so.
   3. Check it: play the passage with transport, or measure it with analyze_audio,
      and adjust if it's too bright, too quiet or too busy.
   When the user likes a sound (theirs or yours), offer to save_sound it with tags for
@@ -99,6 +108,16 @@ Plugins (VST, VST3, CLAP, AU, JS):
   map, generic note names, or the user changed kits), run map_drum_kit: it plays every key,
   identifies the sounds by ear and saves the drum map. Kits with a drum per MIDI channel
   take per_channel=True.
+
+Arranging:
+- Give each part its own register and job: bass below C3, chords and comping
+  around C3-C5, a lead or vocal above. Don't move a part up an octave to make it
+  cut through (it turns thin and shrill): use level, EQ or fewer parts. Don't put a
+  hook on the same instrument and register as the chords, and don't stack octave
+  doublings until the top end is crowded.
+- When the user says a part sounds bad, work out whether it's the tuning, the sound,
+  the notes or the level (listen, measure, analyze_harmony), fix that one thing, and
+  play it. Don't pile on doublings, octaves or brightness.
 
 Figure things out before asking. You can listen and measure: audition_instrument (what a
 patch does: range, pitch, envelope, tone), map_drum_kit, analyze_audio, get_fx_parameters,
@@ -418,9 +437,15 @@ def create_track(
     color: Annotated[str | None, Field(description="#RRGGBB")] = None,
     show_instrument: Annotated[bool, Field(description="Open the instrument's window so the user can pick a sound")] = False,
 ) -> dict:
-    """Adds a track, optionally with an instrument so MIDI on it makes sound."""
-    return call("create_track", timeout=60.0, name=name, instrument=instrument, position=position,
-                color=color, show_instrument=show_instrument)
+    """Adds a track, optionally with an instrument so MIDI on it makes sound. For
+    instruments creaper knows, the result includes what they are and how they behave."""
+    result = call("create_track", timeout=60.0, name=name, instrument=instrument, position=position,
+                  color=color, show_instrument=show_instrument)
+    loaded = result.get("instrument") if isinstance(result, dict) else None
+    profile = plugin_profiles.find_profile(loaded.get("name")) if isinstance(loaded, dict) else None
+    if profile:
+        loaded["profile"] = {"how_it_works": profile.summary, "key_controls": profile.controls}
+    return result
 
 
 @tool()
