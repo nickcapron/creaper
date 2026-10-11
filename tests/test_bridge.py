@@ -123,3 +123,63 @@ def test_errors_and_timeouts(tmp_path):
 def test_not_running(tmp_path):
     with pytest.raises(BridgeError, match="isn't answering"):
         Bridge(tmp_path).call("ping")
+
+
+def frozen_heartbeat(directory, age):
+    """The last beat a bridge wrote while recording, before REAPER's save/delete
+    prompt opened and stopped it."""
+    (directory / "bridge.json").write_text(json.dumps(
+        {"protocol": 2, "time": time.time() - age, "recording": True, "stop_prompt": True}))
+
+
+def test_waits_for_the_user_to_answer_the_recording_prompt(tmp_path, monkeypatch):
+    monkeypatch.setattr("creaper.bridge.HEARTBEAT_MAX_AGE", 0.2)
+    frozen_heartbeat(tmp_path, age=1)
+    stop = threading.Event()
+    threading.Timer(0.8, lambda: fake_bridge(tmp_path, 2, stop)).start()  # the user answers
+    waits = []
+    try:
+        assert Bridge(tmp_path).call("recording_status", timeout=0.3, on_user_wait=lambda: waits.append(1)) \
+            == "recording_status"
+    finally:
+        stop.set()
+    assert waits == [1]
+
+
+def test_waits_when_the_prompt_opens_mid_call(tmp_path, monkeypatch):
+    monkeypatch.setattr("creaper.bridge.HEARTBEAT_MAX_AGE", 0.2)
+    frozen_heartbeat(tmp_path, age=0)  # fresh: the prompt opens just after this
+    stop = threading.Event()
+    threading.Timer(1.0, lambda: fake_bridge(tmp_path, 2, stop)).start()
+    try:
+        # The timeout passes while the prompt is open; the call keeps waiting.
+        assert Bridge(tmp_path).call("transport", timeout=0.3) == "transport"
+    finally:
+        stop.set()
+
+
+def test_gives_up_on_an_unanswered_prompt(tmp_path, monkeypatch):
+    monkeypatch.setattr("creaper.bridge.HEARTBEAT_MAX_AGE", 0.2)
+    monkeypatch.setattr("creaper.bridge.STOP_PROMPT_WAIT", 0.5)
+    frozen_heartbeat(tmp_path, age=1)
+    with pytest.raises(BridgeError, match="save or delete"):
+        Bridge(tmp_path).call("recording_status", timeout=0.3)
+    frozen_heartbeat(tmp_path, age=0)
+    with pytest.raises(BridgeError, match="save or delete"):
+        Bridge(tmp_path).call("recording_status", timeout=0.3)
+    assert not list((tmp_path / "requests").glob("*.json"))
+
+
+def test_tells_the_caller_even_when_the_user_answers_quickly(tmp_path, monkeypatch):
+    monkeypatch.setattr("creaper.bridge.HEARTBEAT_MAX_AGE", 0.2)
+    frozen_heartbeat(tmp_path, age=0)
+    stop = threading.Event()
+    threading.Timer(1.0, lambda: fake_bridge(tmp_path, 2, stop)).start()
+    waits = []
+    try:
+        # Answered well within the usual timeout, but the caller still hears about the wait.
+        assert Bridge(tmp_path).call("recording_status", timeout=30, on_user_wait=lambda: waits.append(1)) \
+            == "recording_status"
+    finally:
+        stop.set()
+    assert waits == [1]

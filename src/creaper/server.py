@@ -152,6 +152,21 @@ Samples and loops:
   MIDI keys, so patterns land without a drum map. When a plugin's own browser blocks
   you from picking its drum samples, its samples are often files you can use this way.
 
+Recording and editing:
+- list_inputs shows the audio interface's inputs and the MIDI devices. To record:
+  set_record_settings (input, arm, monitoring), then record (a start bar and an
+  optional end bar or bar count; it stops by itself). Recording asks the user first.
+  When recording stops, REAPER usually asks the user which new files to save or
+  delete, and can't do anything else until they answer: record's note says when to
+  expect it. Tell the user before it appears; recording_status waits for them.
+  Hardware synths: their audio outputs go to interface inputs (record as audio), and
+  their MIDI to a MIDI device (record or play via MIDI).
+- list_takes / choose_take pick the best pass; explode_takes puts takes on tracks.
+- set_time_selection sets the time selection and loop points (and repeat);
+  edit_marker / delete_marker change markers and regions.
+- save_track_template / apply_track_template reuse track setups; freeze_tracks
+  renders heavy tracks to save CPU (unfreeze to edit).
+
 Saving and delivering:
 - An unsaved project is one crash away from being lost. When a session has real work
   in it and the project has no file (get_project_overview shows path "(unsaved)"),
@@ -1639,6 +1654,7 @@ from . import scan_tools  # noqa: E402,F401  (registers the plugin-testing tools
 from . import project_tools  # noqa: E402,F401  (tempo map, MIDI extras, routing)
 from . import sample_tools  # noqa: E402,F401  (samples, loops and sampler kits)
 from . import export_tools  # noqa: E402,F401  (saving and exporting)
+from . import record_tools  # noqa: E402,F401  (recording, takes, time selection, markers, templates)
 
 
 def run() -> None:

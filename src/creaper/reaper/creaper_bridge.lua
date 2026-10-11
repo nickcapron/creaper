@@ -1,6 +1,6 @@
 -- @description creaper bridge: lets Claude work in REAPER through the creaper MCP server
 -- @author nickcapron
--- @version 0.11.0
+-- @version 0.12.0
 -- @link https://github.com/nickcapron/creaper
 -- @provides
 --   [nomain] creaper_json.lua
@@ -13,7 +13,7 @@
 --   Every change it makes is a named undo point ("creaper: ..."), so Ctrl+Z
 --   reverts anything Claude did.
 
-local BRIDGE_VERSION = "0.11.0"
+local BRIDGE_VERSION = "0.12.0"
 local PROTOCOL = 2
 
 ----------------------------------------------------------------------- JSON
@@ -704,6 +704,14 @@ end
 
 local commands = {}
 local stop_at -- playback stops when it passes this time (seconds)
+local beat_now -- set to write the heartbeat on the next tick instead of within a second
+
+-- REAPER's "prompt to save/delete/rename new files" when recording stops (on by
+-- default). Its window blocks scripts, so the bridge can't answer until the user does.
+local function stop_prompt_on()
+  local ok, value = reaper.get_config_var_string("promptendrec")
+  return ok and (tonumber(value) or 0) & 1 ~= 0
+end
 
 function commands.ping()
   return {
@@ -1655,6 +1663,316 @@ function commands.project_paths()
            name = reaper.GetProjectName(0, "") }
 end
 
+------------------------------------------------------------ recording
+
+function commands.list_inputs()
+  local audio, midi = {}, {}
+  for i = 0, reaper.GetNumAudioInputs() - 1 do
+    audio[#audio + 1] = { channel = i + 1, name = reaper.GetInputChannelName(i) }
+  end
+  for i = 0, reaper.GetNumMIDIInputs() - 1 do
+    local ok, name = reaper.GetMIDIInputName(i, "")
+    if ok then midi[#midi + 1] = { device = i, name = name } end
+  end
+  return { audio_inputs = audio, midi_inputs = midi }
+end
+
+local RECMODES = { input = 0, output = 1, none = 2, ["midi overdub"] = 7, ["midi replace"] = 8 }
+local MONITOR = { off = 0, on = 1, auto = 2 }
+
+local function describe_input(v)
+  v = int(v)
+  if v < 0 then return "none" end
+  if v & 4096 ~= 0 then
+    local device, chan = (v >> 5) & 63, v & 31
+    local name = device == 63 and "all MIDI inputs" or device == 62 and "virtual keyboard"
+      or select(2, reaper.GetMIDIInputName(device, "")) or ("MIDI device " .. device)
+    return "MIDI: " .. name .. (chan == 0 and ", all channels" or (", channel " .. chan))
+  end
+  local start = (v & 1023) + 1
+  if v & 1024 ~= 0 then return "audio: inputs " .. start .. "-" .. (start + 1) .. " (stereo)" end
+  return "audio: input " .. start .. " (mono)"
+end
+
+local function record_info(t)
+  return {
+    track = track_ref(t),
+    armed = reaper.GetMediaTrackInfo_Value(t, "I_RECARM") == 1,
+    input = describe_input(reaper.GetMediaTrackInfo_Value(t, "I_RECINPUT")),
+    monitoring = ({ [0] = "off", [1] = "on", [2] = "auto" })[int(reaper.GetMediaTrackInfo_Value(t, "I_RECMON"))],
+  }
+end
+
+function commands.set_record_settings(p)
+  local t = get_track(p.track)
+  return with_undo("record settings on " .. track_name(t), function()
+    if p.audio_input then
+      local first = int(p.audio_input) - 1
+      if first < 0 or first >= reaper.GetNumAudioInputs() then fail("there's no audio input " .. p.audio_input) end
+      reaper.SetMediaTrackInfo_Value(t, "I_RECINPUT", p.stereo and (1024 + first) or first)
+      reaper.SetMediaTrackInfo_Value(t, "I_RECMODE", 0)
+    elseif p.midi_device then
+      local device = p.midi_device == "all" and 63 or int(p.midi_device)
+      local chan = math.max(0, math.min(16, int(p.midi_channel or 0)))
+      reaper.SetMediaTrackInfo_Value(t, "I_RECINPUT", 4096 + (device << 5) + chan)
+      reaper.SetMediaTrackInfo_Value(t, "I_RECMODE", RECMODES[p.mode or "input"] or 0)
+    elseif p.no_input then
+      reaper.SetMediaTrackInfo_Value(t, "I_RECINPUT", -1)
+    end
+    if p.mode and not p.midi_device then reaper.SetMediaTrackInfo_Value(t, "I_RECMODE", RECMODES[p.mode] or 0) end
+    if p.monitor then reaper.SetMediaTrackInfo_Value(t, "I_RECMON", MONITOR[p.monitor] or 1) end
+    if p.arm ~= nil then reaper.SetMediaTrackInfo_Value(t, "I_RECARM", p.arm and 1 or 0) end
+    return record_info(t)
+  end)
+end
+
+function commands.record(p)
+  local armed = {}
+  for i = 0, reaper.CountTracks(0) - 1 do
+    local t = reaper.GetTrack(0, i)
+    if reaper.GetMediaTrackInfo_Value(t, "I_RECARM") == 1 then armed[#armed + 1] = record_info(t) end
+  end
+  if #armed == 0 then fail("no track is armed for recording: arm one first (set_record_settings arm=true)") end
+  local start_qn = resolve_qn(p, "start")
+  local end_qn = resolve_qn(p, "end")
+  if start_qn then reaper.SetEditCurPos(qn_to_time(start_qn), true, false) end
+  stop_at = end_qn and qn_to_time(end_qn) or nil
+  reaper.Main_OnCommand(1013, 0) -- Transport: Record
+  beat_now = true -- tell clients right away that a stop will bring up the prompt
+  return { recording = reaper.GetPlayState() & 4 ~= 0, armed = armed,
+           from = time_to_pos(reaper.GetCursorPosition()), stops_at = stop_at and time_to_pos(stop_at) or nil,
+           stop_prompt = stop_prompt_on() or nil }
+end
+
+function commands.recording_status()
+  local state = reaper.GetPlayState()
+  return { recording = state & 4 ~= 0, playing = state & 1 ~= 0, position = time_to_pos(reaper.GetPlayPosition()),
+           stops_at = stop_at and time_to_pos(stop_at) or nil,
+           stop_prompt = state & 4 ~= 0 and stop_prompt_on() or nil }
+end
+
+----------------------------------------------------------------- takes
+
+local function take_list(item)
+  local active = reaper.GetActiveTake(item)
+  local out = {}
+  for i = 0, reaper.CountTakes(item) - 1 do
+    local take = reaper.GetTake(item, i)
+    if take then
+      local src = reaper.GetMediaItemTake_Source(take)
+      local file = src and reaper.GetMediaSourceFileName(src) or ""
+      out[#out + 1] = { take = i + 1, name = reaper.GetTakeName(take), active = take == active or nil,
+                        midi = reaper.TakeIsMIDI(take) or nil, file = file ~= "" and file or nil }
+    end
+  end
+  return out
+end
+
+function commands.list_takes(p)
+  local item = find_item(p.item_id)
+  return { item_id = p.item_id, takes = take_list(item) }
+end
+
+function commands.set_active_take(p)
+  local item = find_item(p.item_id)
+  local chosen
+  for i = 0, reaper.CountTakes(item) - 1 do
+    local take = reaper.GetTake(item, i)
+    if take and ((p.take and i + 1 == int(p.take)) or (p.name and reaper.GetTakeName(take):lower() == tostring(p.name):lower())) then
+      chosen = take
+    end
+  end
+  if not chosen then fail("that item has no such take") end
+  return with_undo("choose take", function()
+    reaper.SetActiveTake(chosen)
+    reaper.UpdateItemInProject(item)
+    return { item_id = p.item_id, takes = take_list(item) }
+  end)
+end
+
+local function with_items_selected(items, fn)
+  local before = {}
+  for i = 0, reaper.CountSelectedMediaItems(0) - 1 do before[#before + 1] = reaper.GetSelectedMediaItem(0, i) end
+  reaper.SelectAllMediaItems(0, false)
+  for _, it in ipairs(items) do reaper.SetMediaItemSelected(it, true) end
+  local ok, err = pcall(fn)
+  reaper.SelectAllMediaItems(0, false)
+  for _, it in ipairs(before) do if reaper.ValidatePtr(it, "MediaItem*") then reaper.SetMediaItemSelected(it, true) end end
+  if not ok then error(err, 0) end
+end
+
+function commands.explode_takes(p)
+  local item = find_item(p.item_id)
+  local existing = {}
+  for i = 0, reaper.CountTracks(0) - 1 do existing[reaper.GetTrack(0, i)] = true end
+  local made = {}
+  with_undo("explode takes to tracks", function()
+    with_items_selected({ item }, function() reaper.Main_OnCommand(40224, 0) end)
+    -- REAPER leaves the new tracks unnamed: name each after the take on it.
+    for i = 0, reaper.CountTracks(0) - 1 do
+      local t = reaper.GetTrack(0, i)
+      if not existing[t] then
+        local first = reaper.GetTrackMediaItem(t, 0)
+        local take = first and reaper.GetActiveTake(first)
+        local _, name = reaper.GetSetMediaTrackInfo_String(t, "P_NAME", "", false)
+        if name == "" and take then
+          reaper.GetSetMediaTrackInfo_String(t, "P_NAME", (reaper.GetTakeName(take):gsub("%.%w+$", "")), true)
+        end
+        made[#made + 1] = track_ref(t)
+      end
+    end
+  end)
+  return { new_tracks = made }
+end
+
+------------------------------------------------- time selection and loop
+
+function commands.set_time_selection(p)
+  local start_qn, end_qn = resolve_qn(p, "start"), resolve_qn(p, "end")
+  if p.clear then
+    reaper.GetSet_LoopTimeRange(true, false, 0, 0, false)
+    if p.loop ~= false then reaper.GetSet_LoopTimeRange(true, true, 0, 0, false) end
+  else
+    if not start_qn or not end_qn or end_qn <= start_qn then fail("give a start and an end after it") end
+    local a, b = qn_to_time(start_qn), qn_to_time(end_qn)
+    reaper.GetSet_LoopTimeRange(true, false, a, b, false)
+    if p.loop then reaper.GetSet_LoopTimeRange(true, true, a, b, false) end
+  end
+  if p["repeat"] ~= nil then reaper.GetSetRepeat(p["repeat"] and 1 or 0) end
+  local s0, s1 = reaper.GetSet_LoopTimeRange(false, false, 0, 0, false)
+  local l0, l1 = reaper.GetSet_LoopTimeRange(false, true, 0, 0, false)
+  return { time_selection = s1 > s0 and { start = time_to_pos(s0), ["end"] = time_to_pos(s1) } or nil,
+           loop = l1 > l0 and { start = time_to_pos(l0), ["end"] = time_to_pos(l1) } or nil,
+           ["repeat"] = reaper.GetSetRepeat(-1) == 1 }
+end
+
+------------------------------------------------------ markers, regions
+
+local function find_marker(p)
+  local _, nm, nr = reaper.CountProjectMarkers(0)
+  local found = {}
+  for i = 0, nm + nr - 1 do
+    local _, isrgn, pos, rgnend, name, number, color = reaper.EnumProjectMarkers3(0, i)
+    local kind_ok = p.region == nil or (p.region and isrgn) or (p.region == false and not isrgn)
+    if kind_ok and ((p.number and number == int(p.number)) or (p.name and name:lower() == tostring(p.name):lower())) then
+      found[#found + 1] = { index = i, isrgn = isrgn, pos = pos, rgnend = rgnend, name = name, number = number, color = color }
+    end
+  end
+  if #found == 0 then fail("no marker or region matches " .. tostring(p.name or p.number)) end
+  if #found > 1 then fail("several markers/regions match; give its number, or region=true/false") end
+  return found[1]
+end
+
+function commands.edit_marker(p)
+  local m = find_marker(p)
+  return with_undo("edit marker " .. m.name, function()
+    local pos = p.start_bar and qn_to_time(bar_to_qn(p.start_bar, p.start_beat)) or m.pos
+    local rend = p.end_bar and qn_to_time(bar_to_qn(p.end_bar, p.end_beat)) or m.rgnend
+    if m.isrgn and rend <= pos then fail("a region has to end after it starts") end
+    local color = m.color
+    if p.color then
+      local r, g, b = p.color:match("#?(%x%x)(%x%x)(%x%x)")
+      if r then color = reaper.ColorToNative(tonumber(r, 16), tonumber(g, 16), tonumber(b, 16)) | 0x1000000 end
+    end
+    reaper.SetProjectMarkerByIndex2(0, m.index, m.isrgn, pos, rend, m.number, p.new_name or m.name, color, p.new_name == "" and 1 or 0)
+    return { kind = m.isrgn and "region" or "marker", name = p.new_name or m.name, start = time_to_pos(pos),
+             ["end"] = m.isrgn and time_to_pos(rend) or nil }
+  end)
+end
+
+function commands.delete_marker(p)
+  local m = find_marker(p)
+  return with_undo("delete " .. (m.isrgn and "region " or "marker ") .. m.name, function()
+    reaper.DeleteProjectMarkerByIndex(0, m.index)
+    return { deleted = m.name, kind = m.isrgn and "region" or "marker" }
+  end)
+end
+
+--------------------------------------------- track templates and freeze
+
+local function template_dir() return reaper.GetResourcePath() .. "/TrackTemplates" end
+
+function commands.save_track_template(p)
+  local chunks = {}
+  for _, ref in ipairs(p.tracks or {}) do
+    local t = get_track(ref)
+    local ok, chunk = reaper.GetTrackStateChunk(t, "", false)
+    if not ok then fail("couldn't read " .. track_name(t)) end
+    chunks[#chunks + 1] = chunk
+  end
+  if #chunks == 0 then fail("give the tracks to save") end
+  reaper.RecursiveCreateDirectory(template_dir(), 0)
+  local path = template_dir() .. "/" .. p.name .. ".RTrackTemplate"
+  local f = io.open(path, "wb")
+  if not f then fail("couldn't write " .. path) end
+  f:write(table.concat(chunks, "\n"))
+  f:close()
+  return { saved = path, tracks = #chunks }
+end
+
+function commands.list_track_templates()
+  local out = {}
+  local function walk(dir, prefix)
+    local i = 0
+    while true do
+      local f = reaper.EnumerateFiles(dir, i)
+      if not f then break end
+      if f:match("%.RTrackTemplate$") then out[#out + 1] = prefix .. f:gsub("%.RTrackTemplate$", "") end
+      i = i + 1
+    end
+    i = 0
+    while true do
+      local d = reaper.EnumerateSubdirectories(dir, i)
+      if not d then break end
+      walk(dir .. "/" .. d, prefix .. d .. "/")
+      i = i + 1
+    end
+  end
+  walk(template_dir(), "")
+  return { folder = template_dir(), templates = out }
+end
+
+function commands.apply_track_template(p)
+  local path = template_dir() .. "/" .. p.name .. ".RTrackTemplate"
+  if not reaper.file_exists(path) then fail("there's no track template called " .. p.name) end
+  local before = reaper.CountTracks(0)
+  -- Opening a track template adds its tracks to the project (after the selected track).
+  reaper.Main_openProject(path)
+  local added = {}
+  for i = 0, reaper.CountTracks(0) - 1 do
+    local t = reaper.GetTrack(0, i)
+    if reaper.IsTrackSelected(t) then added[#added + 1] = track_ref(t) end
+  end
+  return { added = reaper.CountTracks(0) - before, tracks = added }
+end
+
+local function with_tracks_selected(tracks, fn)
+  local before = {}
+  for i = 0, reaper.CountTracks(0) - 1 do
+    local t = reaper.GetTrack(0, i)
+    before[t] = reaper.IsTrackSelected(t)
+    reaper.SetTrackSelected(t, false)
+  end
+  for _, t in ipairs(tracks) do reaper.SetTrackSelected(t, true) end
+  local ok, err = pcall(fn)
+  for t, sel in pairs(before) do if reaper.ValidatePtr(t, "MediaTrack*") then reaper.SetTrackSelected(t, sel) end end
+  if not ok then error(err, 0) end
+end
+
+function commands.freeze_tracks(p)
+  local tracks = {}
+  for _, ref in ipairs(p.tracks or {}) do tracks[#tracks + 1] = get_track(ref) end
+  if #tracks == 0 then fail("give the tracks") end
+  local action = p.unfreeze and 41644 or (p.mono and 40901 or 41223)
+  with_tracks_selected(tracks, function() reaper.Main_OnCommand(action, 0) end)
+  local out = {}
+  for _, t in ipairs(tracks) do
+    local frozen = reaper.BR_GetMediaTrackFreezeCount and reaper.BR_GetMediaTrackFreezeCount(t) or nil
+    out[#out + 1] = { track = track_ref(t), fx = reaper.TrackFX_GetCount(t), frozen_layers = frozen }
+  end
+  return { action = p.unfreeze and "unfrozen" or "frozen", tracks = out }
+end
+
 ------------------------------------------------------------- tempo map
 
 local function tempo_markers()
@@ -2574,23 +2892,34 @@ local function retry_unsent()
   end
 end
 
+-- While recording, the heartbeat says whether stopping will bring up REAPER's
+-- save/delete prompt: if the heartbeat then goes quiet, clients know REAPER is
+-- waiting for the user rather than gone, and wait too.
+local function write_heartbeat(now)
+  last_heartbeat = now
+  local recording = reaper.GetPlayState() & 4 ~= 0
+  write_file(HEARTBEAT_PATH, json.encode({
+    bridge_version = BRIDGE_VERSION, protocol = PROTOCOL, time = os.time(),
+    reaper_version = reaper.GetAppVersion(),
+    recording = recording or nil, stop_prompt = recording and stop_prompt_on() or nil,
+  }))
+end
+
 local function step()
   local now = reaper.time_precise()
   reaper.SetExtState("creaper", "heartbeat", tostring(now), false)
-  if now - last_heartbeat >= 1 then
-    last_heartbeat = now
-    write_file(HEARTBEAT_PATH, json.encode({
-      bridge_version = BRIDGE_VERSION, protocol = PROTOCOL, time = os.time(),
-      reaper_version = reaper.GetAppVersion(),
-    }))
+  if beat_now or now - last_heartbeat >= 1 then
+    beat_now = nil
+    write_heartbeat(now)
   end
 
   if stop_at then
     if reaper.GetPlayState() & 1 == 0 then
       stop_at = nil
     elseif reaper.GetPlayPosition() >= stop_at then
-      reaper.OnStopButton()
       stop_at = nil
+      write_heartbeat(now) -- fresh, in case stopping opens the prompt and blocks us
+      reaper.OnStopButton()
     end
   end
 

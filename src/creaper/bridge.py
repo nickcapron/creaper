@@ -26,11 +26,20 @@ from typing import Any, Callable
 
 HEARTBEAT_MAX_AGE = 5.0
 STALE_HEARTBEAT_GRACE = 15.0
+# How long to wait for the user to answer REAPER's save/delete prompt after recording.
+STOP_PROMPT_WAIT = 300.0
 
 NOT_RUNNING_HELP = (
     "REAPER isn't answering. Make sure REAPER is open and the creaper bridge script "
     "is running (Actions > Show action list, search for 'creaper_bridge'). "
     "If it isn't installed yet, run `creaper install-bridge`."
+)
+
+
+STOP_PROMPT_HELP = (
+    "REAPER is showing its window asking which new recordings to save or delete, and "
+    "can't do anything else until the user answers it. Ask the user to choose there "
+    "(Save all, or delete the takes they don't want), then try again."
 )
 
 
@@ -98,12 +107,30 @@ class Bridge:
                 return None
             time.sleep(0.05)
 
-    def call(self, cmd: str, params: dict[str, Any] | None = None, timeout: float = 30.0) -> Any:
+    def stop_prompt_open(self) -> bool:
+        """Whether REAPER looks to be showing its save/delete prompt after recording:
+        the bridge's last heartbeat was while recording with the prompt turned on, and
+        it has gone quiet since (the prompt blocks scripts until the user answers)."""
+        beat = self.heartbeat()
+        return bool(beat and beat["age"] > HEARTBEAT_MAX_AGE and beat.get("stop_prompt"))
+
+    def call(self, cmd: str, params: dict[str, Any] | None = None, timeout: float = 30.0,
+             on_user_wait: Callable[[], None] | None = None) -> Any:
+        """Runs a bridge command. While REAPER waits for the user to answer its
+        end-of-recording prompt, keeps waiting (up to STOP_PROMPT_WAIT) instead of
+        timing out, calling on_user_wait when that starts."""
         params = {k: v for k, v in (params or {}).items() if v is not None}
-        # Give up soon if the bridge isn't there at all; wait if it's just late.
-        beat = self.wait_until_running(STALE_HEARTBEAT_GRACE if self.heartbeat_path.exists() else 1.0)
-        if beat is None:
-            raise BridgeError(NOT_RUNNING_HELP)
+        if self.stop_prompt_open():
+            if on_user_wait:
+                on_user_wait()
+            beat = self.wait_until_running(STOP_PROMPT_WAIT)
+            if beat is None:
+                raise BridgeError(STOP_PROMPT_HELP)
+        else:
+            # Give up soon if the bridge isn't there at all; wait if it's just late.
+            beat = self.wait_until_running(STALE_HEARTBEAT_GRACE if self.heartbeat_path.exists() else 1.0)
+            if beat is None:
+                raise BridgeError(NOT_RUNNING_HELP)
         request_id = uuid.uuid4().hex
         body = json.dumps({"id": request_id, "cmd": cmd, "params": params})
         if int(beat.get("protocol", 1)) >= 2:
@@ -115,19 +142,36 @@ class Bridge:
             _retry(lambda: tmp.write_text(body, encoding="utf-8"))
             _retry(lambda: os.replace(tmp, request_path))
             # The file is ours alone, so whatever answer lands in it is ours.
-            return self._await(None, request_path, response_path, timeout)
+            return self._await(None, request_path, response_path, timeout, on_user_wait)
         # Older bridge: one shared request file, so only one call at a time per process.
         with self._lock:
             _remove(self.response_path)
             tmp = self.directory / f"request.{request_id}.tmp"
             tmp.write_text(body, encoding="utf-8")
             _retry(lambda: os.replace(tmp, self.request_path))
-            return self._await(request_id, self.request_path, self.response_path, timeout)
+            return self._await(request_id, self.request_path, self.response_path, timeout, on_user_wait)
 
-    def _await(self, request_id: str | None, request_path: Path, response_path: Path, timeout: float) -> Any:
+    def _await(self, request_id: str | None, request_path: Path, response_path: Path, timeout: float,
+               on_user_wait: Callable[[], None] | None = None) -> Any:
         """Waits for the answer; with a request_id, ignores answers to other requests."""
         deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
+        give_up = deadline + STOP_PROMPT_WAIT
+        next_check, waiting_for_user, told = 0.0, False, False
+        while True:
+            now = time.monotonic()
+            if now >= next_check or now >= deadline:
+                next_check = now + 0.5
+                # Late because REAPER is waiting on the user? Then so do we.
+                if now < give_up and self.stop_prompt_open():
+                    if not told and on_user_wait:
+                        on_user_wait()
+                    waiting_for_user = told = True
+                    deadline = max(deadline, now + 1.0)
+                elif waiting_for_user:
+                    waiting_for_user = False  # answered: now give REAPER the usual time
+                    deadline = max(deadline, now + timeout)
+            if now >= deadline:
+                break
             response = _read_json(response_path)
             if response is None or (request_id is not None and response.get("id") != request_id):
                 time.sleep(0.01)
@@ -140,6 +184,8 @@ class Bridge:
                 message += "\n" + response["traceback"]
             raise BridgeError(message)
         _remove(request_path)  # not picked up yet: withdraw it
+        if self.stop_prompt_open():
+            raise BridgeError(STOP_PROMPT_HELP)
         raise BridgeError(
             f"REAPER didn't answer within {timeout:.0f} seconds. "
             "It may be busy or showing a dialog that needs closing."
