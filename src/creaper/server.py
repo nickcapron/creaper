@@ -198,17 +198,22 @@ Samples and loops:
   MIDI keys, so patterns land without a drum map. When a plugin's own browser blocks
   you from picking its drum samples, its samples are often files you can use this way.
 
-Vocals:
-- add_robot_vocal makes a synth sing lyrics (vocoder style): write the melody as a
-  MIDI item first (singable, about one syllable per note), then pass the words, one
-  per note. It uses the computer's own text-to-speech voices (list_speech_voices),
-  so it sounds robotic: right for house, French touch, electro and synth-pop hooks,
-  not a human singer. Keep robot lyrics sparse or nobody can follow them: a short
-  hook repeated, at most one syllable per beat, quarter notes or longer. Harmony
-  (Daft Punk-style stacks) goes on the Carrier track's item with edit_midi_notes
-  add_harmony and chords_item set to the chord part, and only once the hook has been
-  heard alone: every extra voice blurs the words a little. Choir and vocal-pad instruments and vocal chops from
-  find_samples cover wordless vocals.
+Vocals: use the best source the user has, and say which you used and why:
+1. Real vocals in their samples (find_samples role="vocal": phrases, acapellas, vocal
+   one-shots). chop_vocal turns one into rhythmic chops moved onto the chords
+   (chords_item), the house and future-bass way; place_loop puts a whole phrase in
+   at the song's tempo and key. A real voice beats any synthetic one.
+2. Robot vocals (talk-box / vocoder style) when there's nothing to chop or the song
+   wants words: add_robot_vocal makes a synth sing lyrics. Write the melody as a
+   MIDI item first (singable, about one syllable per note), then pass the words, one
+   per note. It uses the computer's own text-to-speech voices (list_speech_voices),
+   so it sounds robotic: right for house, French touch, electro and synth-pop hooks,
+   not a human singer. Keep robot lyrics sparse or nobody can follow them: a short
+   hook repeated, at most one syllable per beat, quarter notes or longer. Harmony
+   (Daft Punk-style stacks) goes on the Carrier track's item with edit_midi_notes
+   add_harmony and chords_item set to the chord part, and only once the hook has been
+   heard alone: every extra voice blurs the words a little.
+Choir and vocal-pad instruments cover wordless vocals.
 
 Recording and editing:
 - list_inputs shows the audio interface's inputs and the MIDI devices. To record:

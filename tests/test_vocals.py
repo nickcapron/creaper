@@ -135,3 +135,50 @@ def test_chord_lookup_holds_stabs_and_pushed_chords():
     assert at(4.0) == {2, 6, 9}       # the pushed chord is in force on the downbeat
     assert at(3.0) is None            # nothing struck yet
     assert at(9.0) is None            # held no longer than a bar
+
+
+def test_plan_chops_follows_the_pattern_holds_and_chords():
+    from creaper.vocal_tools import plan_chops
+    slices = [{"start": 0.0, "end": 0.4, "pitch": 69.3},   # A, a little sharp
+              {"start": 0.5, "end": 0.6, "pitch": 64.0},
+              {"start": 0.7, "end": 0.75}]                 # too short to use
+    c_major = {0, 4, 7}
+    chops = plan_chops(slices, "x-..x...", bars=1, chord_at=lambda qn: c_major, seconds_per_qn=0.5, seed=3)
+    assert [c["start"] for c in chops] == [0, 1.0, 2.0, 3.0]          # every 'x' in the repeating pattern
+    first = slices[chops[0]["slice"]]
+    assert chops[0]["length"] == min(0.5, round((first["end"] - first["start"]) / 0.5, 4))  # held 2 16ths, if it lasts
+    for c in chops:
+        p = slices[c["slice"]]["pitch"] + c["semitones"]
+        assert round(p) % 12 in c_major and abs(p - round(p)) < 0.01  # on a chord tone, in tune
+        assert abs(c["semitones"]) <= 6
+    assert all(c["slice"] != 2 for c in chops)
+
+
+def test_plan_chops_caps_length_at_the_slice():
+    from creaper.vocal_tools import plan_chops
+    chops = plan_chops([{"start": 0.0, "end": 0.1, "pitch": 60}], "x---------------", bars=1, chord_at=None,
+                       seconds_per_qn=0.5)
+    assert chops == [{"slice": 0, "start": 0, "length": 0.2, "semitones": 0.0}]
+
+
+def test_pattern_needs_a_chop():
+    from creaper.vocal_tools import parse_pattern
+    with pytest.raises(ValueError, match="x starts a chop"):
+        parse_pattern("....")
+
+
+def test_slice_vocal_finds_syllables_and_their_pitch(tmp_path):
+    fs = 44100
+    def syllable(hz, seconds):
+        t = np.arange(int(seconds * fs)) / fs
+        tone = sum(a * np.sin(2 * np.pi * hz * k * t) for k, a in ((1, 0.4), (2, 0.8), (3, 0.5)))
+        return tone * np.hanning(len(t)) ** 0.3 * 0.3
+    gap = np.zeros(int(0.15 * fs))
+    audio = np.concatenate([gap, syllable(220, 0.3), gap, syllable(330, 0.25), gap])
+    path = tmp_path / "vox.wav"
+    speech._write(path, audio, fs)
+    from creaper import samplelib
+    slices = samplelib.slice_vocal(str(path))
+    assert len(slices) == 2
+    assert abs(slices[0]["pitch"] - 57) < 0.3 and abs(slices[1]["pitch"] - 64.02) < 0.3   # A3, E4
+    assert 0.1 < slices[0]["start"] < 0.2

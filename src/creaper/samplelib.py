@@ -143,6 +143,86 @@ def estimate_key(x: np.ndarray, fs: int) -> list[dict]:
     return harmony.detect_key(hist, top=2)
 
 
+def vocal_pitch(x: np.ndarray, fs: int, fmin: float = 70.0, fmax: float = 1100.0) -> tuple[float | None, float]:
+    """The pitch of a voiced sound (Hz, clarity 0-1). Voices have strong formants that
+    make plain autocorrelation lock onto a subharmonic (an octave or a twelfth low),
+    so this takes the highest-pitched candidate that's nearly as strong as the best."""
+    x = x - x.mean()
+    n = len(x)
+    lo, hi = int(fs / fmax), int(fs / fmin)
+    if n < hi * 2 or not np.any(x):
+        return None, 0.0
+    spec = np.fft.rfft(x, 2 * n)
+    ac = np.fft.irfft(spec * np.conj(spec))[: hi + 2]
+    ac = ac / (ac[0] or 1.0)
+    seg = ac[lo: hi + 1]
+    peaks = [i for i in range(1, len(seg) - 1) if seg[i] >= seg[i - 1] and seg[i] >= seg[i + 1] and seg[i] > 0]
+    if not peaks:
+        return None, 0.0
+    best = max(seg[i] for i in peaks)
+    lag = lo + next(i for i in peaks if seg[i] >= 0.9 * best)
+    return fs / lag, float(min(1.0, max(0.0, ac[lag])))
+
+
+def slice_vocal(path: str, floor_db: float = -35.0, min_gap: float = 0.08, min_length: float = 0.06,
+                max_length: float = 0.6) -> list[dict]:
+    """Cuts a vocal recording into syllable-sized slices: sounding stretches split at
+    each new attack. Each slice has its start and end (seconds), level and, when it's
+    sung, its pitch (MIDI number, fractional: how in tune it is)."""
+    x, fs, _ = _load(path)
+    frame = int(0.01 * fs)
+    n = len(x) // frame
+    if n < 5:
+        return []
+    rms = np.sqrt(np.mean(x[: n * frame].reshape(n, frame) ** 2, axis=1)) + 1e-9
+    level = 20 * np.log10(rms / rms.max())
+    loud = level > floor_db
+    hop = 256
+    env = onset_envelope(x, fs, hop)
+    attacks = []
+    if env.size and env.max() > 0:
+        for i in range(1, len(env) - 1):
+            if env[i] > 0.25 * env.max() and env[i] >= env[i - 1] and env[i] >= env[i + 1]:
+                t = i * hop / fs
+                if not attacks or t - attacks[-1] >= min_gap:
+                    attacks.append(t)
+    slices = []
+    i = 0
+    while i < n:
+        if not loud[i]:
+            i += 1
+            continue
+        j = i
+        while j < n and loud[j]:
+            j += 1
+        start, end = i * 0.01, j * 0.01
+        cuts = [start] + [a for a in attacks if start + min_gap <= a <= end - min_gap] + [end]
+        for a, b in zip(cuts, cuts[1:]):
+            if b - a >= min_length:
+                slices.append({"start": round(a, 3), "end": round(b, 3)})
+        i = j
+    for sl in slices:
+        a, b = int(sl["start"] * fs), int(sl["end"] * fs)
+        core = x[a + (b - a) // 5: b - (b - a) // 5][: int(0.3 * fs)]
+        hz, clarity = vocal_pitch(core, fs)
+        seg = x[a:b]
+        sl["level_db"] = round(20 * math.log10(float(np.sqrt(np.mean(seg ** 2))) + 1e-9), 1)
+        if hz and clarity >= 0.6:
+            sl["pitch"] = round(69 + 12 * math.log2(hz / 440), 2)
+    # An attack inside one sustained note isn't a new syllable: join touching slices
+    # on the same pitch back into one (up to max_length), so held chops can ring.
+    merged: list[dict] = []
+    for sl in slices:
+        prev = merged[-1] if merged else None
+        if (prev and abs(sl["start"] - prev["end"]) < 0.015 and "pitch" in sl and "pitch" in prev
+                and abs(sl["pitch"] - prev["pitch"]) < 0.5 and sl["end"] - prev["start"] <= max_length):
+            prev["end"] = sl["end"]
+            prev["level_db"] = max(prev["level_db"], sl["level_db"])
+        else:
+            merged.append(dict(sl))
+    return merged
+
+
 def analyze(path: str) -> dict:
     """What a sample is: one-shot or loop, drum type or pitch, tempo and key for loops."""
     x, fs, duration = _load(path)

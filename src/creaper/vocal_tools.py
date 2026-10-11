@@ -1,17 +1,19 @@
-"""MCP tools for robot vocals: the computer's own voice speaks the lyrics, one clip per
-word under the melody's notes, and a vocoder makes a synth playing the melody sing
-them (the talk-box / vocoder hook of house, French touch and electro)."""
+"""MCP tools for vocals: chopping real vocal samples into rhythmic, in-key chops, and
+robot vocals (the computer's own voice speaks the lyrics, one clip per word under the
+melody's notes, and a vocoder makes a synth playing the melody sing them)."""
 
 from __future__ import annotations
 
+import random
 import re
 import time
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Callable
 
 from pydantic import Field
 
-from . import speech
+from . import composer, harmony, samplelib, speech
+from .sample_tools import _check_audio
 from .server import READ_ONLY, ItemId, call, tool
 
 # Notes starting this close together (in QN) count as one onset: the top one sings.
@@ -124,4 +126,112 @@ def add_robot_vocal(
         result["note"] = (f"{len(rushed)} of {len(words)} words had to be sped up more than {RUSHED:g}x to fit "
                           "their notes, which blurs them: " + ", ".join(rushed[:12]) + (" ..." if len(rushed) > 12
                           else "") + ". Give them longer notes, or fewer words.")
+    return result
+
+
+# ---------------------------------------------------------------- vocal chops
+
+STEP_QN = 0.25  # one pattern step: a 16th note
+MAX_SHIFT = 6   # semitones; further and a voice turns chipmunk or monster
+
+
+def parse_pattern(pattern: str) -> list[str]:
+    steps = [c for c in pattern if c in "xX-."]
+    if not steps or "x" not in pattern.lower():
+        raise ValueError("a pattern is 16th-note steps: x starts a chop, - holds it, . is a rest (e.g. 'x..x..x.x-..x...')")
+    return steps
+
+
+def plan_chops(slices: list[dict], pattern: str, bars: float, chord_at: Callable[[float], set[int] | None] | None,
+               seconds_per_qn: float, seed: int = 1, qn_per_bar: float = 4.0) -> list[dict]:
+    """Where each chop goes (QN from the first bar), which slice it plays, and how far
+    it's shifted: to the nearest note of the chord (or scale) in force, at most a
+    tritone, correcting the slice's own tuning too. Slices are used in a shuffled
+    order that repeats, so a phrase comes back like a hook."""
+    usable = [i for i, sl in enumerate(slices) if sl["end"] - sl["start"] >= 0.06]
+    if not usable:
+        raise ValueError("no usable slices: the sample is too short or too quiet")
+    pitched = [i for i in usable if "pitch" in slices[i]] or usable
+    order = pitched[:]
+    random.Random(seed).shuffle(order)
+    steps = parse_pattern(pattern)
+    total = int(round(bars * qn_per_bar / STEP_QN))
+    chops = []
+    k = 0
+    for step in range(total):
+        if steps[step % len(steps)] not in "xX":
+            continue
+        hold = 1
+        while step + hold < total and steps[(step + hold) % len(steps)] == "-":
+            hold += 1
+        index = order[k % len(order)]
+        k += 1
+        sl = slices[index]
+        start = step * STEP_QN
+        natural = (sl["end"] - sl["start"]) / seconds_per_qn
+        length = min(hold * STEP_QN, natural)
+        shift = 0.0
+        pcs = chord_at(start) if chord_at else None
+        if pcs and "pitch" in sl:
+            p = sl["pitch"]
+            targets = [round(p) + d for d in range(-MAX_SHIFT, MAX_SHIFT + 1) if (round(p) + d) % 12 in pcs]
+            if targets:
+                shift = round(min(targets, key=lambda t: (abs(t - p), t)) - p, 2)
+        chops.append({"slice": index, "start": start, "length": round(length, 4), "semitones": shift})
+    return chops
+
+
+@tool()
+def chop_vocal(
+    path: Annotated[str, Field(description="A vocal sample: a phrase, acapella or vocal one-shot (find_samples role='vocal')")],
+    track: Annotated[str, Field(description="Track for the chops (created if there's none by that name)")],
+    bar: Annotated[float, Field(ge=1)] = 1,
+    bars: Annotated[float, Field(gt=0, le=64)] = 4,
+    pattern: Annotated[str, Field(description=(
+        "Rhythm in 16th steps, repeating: x = a chop, - = hold it, . = rest. e.g. 'x..x..x.x-..x...' "
+        "(house), 'x.x.x.x.' (stutter), 'x---..x-x---....' (longer phrases)"))] = "x..x..x.x-..x...",
+    chords: Annotated[str | None, Field(description="Chord symbols, one per bar and repeating ('Fm9 Dbmaj7 Ab Eb'): chops move to their notes")] = None,
+    chords_item: Annotated[str | None, Field(description="Or a MIDI item playing the song's chords: chops follow them")] = None,
+    key: Annotated[str | None, Field(description="Or just keep chops in this key ('F minor')")] = None,
+    seed: Annotated[int, Field(description="Another seed picks the slices in another order")] = 1,
+) -> dict:
+    """Turns a real vocal sample into rhythmic vocal chops, the house / future-bass
+    way: slices it at its syllables, lays the slices on a 16th-note pattern, and
+    shifts each one (at most a tritone, correcting its tuning) onto the chord or key.
+    Real voices beat robot vocals, so use this first when the user's samples have
+    vocals. One item per chop, all ordinary audio to edit afterwards."""
+    path = _check_audio(path)
+    slices = samplelib.slice_vocal(path)
+    if not slices:
+        raise ValueError("couldn't find any sung or spoken parts in that sample")
+    overview = call("get_project_overview")
+    seconds_per_qn = 60 / float(overview.get("tempo_bpm") or 120)
+    num, den = (int(x) for x in str(overview.get("time_signature") or "4/4").split("/"))
+    qn_per_bar = num * 4 / den
+    start_qn = call("bar_to_qn", bar=bar)["qn"]
+    chord_at = None
+    if chords_item:
+        chord_notes = call("get_midi_notes", item_id=chords_item, limit=20000)
+        offset = chord_notes["start"]["qn"] - start_qn
+        chord_at = composer.chord_lookup([dict(n, start=n["start"] + offset) for n in chord_notes["notes"]
+                                          if not n.get("muted")])
+    elif chords:
+        sets = [harmony.spelled_from_symbol(c).pitch_classes() for c in chords.split()]
+        chord_at = lambda qn: sets[int(qn // qn_per_bar) % len(sets)]  # noqa: E731
+    elif key:
+        scale = harmony.parse_key(key).pitch_classes()
+        chord_at = lambda qn: scale  # noqa: E731
+    plan = plan_chops(slices, pattern, bars, chord_at, seconds_per_qn, seed, qn_per_bar)
+    if not any(t["name"] == track for t in overview.get("tracks", [])):
+        call("create_track", name=track)
+    clips = []
+    for c in plan:
+        sl = slices[c["slice"]]
+        clips.append({"path": path, "start_qn": start_qn + c["start"], "end_qn": start_qn + c["start"] + c["length"],
+                      "offset": sl["start"], "semitones": c["semitones"], "word": f"chop {c['slice'] + 1}"})
+    result = call("place_audio_clips", timeout=120.0, track=track, clips=clips, name="vocal chops")
+    shifts = [abs(c["semitones"]) for c in plan]
+    result.update({"slices_found": len(slices), "pitched_slices": sum("pitch" in s for s in slices),
+                   "chops": len(plan), "largest_shift": max(shifts) if shifts else 0,
+                   "fit_to": "chords" if (chords or chords_item) else ("key" if key else "unchanged pitch")})
     return result

@@ -1527,6 +1527,43 @@ function commands.time_to_positions(p)
   return out
 end
 
+function commands.bar_to_qn(p)
+  return { qn = resolve_qn({ start_bar = p.bar, start_beat = p.beat }, "start") }
+end
+
+-- Audio clips cut from files, as one undo step: each plays its file from `offset`
+-- seconds, between two QN positions, shifted by `semitones` (vocal chops, slices).
+function commands.place_audio_clips(p)
+  local t = get_track(p.track)
+  if t == reaper.GetMasterTrack(0) then fail("items can't go on the master track") end
+  if type(p.clips) ~= "table" or #p.clips == 0 then fail("no clips to place") end
+  for _, c in ipairs(p.clips) do
+    if not reaper.file_exists(tostring(c.path)) then fail("there's no file at " .. tostring(c.path)) end
+  end
+  return with_undo(p.name or "place audio clips", function()
+    local placed = 0
+    for _, c in ipairs(p.clips) do
+      local start_t, end_t = qn_to_time(c.start_qn), qn_to_time(c.end_qn)
+      local src = reaper.PCM_Source_CreateFromFile(c.path)
+      if src and end_t > start_t then
+        local item = reaper.AddMediaItemToTrack(t)
+        local take = reaper.AddTakeToMediaItem(item)
+        reaper.SetMediaItemTake_Source(take, src)
+        reaper.SetMediaItemTakeInfo_Value(take, "D_STARTOFFS", c.offset or 0)
+        if c.semitones and c.semitones ~= 0 then reaper.SetMediaItemTakeInfo_Value(take, "D_PITCH", c.semitones) end
+        if c.word then reaper.GetSetMediaItemTakeInfo_String(take, "P_NAME", c.word, true) end
+        reaper.SetMediaItemInfo_Value(item, "D_POSITION", start_t)
+        reaper.SetMediaItemInfo_Value(item, "D_LENGTH", end_t - start_t)
+        reaper.SetMediaItemInfo_Value(item, "D_FADEINLEN", 0.004)
+        reaper.SetMediaItemInfo_Value(item, "D_FADEOUTLEN", math.min(0.03, (end_t - start_t) / 3))
+        placed = placed + 1
+      end
+    end
+    reaper.Main_OnCommand(40047, 0) -- Peaks: build any missing peaks
+    return { track = track_ref(t), placed = placed }
+  end)
+end
+
 function commands.qn_to_times(p)
   local out = {}
   for i, qn in ipairs(p.qns or {}) do out[i] = qn_to_time(qn) end
