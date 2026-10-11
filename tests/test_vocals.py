@@ -112,3 +112,26 @@ def test_fit_word_speeds_up_a_word_that_is_too_long(tmp_path):
     speed = speech.fit_word(path, 0.15)
     out, _ = speech._read(path)
     assert abs(len(out) - int(0.15 * RATE)) <= 1 and speed > 1.7
+
+
+def test_harmony_follows_chords_from_outside_the_key():
+    from creaper import composer, harmony
+    key = harmony.parse_key("F# minor")
+    melody = [{"pitch": 73, "start": 0, "length": 2, "velocity": 100},   # C#5 over F#7 (F# A# C# E)
+              {"pitch": 71, "start": 4, "length": 2, "velocity": 100}]   # B4 over Bm (B D F#)
+    chords = [{"pitch": p, "start": 0, "length": 4} for p in (54, 58, 61, 64)] + \
+             [{"pitch": p, "start": 4, "length": 4} for p in (59, 62, 66)]
+    plain = composer.add_harmony(melody, key, 2, below=True)
+    assert plain[2]["pitch"] == 69  # A: in the key, but rubs against the chord's A#
+    fitted = composer.add_harmony(melody, key, 2, below=True, chord_at=composer.chord_lookup(chords))
+    assert fitted[2]["pitch"] == 70  # A#4, the chord's 3rd
+    assert fitted[3]["pitch"] == 66  # F#4 (the diatonic G#4 isn't in Bm), still below the melody
+
+
+def test_chord_lookup_holds_stabs_and_pushed_chords():
+    from creaper import composer
+    stabs = [{"pitch": p, "start": 3.5, "length": 0.25} for p in (62, 66, 69)]  # D major pushed before bar 2
+    at = composer.chord_lookup(stabs)
+    assert at(4.0) == {2, 6, 9}       # the pushed chord is in force on the downbeat
+    assert at(3.0) is None            # nothing struck yet
+    assert at(9.0) is None            # held no longer than a bar

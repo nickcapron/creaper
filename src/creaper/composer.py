@@ -20,6 +20,7 @@ import math
 import random
 from dataclasses import dataclass, field
 from itertools import product
+from typing import Callable
 
 from . import harmony as H
 from . import scales as scales_db
@@ -1390,10 +1391,47 @@ def scale_time(notes: list[dict], factor: float) -> list[dict]:
     return [{**n, "start": round(t0 + (n["start"] - t0) * factor, 6), "length": round(n["length"] * factor, 6)} for n in notes]
 
 
-def add_harmony(notes: list[dict], key: Key, steps: int = 2, below: bool = False, velocity_scale: float = 0.85) -> list[dict]:
-    """Adds a parallel line a number of scale steps away (2 = thirds, 5 = sixths)."""
+def add_harmony(notes: list[dict], key: Key, steps: int = 2, below: bool = False, velocity_scale: float = 0.85,
+                chord_at: Callable[[float], set[int] | None] | None = None) -> list[dict]:
+    """Adds a parallel line a number of scale steps away (2 = thirds, 5 = sixths).
+    With chord_at (start -> pitch classes sounding then), each harmony note that
+    isn't in the chord moves to the nearest chord tone on the same side of the
+    melody, at least a minor third away, so the line follows chords borrowed from
+    outside the key (secondary dominants, borrowed chords) instead of rubbing."""
     moved = diatonic_transpose(notes, -steps if below else steps, key)
+    if chord_at:
+        moved = [fit_to_chord(m, n["pitch"], chord_at(n["start"]), below) for m, n in zip(moved, notes)]
     return notes + [{**n, "velocity": max(1, round(n["velocity"] * velocity_scale))} for n in moved]
+
+
+def fit_to_chord(harmony_note: dict, melody_pitch: int, chord: set[int] | None, below: bool) -> dict:
+    """The harmony note itself if it's a chord tone (or no chord is known), else the
+    chord tone nearest to it on the harmony's side of the melody, a 3rd to an octave away."""
+    if not chord or harmony_note["pitch"] % 12 in chord:
+        return harmony_note
+    sign = -1 if below else 1
+    options = [melody_pitch + sign * d for d in range(3, 13) if (melody_pitch + sign * d) % 12 in chord]
+    if not options:
+        return harmony_note
+    best = min(options, key=lambda p: (abs(p - harmony_note["pitch"]), abs(p - melody_pitch)))
+    return {**harmony_note, "pitch": best}
+
+
+def chord_lookup(chord_notes: list[dict], hold: float = 4.0) -> Callable[[float], set[int] | None]:
+    """start (QN) -> the pitch classes of the chord in force then: the notes sounding,
+    or else the last chord struck within `hold` QN (stabs and pushed chords)."""
+    onsets: dict[float, set[int]] = {}
+    for n in chord_notes:
+        onsets.setdefault(round(n["start"], 3), set()).add(n["pitch"] % 12)
+    times = sorted(onsets)
+
+    def at(t: float) -> set[int] | None:
+        sounding = {n["pitch"] % 12 for n in chord_notes if n["start"] <= t + 1e-3 < n["start"] + n["length"]}
+        if len(sounding) >= 2:
+            return sounding
+        before = [x for x in times if x <= t + 1e-3 and t - x <= hold]
+        return onsets[before[-1]] if before else (sounding or None)
+    return at
 
 
 def sequence(notes: list[dict], key: Key, repeats: int = 2, steps: int = -1, span: float | None = None) -> list[dict]:

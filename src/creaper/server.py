@@ -170,6 +170,8 @@ Composition and music theory:
   motown...), write_melody (motif-based phrases; try a few seeds and keep the best),
   add_genre_groove, and sketch_song to lay down a whole genre sketch in one call.
   edit_midi_notes develops motifs (invert, retrograde, sequence, add_harmony...).
+  Harmony lines over a progression take chords_item (the chord part), or chords from
+  outside the key (secondary dominants like F#7 in F# minor) make them rub.
 - Name chords and keys the way musicians spell them (the tools return correct
   spellings), explain choices in theory terms briefly when it helps the user learn,
   and check your own writing with analyze_harmony or check_voice_leading.
@@ -202,7 +204,10 @@ Vocals:
   per note. It uses the computer's own text-to-speech voices (list_speech_voices),
   so it sounds robotic: right for house, French touch, electro and synth-pop hooks,
   not a human singer. Keep robot lyrics sparse or nobody can follow them: a short
-  hook repeated, at most one syllable per beat, quarter notes or longer. Choir and vocal-pad instruments and vocal chops from
+  hook repeated, at most one syllable per beat, quarter notes or longer. Harmony
+  (Daft Punk-style stacks) goes on the Carrier track's item with edit_midi_notes
+  add_harmony and chords_item set to the chord part, and only once the hook has been
+  heard alone: every extra voice blurs the words a little. Choir and vocal-pad instruments and vocal chops from
   find_samples cover wordless vocals.
 
 Recording and editing:
@@ -1128,7 +1133,8 @@ def edit_midi_notes(
         "strum (strum_delay, strum_direction), legato (legato_gap). Motif development (need key, and scale "
         "unless key names one like 'A minor'): diatonic_transpose (steps), invert (mirror around the first note or "
         "axis, in the scale), retrograde (reverse), augment / diminish (double / halve durations), add_harmony "
-        "(parallel line steps away: 2 = 3rds, 5 = 6ths; below), sequence (repeats, steps), negative_harmony"))],
+        "(parallel line steps away: 2 = 3rds, 5 = 6ths; below; pass chords_item whenever the song has chords, "
+        "so the line follows them), sequence (repeats, steps), negative_harmony"))],
     selected_only: Annotated[bool, Field(description="Only the notes selected in REAPER's MIDI editor")] = False,
     pitch_low: Annotated[str | int | None, Field(description="Only notes at or above this pitch")] = None,
     pitch_high: Annotated[str | int | None, Field(description="Only notes at or below this pitch")] = None,
@@ -1154,6 +1160,9 @@ def edit_midi_notes(
     legato_gap: Annotated[float, Field(ge=0, le=1)] = 0.0,
     steps: Annotated[int | None, Field(ge=-21, le=21, description="Scale steps for diatonic_transpose, add_harmony (2 = a 3rd) and sequence")] = None,
     below: Annotated[bool, Field(description="add_harmony: put the new line below")] = False,
+    chords_item: Annotated[str | None, Field(description=(
+        "add_harmony: a MIDI item playing the song's chords (e.g. the keys part). Harmony notes then follow the "
+        "chord in force instead of only the key, so chords from outside the key don't clash"))] = None,
     repeats: Annotated[int, Field(ge=1, le=16, description="sequence: how many transposed copies")] = 2,
     axis: Annotated[str | int | None, Field(description="invert: the pitch to mirror around (default: the first note)")] = None,
 ) -> dict:
@@ -1199,7 +1208,13 @@ def edit_midi_notes(
     elif operation == "legato":
         changed = theory.legato(targets, legato_gap)
     else:
-        changed = _develop(operation, targets, key, scale, steps, below, repeats, axis)
+        chord_at = None
+        if operation == "add_harmony" and chords_item:
+            chords = call("get_midi_notes", item_id=chords_item, limit=20000)
+            offset = chords["start"]["qn"] - raw["start"]["qn"]  # chord times relative to this item
+            chord_at = composer.chord_lookup([dict(n, start=n["start"] + offset) for n in chords["notes"]
+                                              if not n.get("muted")])
+        changed = _develop(operation, targets, key, scale, steps, below, repeats, axis, chord_at)
     moved = sum(1 for a, b in zip(sorted(targets, key=lambda n: (n["start"], n["pitch"])),
                                   sorted(changed, key=lambda n: (n["start"], n["pitch"]))) if a != b)
     payload = [{k: n.get(k) for k in ("pitch", "start", "length", "velocity", "channel", "selected", "muted")}
@@ -1210,7 +1225,7 @@ def edit_midi_notes(
 
 
 def _develop(operation: str, notes: list[dict], key: str | None, scale: str | None, steps: int | None,
-             below: bool, repeats: int, axis: str | int | None) -> list[dict]:
+             below: bool, repeats: int, axis: str | int | None, chord_at=None) -> list[dict]:
     if operation in ("retrograde", "augment", "diminish"):
         return {"retrograde": composer.retrograde, "augment": lambda n: composer.scale_time(n, 2.0),
                 "diminish": lambda n: composer.scale_time(n, 0.5)}[operation](notes)
@@ -1224,7 +1239,7 @@ def _develop(operation: str, notes: list[dict], key: str | None, scale: str | No
     if operation == "invert":
         return composer.invert(notes, theory.note_to_midi(axis) if axis is not None else None, k)
     if operation == "add_harmony":
-        return composer.add_harmony(notes, k, steps if steps is not None else 2, below)
+        return composer.add_harmony(notes, k, steps if steps is not None else 2, below, chord_at=chord_at)
     if operation == "sequence":
         return composer.sequence(notes, k, repeats, steps if steps is not None else -1)
     return composer.negative(notes, k)
