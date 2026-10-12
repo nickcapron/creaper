@@ -16,6 +16,16 @@ RATE = 44100
 FRAME = 1024
 HOP = 256
 LIFTER_S = 0.0015   # cepstral cutoff: keeps the formants, drops the speaking pitch's harmonics
+# High notes blur words: the saw's harmonics are too far apart to trace the mouth's
+# shape (measured STOI 0.75 at A3, 0.56 at C5). Doubling them an octave down restores
+# most of it (0.70 at C5), but also makes the lower octave part of what you hear, so it
+# fades in only above E4, reaching SUB_OCTAVE by C5: an octave double on high notes.
+SUB_OCTAVE = 0.7
+SUB_FROM, SUB_FULL = 64, 72   # E4, C5
+
+
+def sub_octave_level(pitch: float) -> float:
+    return SUB_OCTAVE * min(1.0, max(0.0, (pitch - SUB_FROM) / (SUB_FULL - SUB_FROM)))
 
 
 def _resample(x: np.ndarray, fs: int, to: int = RATE) -> np.ndarray:
@@ -68,6 +78,12 @@ def cross_synthesize(speech: np.ndarray, fs: int, pitches: list[tuple[float, flo
         x = np.pad(x, (0, FRAME - len(x)))
     seconds = len(x) / RATE
     carrier = saw(pitches, seconds)
+    if any(sub_octave_level(p) > 0 for _, p in pitches):
+        gain = np.full(len(carrier), sub_octave_level(pitches[0][1]))
+        t = np.arange(len(carrier)) / RATE
+        for start, pitch in pitches[1:]:
+            gain[t >= start] = sub_octave_level(pitch)
+        carrier = carrier + gain * saw([(s, p - 12) for s, p in pitches], seconds)
     noise = np.random.default_rng(seed).standard_normal(len(x)) * 0.5
     kw = dict(fs=RATE, nperseg=FRAME, noverlap=FRAME - HOP, boundary="even")
     _, _, S = signal.stft(x, **kw)

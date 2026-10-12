@@ -80,9 +80,11 @@ def plan_mix(channels: list[dict], style: dict | None = None) -> dict:
     side = 1
     for c in channels:
         a: dict = {"name": c["name"], "role": c["role"]}
-        if c.get("level") is not None:
-            want = anchor + offsets.get(c["role"], -7)
-            a["gain_db"] = round(max(-18.0, min(12.0, want - c["level"])), 1)
+        if c.get("level") is None:
+            actions.append({**a, "skipped": "silent in this range"})
+            continue
+        want = anchor + offsets.get(c["role"], -7)
+        a["gain_db"] = round(max(-18.0, min(12.0, want - c["level"])), 1)
         if c["role"] in HIGHPASS_HZ and not c.get("has_eq"):
             a["highpass_hz"] = HIGHPASS_HZ[c["role"]]
             bands = (c.get("spectrum") or {}).get("bands", {})
@@ -142,6 +144,67 @@ def _channels() -> list[dict]:
     return out
 
 
+COVERING_ROLES = ("keys", "lead", "pad", "other")
+COVERED = 0.03   # clarity lost to the mix beyond which the words count as covered
+
+
+def _clear_robot_vocals(actions: list[dict], start_bar: float | None, end_bar: float | None) -> list[dict]:
+    """Measures each robot vocal's clarity in the mix and, while the rest of the mix
+    covers the words, fixes it the way that measured best: the vocal up 2 dB, then the
+    parts covering it most (found by muting each in turn) ducked under it. In a test,
+    ducking the lead synth and chords took clarity in the mix from 0.588 to 0.650
+    against 0.662 alone; dipping them at 2.5 kHz barely moved it."""
+    from .ear_tools import measure_vocal_clarity
+    out = []
+    candidates = [a for a in actions if a["role"] in COVERING_ROLES and not a.get("skipped")]
+    for a in actions:
+        if a["role"] != "vocal" or a.get("skipped"):
+            continue
+        try:
+            now = measure_vocal_clarity(a["name"], start_bar, end_bar)
+        except ValueError:
+            continue  # not a robot vocal: no clean words to compare with
+        entry: dict = {"vocal": a["name"], "before": {k: now.get(k, {}).get("score") for k in ("alone", "in_mix")}}
+
+        def covered(m: dict) -> float:
+            alone, mixed = m.get("alone", {}).get("score"), m.get("in_mix", {}).get("score")
+            return 0.0 if alone is None or mixed is None else alone - mixed
+
+        if covered(now) > COVERED:
+            vol = call("get_track_details", track=a["name"])["volume_db"]
+            call("set_track_properties", track=a["name"], volume_db=round(vol + 2, 1))
+            entry["raised_db"] = 2
+            now = measure_vocal_clarity(a["name"], start_bar, end_bar)
+        if covered(now) > COVERED and candidates:
+            base = now["in_mix"]["score"]
+            gains = []
+            for c in candidates:
+                call("set_track_properties", track=c["name"], mute=True)
+                try:
+                    without = measure_vocal_clarity(a["name"], start_bar, end_bar, in_mix=True)["in_mix"]["score"]
+                finally:
+                    call("set_track_properties", track=c["name"], mute=False)
+                gains.append((without - base, c))
+            ducked = []
+            for gain, c in sorted(gains, key=lambda g: -g[0]):
+                if gain < 0.01 or covered(now) <= COVERED:
+                    break
+                setup_sidechain(source=a["name"], target=c["name"], depth="heavy" if c["role"] == "lead" else "medium")
+                ducked.append(c["name"])
+                now = measure_vocal_clarity(a["name"], start_bar, end_bar)
+            entry["covering"] = {c["name"]: round(g, 3) for g, c in sorted(gains, key=lambda g: -g[0]) if g > 0.005}
+            if ducked:
+                entry["ducked_under_vocal"] = ducked
+            leads = [c["name"] for g, c in gains if c["role"] == "lead" and g >= 0.02]
+            if leads:
+                entry["arrangement"] = (", ".join(leads) + " plays a lead line while the vocal sings; consider "
+                                        "dropping it out under the vocal or moving it an octave away")
+        entry["after"] = {k: now.get(k, {}).get("score") for k in ("alone", "in_mix")}
+        entry["verdict"] = now.get("in_mix", {}).get("verdict")
+        out.append(entry)
+    return out
+
+
 def _reverb_return() -> str:
     overview = call("get_project_overview")
     for t in overview["tracks"]:
@@ -169,8 +232,9 @@ def auto_mix(
     each one's role, then sets levels for the genre, high-passes everything that isn't
     bass and cuts low-mid mud, compresses vocals/bass/leads that need it, pans the wide
     parts, sends to a reverb return, ducks bass under the kick (dance styles), and sets
-    -6 dBFS of headroom for mastering. Saves a copy of the project first when it has a
-    file. Leaves tracks the user already set up (EQ, compression, panning) alone on those
+    -6 dBFS of headroom for mastering, then measures robot vocals' clarity in the mix and,
+    if other parts cover the words, raises the vocal and ducks the parts covering it.
+    Saves a copy of the project first when it has a file. Leaves tracks the user already set up (EQ, compression, panning) alone on those
     points. Then check it: show_spectrogram, check_vocal_clarity, compare_mix_to_style."""
     profile = None
     if style:
@@ -220,8 +284,12 @@ def auto_mix(
             call("set_track_properties", track=a["name"], volume_db=round(c.get("volume_db", 0) + a["gain_db"], 1))
         if "pan" in a:
             call("set_track_properties", track=a["name"], pan=a["pan"])
+        if a.get("skipped"):
+            continue
         if "highpass_hz" in a:
-            eq = call("add_fx", track=a["name"], name="ReaEQ", position=1)
+            # First effect after the instrument (an EQ before a synth does nothing).
+            instrument = call("get_track_details", track=a["name"]).get("instrument_fx")
+            eq = call("add_fx", track=a["name"], name="ReaEQ", position=(instrument or 0) + 1)
             changes = [{"parameter": "Freq-High Pass 5", "display_value": a["highpass_hz"]}]
             if "mud_cut_db" in a:
                 changes += [{"parameter": "Freq-Band 2", "display_value": 350},
@@ -249,13 +317,17 @@ def auto_mix(
     peak = master.get("levels", {}).get("sample_peak_dbfs")
     if peak is not None and abs(peak - HEADROOM_PEAK_DB) > 1.0:
         shift = round(HEADROOM_PEAK_DB - peak, 1)
-        for c in channels:
+        for c in (c for c in channels if c.get("level") is not None):
             now = call("get_track_details", track=c["name"])["volume_db"]
             call("set_track_properties", track=c["name"], volume_db=round(now + shift, 1))
         if verb:
             now = call("get_track_details", track=verb)["volume_db"]
             call("set_track_properties", track=verb, volume_db=round(now + shift, 1))
         report["headroom_shift_db"] = shift
+        master = analyze_audio(track="master", start_bar=start_bar, end_bar=end_bar)
+    vocal_fixes = _clear_robot_vocals(plan["channels"], start_bar, end_bar)
+    if vocal_fixes:
+        report["vocal_clarity"] = vocal_fixes
         master = analyze_audio(track="master", start_bar=start_bar, end_bar=end_bar)
     report["result"] = {"peak_dbfs": master.get("levels", {}).get("sample_peak_dbfs"),
                         "integrated_lufs": master.get("loudness", {}).get("integrated_lufs"),

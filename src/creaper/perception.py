@@ -97,6 +97,28 @@ def clarity_verdict(score: float | None) -> str:
     return "mostly lost"
 
 
+def robot_clarity_verdict(score: float | None) -> str:
+    """For talk box and vocoder vocals, which score lower than plain speech even when
+    understood (as with vocoded speech in hearing research): measured here, a talk box
+    of clear words on a low melody scores about 0.72-0.78."""
+    if score is None:
+        return "too little speech to judge"
+    if score >= 0.72:
+        return "as clear as a talk box gets"
+    if score >= 0.64:
+        return "a little blurred"
+    return "blurred: hard to make out"
+
+
+def masking_verdict(drop: float) -> str:
+    """How much the rest of the mix covers a vocal: the fall in STOI from alone to in the mix."""
+    if drop <= 0.03:
+        return "the mix isn't covering it"
+    if drop <= 0.07:
+        return "the mix covers it a little"
+    return "the mix is burying it"
+
+
 # --------------------------------------------------------------------- tuning
 
 def note_pitches(audio: np.ndarray, fs: int, notes: list[dict], min_seconds: float = 0.12) -> list[dict]:

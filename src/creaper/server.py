@@ -222,7 +222,8 @@ Vocals: use the best source the user has, and say which you used and why:
    favourite, set_default_voice remembers it), so it sounds
    robotic: right for house, French touch, electro and synth-pop hooks, not a human
    singer. Keep robot lyrics sparse or nobody can follow them: a short hook repeated,
-   at most one syllable per beat, quarter notes or longer. Harmonies only once the
+   at most one syllable per beat, quarter notes or longer, and the melody low: words
+   are clearest below about E4 (measured clarity falls about 0.1 per octave above). Harmonies only once the
    hook has been heard alone (every extra voice blurs the words): for a talk box, make
    a harmony melody item (edit_midi_notes add_harmony with chords_item, on a copy) and
    sing the same words on it; for the vocoder, add_harmony with chords_item on its
@@ -1692,8 +1693,10 @@ def mix(style: str = "") -> str:
     return (
         "Mix my REAPER project" + (f" in a {style} style" if style else "") + ".\n"
         "1. find_notes for my preferences and mix lessons" + (f"; get_genre_profile('{style}')" if style else "") + ".\n"
-        "2. Measure the master and key tracks with analyze_audio.\n"
-        "3. Work through: levels and panning, EQ to clear masking, compression, buses where they help "
+        "2. auto_mix" + (f"(style='{style}')" if style else "") + " for a measured first pass (levels, EQ, "
+        "compression, panning, reverb, sidechain, headroom, vocal clarity), then look at show_spectrogram and "
+        "measure key tracks with analyze_audio.\n"
+        "3. Refine: levels and panning, EQ to clear masking, compression, buses where they help "
         "(create_bus), side-chain where kick and bass fight (setup_sidechain), space (reverb/delay sends), "
         "and automation for movement (write_automation).\n"
         "4. After each stage, measure again and tell me in a line what changed and why.\n"

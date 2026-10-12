@@ -93,19 +93,25 @@ def measure_vocal_clarity(track: str | int, start_bar: float | None = None, end_
         heard = audio.mean(axis=1)
         clean = _clean_timeline(clips, render["start"]["seconds"], len(heard), fs)
         score = perception.intelligibility(clean, heard, fs)
-        out[label] = {"score": None if score is None else round(score, 3), "verdict": perception.clarity_verdict(score)}
+        out[label] = {"score": None if score is None else round(score, 3)}
     alone = (out.get("alone") or {}).get("score")
     mixed = (out.get("in_mix") or {}).get("score")
+    if alone is not None:
+        out["alone"]["verdict"] = perception.robot_clarity_verdict(alone)
+    if mixed is not None and alone is not None:
+        out["in_mix"]["verdict"] = perception.masking_verdict(alone - mixed)
     tips = []
-    if alone is not None and alone < 0.83:
-        tips.append("the vocal itself is unclear: fewer, longer words; style='talkbox'; a clearer voice "
-                    "(list_speech_voices)")
-    if alone is not None and mixed is not None and alone - mixed > 0.04:
-        tips.append("the mix is burying it: turn the vocal up, or turn down / cut 1-4 kHz on parts playing "
+    if alone is not None and alone < 0.72:
+        tips.append("the vocal itself is blurred: fewer, longer words; a lower melody (below about E4); "
+                    "style='talkbox'; another voice (list_speech_voices)")
+    if alone is not None and mixed is not None and alone - mixed > 0.03:
+        tips.append("the mix is covering it: turn the vocal up, or turn down / cut 1-4 kHz on parts playing "
                     "with it (busy keys, leads, hats), or duck them under the vocal (setup_sidechain)")
     if tips:
         out["tips"] = tips
-    out["scale"] = "0.90+ clear, 0.83-0.90 understandable with effort, 0.76-0.83 hard to follow, below that lost"
+    out["scale"] = ("STOI against the clean words. Robot vocals score lower than plain speech even when understood: "
+                    "a talk box of clear words scores about 0.72-0.78. In the mix, a drop of more than 0.03 from "
+                    "'alone' means other parts are covering the words.")
     return out
 
 

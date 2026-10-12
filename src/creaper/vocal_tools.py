@@ -147,9 +147,13 @@ def add_robot_vocal(
             track_name, k = f"{name} {k}", k + 1
         call("create_track", name=track_name, position=int(data["track"]) + 1)
         placed = call("place_audio_clips", timeout=120.0, track=track_name, clips=clips, name=f"talk box {track_name}")
+        high = sum(1 for n in line if talkbox.sub_octave_level(n["pitch"]) > 0)
         result = {"vocal": placed["track"], "style": "talkbox", "words_placed": placed["placed"],
                   "next": ("Play it. It's audio now: add EQ, compression, chorus or reverb like any vocal. For "
                            "another melody or words, run it again. Mute the original melody track if it doubles it.")}
+        if high:
+            result["octave_doubled"] = (f"{high} of {len(line)} notes are above E4, where words blur, so they're "
+                                        "doubled an octave down for clarity. Write the melody lower to avoid it.")
     else:
         result = call("build_robot_vocal", timeout=120.0, melody_item=item_id, clips=clips, name=name,
                       carrier=carrier, bands=bands)

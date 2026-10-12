@@ -43,3 +43,8 @@ def test_plan_cleans_up_without_touching_what_the_user_set():
     assert "compress" not in acts["Vocal"]                               # already even (crest 8 dB)
     assert "highpass_hz" not in acts["Kick"] and "reverb_send_db" not in acts["Kick"]
     assert acts["Vocal"]["reverb_send_db"] == -14
+
+
+def test_silent_tracks_are_left_alone():
+    acts = {a["name"]: a for a in plan_mix([channel("Kick", "kick", -10), channel("Ghost", "lead", None)])["channels"]}
+    assert acts["Ghost"] == {"name": "Ghost", "role": "lead", "skipped": "silent in this range"}

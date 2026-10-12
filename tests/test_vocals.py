@@ -255,7 +255,11 @@ def test_talkbox_sings_the_melody_and_keeps_consonants_noisy():
     y = talkbox.cross_synthesize(np.concatenate([vowel, hiss]), fs, [(0.0, 69)])  # sung on A4
     assert abs(len(y) - int(0.45 * talkbox.RATE)) < 64
     hz, _ = samplelib.vocal_pitch(y[int(0.05 * talkbox.RATE): int(0.25 * talkbox.RATE)], talkbox.RATE)
-    assert abs(hz - 440) < 5                                                       # the melody's pitch, not the voice's
+    assert min(abs(hz - 440), abs(hz - 220)) < 5        # the melody's note (A4, doubled an octave down), not the voice's
+    low = talkbox.cross_synthesize(np.concatenate([vowel, hiss]), fs, [(0.0, 57)])   # A3: no doubling
+    hz_low, _ = samplelib.vocal_pitch(low[int(0.05 * talkbox.RATE): int(0.25 * talkbox.RATE)], talkbox.RATE)
+    assert abs(hz_low - 220) < 3
+    assert talkbox.sub_octave_level(60) == 0 and talkbox.sub_octave_level(72) == talkbox.SUB_OCTAVE
 
     def flatness(seg):
         p = np.abs(np.fft.rfft(seg)) ** 2 + 1e-12
