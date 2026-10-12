@@ -212,7 +212,8 @@ Vocals: use the best source the user has, and say which you used and why:
    by the mouth shapes: Zapp, Chromeo); style="vocoder" is more robotic but its synth
    can play chords. Write the melody as a MIDI item first (singable, about one
    syllable per note), then pass the words, one per note. It speaks them with the
-   computer's own voices (pick the best from list_speech_voices), so it sounds
+   user's default voice, else the best from list_speech_voices (when the user names a
+   favourite, set_default_voice remembers it), so it sounds
    robotic: right for house, French touch, electro and synth-pop hooks, not a human
    singer. Keep robot lyrics sparse or nobody can follow them: a short hook repeated,
    at most one syllable per beat, quarter notes or longer. Harmonies only once the

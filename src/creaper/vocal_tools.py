@@ -72,7 +72,17 @@ def list_speech_voices() -> dict:
     """The text-to-speech voices on this computer, best first, for add_robot_vocal's
     voice. Piper voices (if installed) sound the most natural; each shows its license,
     and only public domain, CC0 or CC BY ones may go in released music."""
-    return {"voices": speech.voices()}
+    return {"voices": speech.voices(), "default": speech.default_voice()}
+
+
+@tool()
+def set_default_voice(
+    voice: Annotated[str, Field(description="A voice from list_speech_voices (part of its name), or 'female'/'male'")],
+) -> dict:
+    """Makes a voice the user's default for robot vocals (used whenever no voice is
+    named), remembered across sessions."""
+    name = speech.set_default_voice(voice)
+    return {"default": name, "license": speech.voice_license(name) or "the operating system's own voice"}
 
 
 @tool()

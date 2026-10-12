@@ -151,9 +151,37 @@ def _system_voices() -> list[dict]:
     return found
 
 
+def default_voice_file() -> Path:
+    return default_bridge_dir() / "voices" / "default.json"
+
+
+def default_voice() -> str | None:
+    """The voice the user chose as their default, if it's still installed."""
+    try:
+        name = json.loads(default_voice_file().read_text(encoding="utf-8")).get("voice")
+    except (OSError, ValueError):
+        return None
+    return name if name and any(v["name"] == name for v in voices()) else None
+
+
+def set_default_voice(wanted: str) -> str:
+    name = choose_voice(wanted)
+    if not name:
+        raise SpeechError("give a voice name, or 'female'/'male'")
+    path = default_voice_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"voice": name}), encoding="utf-8")
+    return name
+
+
 def choose_voice(wanted: str | None) -> str | None:
     """The installed voice matching `wanted` (part of a name, or 'female'/'male'); with
-    nothing asked, the best voice installed (None: the system default)."""
+    nothing asked, the user's default voice, else the best voice installed (None: the
+    system default)."""
+    if not wanted:
+        chosen = default_voice()
+        if chosen:
+            return chosen
     available = voices()
     if not wanted:
         return available[0]["name"] if available and available[0].get("engine") == "piper" else None

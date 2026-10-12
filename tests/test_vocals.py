@@ -287,3 +287,16 @@ def test_no_piper_means_system_voices_only(monkeypatch):
     monkeypatch.setattr(speech, "_system_voices", lambda: [{"name": "System Voice", "engine": "sapi"}])
     assert [v["name"] for v in speech.voices()] == ["System Voice"]
     assert speech.choose_voice(None) is None
+
+
+def test_default_voice_is_remembered_and_used(tmp_path, monkeypatch):
+    monkeypatch.setattr(speech, "default_voice_file", lambda: tmp_path / "default.json")
+    installed = [{"name": "Piper Joe", "gender": "male", "engine": "piper", "license": "CC0"},
+                 {"name": "Piper Kristin", "gender": "female", "engine": "piper", "license": "public domain"}]
+    monkeypatch.setattr(speech, "voices", lambda: installed)
+    assert speech.choose_voice(None) == "Piper Joe"          # nothing chosen yet: the best installed
+    assert speech.set_default_voice("kristin") == "Piper Kristin"
+    assert speech.choose_voice(None) == "Piper Kristin"
+    assert speech.choose_voice("male") == "Piper Joe"        # asking for a voice still wins
+    installed.pop()                                          # uninstalled: back to the best one
+    assert speech.choose_voice(None) == "Piper Joe"
