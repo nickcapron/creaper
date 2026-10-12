@@ -3,13 +3,17 @@
 Windows uses both of its speech systems through PowerShell: the classic desktop voices
 (System.Speech, which also lists third-party voices) and the newer OneCore voices
 (Windows.Media, e.g. Mark, and natural voices installed for it). macOS uses `say`
-(including downloaded Enhanced and Premium voices), Linux espeak-ng or espeak. Each word becomes its own WAV file with the silence
+(including downloaded Enhanced and Premium voices), Linux espeak-ng or espeak.
+Piper (a free, offline neural voice engine, GPL, installed separately) is used when
+it's installed with voices in <REAPER resource>/creaper/voices/piper: it sounds the
+most natural, and runs in its own process. Each word becomes its own WAV file with the silence
 around it trimmed, so it starts exactly where it's placed.
 """
 
 from __future__ import annotations
 
 import base64
+import importlib.util
 import json
 import re
 import shutil
@@ -19,6 +23,8 @@ import wave
 from pathlib import Path
 
 import numpy as np
+
+from .bridge import default_bridge_dir
 
 TIMEOUT = 180.0
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -52,6 +58,46 @@ _WINRT = (
 )
 
 
+# Piper voices whose training data allows commercial use (public domain or CC0) and
+# ones that don't. Others are listed with an unknown license.
+PIPER_VOICES = {
+    "en_US-norman-medium": ("Norman", "male", "public domain"),
+    "en_US-john-medium": ("John", "male", "public domain"),
+    "en_US-bryce-medium": ("Bryce", "male", "public domain"),
+    "en_US-joe-medium": ("Joe", "male", "CC0"),
+    "en_US-kristin-medium": ("Kristin", "female", "public domain"),
+    "en_US-ljspeech-medium": ("LJSpeech", "female", "public domain"),
+    "en_US-ljspeech-high": ("LJSpeech", "female", "public domain"),
+    "en_GB-cori-medium": ("Cori", "female", "public domain"),
+    "en_GB-cori-high": ("Cori", "female", "public domain"),
+    "en_US-lessac-medium": ("Lessac", "female", "non-commercial (research only)"),
+    "en_US-lessac-high": ("Lessac", "female", "non-commercial (research only)"),
+    "en_US-ryan-medium": ("Ryan", "male", "non-commercial (CC BY-NC-SA 4.0)"),
+    "en_US-hfc_female-medium": ("HFC female", "female", "non-commercial (CC BY-NC-SA 4.0)"),
+    "en_US-hfc_male-medium": ("HFC male", "male", "non-commercial (CC BY-NC-SA 4.0)"),
+}
+COMMERCIAL_OK = ("public domain", "CC0", "CC BY")
+
+
+def piper_dir() -> Path:
+    return default_bridge_dir() / "voices" / "piper"
+
+
+def _piper_voices() -> list[dict]:
+    if importlib.util.find_spec("piper") is None or not piper_dir().is_dir():
+        return []
+    found = []
+    for model in sorted(piper_dir().glob("*.onnx")):
+        if not model.with_suffix(".onnx.json").exists():
+            continue
+        name, gender, license_ = PIPER_VOICES.get(model.stem, (model.stem, "", "unknown: check its model card"))
+        found.append({"name": f"Piper {name}" + (" (UK)" if model.stem.startswith("en_GB") else ""),
+                      "gender": gender, "language": model.stem.split("-")[0], "engine": "piper",
+                      "license": license_, "model": str(model)})
+    # Voices cleared for released music first.
+    return sorted(found, key=lambda v: (not v["license"].startswith(COMMERCIAL_OK), v["language"] != "en_US"))
+
+
 def _windows_voices() -> list[dict]:
     out = _powershell(
         "Add-Type -AssemblyName System.Speech;"
@@ -77,7 +123,12 @@ def _windows_voices() -> list[dict]:
 
 
 def voices() -> list[dict]:
-    """The installed voices: name, and gender or language where the system says."""
+    """The installed voices, best first: name, gender or language where known, the
+    engine, and for Piper voices their license (whether released music may use them)."""
+    return _piper_voices() + _system_voices()
+
+
+def _system_voices() -> list[dict]:
     if sys.platform == "win32":
         return _windows_voices()
     if sys.platform == "darwin":
@@ -101,11 +152,11 @@ def voices() -> list[dict]:
 
 
 def choose_voice(wanted: str | None) -> str | None:
-    """The installed voice matching `wanted` (part of a name, or 'female'/'male'), or
-    None for the system default."""
-    if not wanted:
-        return None
+    """The installed voice matching `wanted` (part of a name, or 'female'/'male'); with
+    nothing asked, the best voice installed (None: the system default)."""
     available = voices()
+    if not wanted:
+        return available[0]["name"] if available and available[0].get("engine") == "piper" else None
     w = wanted.strip().lower()
     by_gender = [v for v in available if v.get("gender") == w]
     if by_gender:
@@ -121,7 +172,18 @@ def speak(texts: list[str], folder: Path, voice: str | None = None) -> list[Path
     """Speaks each text into its own trimmed WAV file in `folder`, in order."""
     folder.mkdir(parents=True, exist_ok=True)
     paths = [folder / f"{i + 1:03d} {_safe(t)}.wav" for i, t in enumerate(texts)]
-    if sys.platform == "win32" and voice and any(
+    piper = next((v for v in _piper_voices() if v["name"] == voice), None) if voice else None
+    if piper:
+        job = folder / "speech-job.json"
+        job.write_text(json.dumps({"model": piper["model"], "items": [
+            {"text": t, "path": str(p)} for t, p in zip(texts, paths)]}), encoding="utf-8")
+        # Piper runs in its own process (its GPL code stays apart from creaper's).
+        done = subprocess.run([sys.executable, "-c", _PIPER_RUNNER, str(job)], capture_output=True, text=True,
+                              timeout=TIMEOUT, creationflags=_NO_WINDOW)
+        job.unlink(missing_ok=True)
+        if done.returncode != 0:
+            raise SpeechError(f"Piper failed: {done.stderr.strip()[-300:]}")
+    elif sys.platform == "win32" and voice and any(
             v["name"] == voice and v.get("engine") == "onecore" for v in _windows_voices()):
         job = folder / "speech-job.json"
         job.write_text(json.dumps({"voice": voice, "items": [
@@ -293,6 +355,74 @@ def fit_word(path: Path, seconds: float) -> float:
         fitted[-fade:] *= ramp[::-1]
     _write(path, fitted, rate)
     return len(x) / target
+
+
+# Piper's models are trained on sentences, and some (Norman, Kristin, Cori) ramble on
+# for seconds after a single word. So each word is tried with a few endings until one
+# take is about as long as its phonemes suggest, and anything after its first pause
+# is cut.
+_PIPER_RUNNER = """
+import io, json, sys, wave
+import numpy as np
+from piper import PiperVoice
+from piper.config import SynthesisConfig
+job = json.load(open(sys.argv[1], encoding="utf-8"))
+voice = PiperVoice.load(job["model"])
+steady = SynthesisConfig(noise_scale=0.4, noise_w_scale=0.0)
+
+def render(text):
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        voice.synthesize_wav(text, w, syn_config=steady)
+    buf.seek(0)
+    with wave.open(buf) as w:
+        return np.frombuffer(w.readframes(w.getnframes()), dtype="<i2"), w.getframerate()
+
+def first_utterance(x, fs, gap=0.12, floor_db=-40):
+    frame = int(0.01 * fs)
+    n = len(x) // frame
+    if n == 0:
+        return x
+    rms = np.sqrt(np.mean((x[: n * frame].astype(float) / 32768).reshape(n, frame) ** 2, axis=1)) + 1e-9
+    loud = 20 * np.log10(rms / rms.max()) > floor_db
+    idx = np.nonzero(loud)[0]
+    if not len(idx):
+        return x
+    start, end, quiet = idx[0], idx[0], 0
+    for i in range(idx[0], n):
+        if loud[i]:
+            end, quiet = i, 0
+        else:
+            quiet += 1
+            if quiet * 0.01 >= gap:
+                break
+    return x[start * frame: (end + 1) * frame]
+
+for item in job["items"]:
+    text = item["text"]
+    phonemes = sum(len([p for p in sent if p.strip() and p not in ".,!?"]) for sent in voice.phonemize(text))
+    expected = 0.08 * phonemes + 0.15
+    best = None
+    for variant in (text, text + ".", text + "!", text + ",", text + "?", text.capitalize() + "."):
+        x, fs = render(variant)
+        cut = first_utterance(x, fs)
+        ratio = len(cut) / fs / expected
+        score = abs(ratio - 1) if ratio >= 1 else 2 * (1 - ratio)  # cut-off words are worse than slow ones
+        if best is None or score < best[0]:
+            best = (score, cut, fs)
+        if 0.6 <= ratio <= 1.6:
+            break
+    with wave.open(item["path"], "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(best[2])
+        w.writeframes(best[1].astype("<i2").tobytes())
+"""
+
+
+def voice_license(name: str | None) -> str | None:
+    """A Piper voice's license, or None for system voices (the OS's own terms)."""
+    return next((v["license"] for v in _piper_voices() if v["name"] == name), None) if name else None
 
 
 def _run(cmd: list[str]) -> None:

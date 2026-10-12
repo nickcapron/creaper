@@ -263,3 +263,27 @@ def test_talkbox_sings_the_melody_and_keeps_consonants_noisy():
     voiced = flatness(y[int(0.05 * talkbox.RATE): int(0.25 * talkbox.RATE)])
     hissed = flatness(y[int(0.33 * talkbox.RATE): int(0.43 * talkbox.RATE)])
     assert hissed > 10 * voiced                                                    # the "s" stays noise
+
+
+def test_piper_voices_list_licenses_and_prefer_ones_safe_to_release(tmp_path, monkeypatch):
+    for stem in ("en_US-lessac-medium", "en_GB-cori-medium", "en_US-norman-medium", "xx_YY-mystery-low"):
+        (tmp_path / f"{stem}.onnx").write_bytes(b"")
+        (tmp_path / f"{stem}.onnx.json").write_text("{}")
+    monkeypatch.setattr(speech, "piper_dir", lambda: tmp_path)
+    monkeypatch.setattr(speech.importlib.util, "find_spec", lambda name: object())
+    monkeypatch.setattr(speech, "_system_voices", lambda: [{"name": "System Voice", "gender": "female", "engine": "sapi"}])
+    found = speech.voices()
+    assert [v["name"] for v in found] == ["Piper Norman", "Piper Cori (UK)", "Piper Lessac", "Piper xx_YY-mystery-low",
+                                          "System Voice"]
+    assert found[0]["license"] == "public domain" and found[2]["license"].startswith("non-commercial")
+    assert found[3]["license"].startswith("unknown")
+    assert speech.choose_voice(None) == "Piper Norman"          # best voice safe for released music
+    assert speech.choose_voice("female") == "Piper Cori (UK)"
+    assert speech.voice_license("Piper Lessac").startswith("non-commercial")
+
+
+def test_no_piper_means_system_voices_only(monkeypatch):
+    monkeypatch.setattr(speech.importlib.util, "find_spec", lambda name: None)
+    monkeypatch.setattr(speech, "_system_voices", lambda: [{"name": "System Voice", "engine": "sapi"}])
+    assert [v["name"] for v in speech.voices()] == ["System Voice"]
+    assert speech.choose_voice(None) is None

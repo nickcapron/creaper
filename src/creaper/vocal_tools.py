@@ -69,7 +69,9 @@ def assign_lyrics(lyrics: str, line: list[dict]) -> list[dict]:
 
 @tool(annotations=READ_ONLY)
 def list_speech_voices() -> dict:
-    """The text-to-speech voices on this computer, for add_robot_vocal's voice."""
+    """The text-to-speech voices on this computer, best first, for add_robot_vocal's
+    voice. Piper voices (if installed) sound the most natural; each shows its license,
+    and only public domain, CC0 or CC BY ones may go in released music."""
     return {"voices": speech.voices()}
 
 
@@ -144,6 +146,10 @@ def add_robot_vocal(
                           "open), fewer syllables per beat, or style='talkbox'. Mute the original melody track if "
                           "it doubles the vocal.")
     result["speech_voice"] = chosen or "system default"
+    license_ = speech.voice_license(chosen)
+    if license_:
+        result["voice_license"] = license_ + ("" if license_.startswith(speech.COMMERCIAL_OK)
+                                              else ": don't use it in music that will be released")
     result["word_files"] = str(folder)
     if rushed:
         result["note"] = (f"{len(rushed)} of {len(words)} words had to be sped up more than {RUSHED:g}x to fit "

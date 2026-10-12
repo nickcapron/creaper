@@ -332,6 +332,23 @@ For analysis, the bridge renders the requested range to a temporary 32-bit float
 (so overs above 0 dBFS aren't hidden). It saves your render settings first and restores
 them afterwards. The server measures the file in Python, then deletes it.
 
+## Better robot voices with Piper (optional)
+
+Robot vocals use your computer's own speech voices. For clearer, more natural ones,
+install [Piper](https://github.com/OHF-Voice/piper1-gpl), a free offline voice engine
+(GPL-3.0, so it's a separate install), into creaper's Python environment:
+
+```bash
+python -m pip install piper-tts
+```
+
+Then put voices (an `.onnx` file and its `.onnx.json`, from
+[rhasspy/piper-voices](https://huggingface.co/rhasspy/piper-voices)) in
+`<REAPER resource folder>/creaper/voices/piper/`. creaper lists them first and shows each
+voice's license: for music you'll release, pick public domain or CC0 voices such as
+Norman, John, Bryce, Joe, Kristin, LJSpeech or Cori. Some popular voices (Lessac, Ryan,
+HFC) are for non-commercial use only.
+
 ## Good to know
 
 - **Undo.** Each tool call is one undo step. Claude can also call `undo` itself.
