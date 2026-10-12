@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 import numpy as np
 import soundfile as sf
@@ -231,3 +231,68 @@ def show_spectrogram(
         "rows": "bottom 30 Hz, lines at 100 Hz (lower), 1 kHz (middle), 10 kHz (upper), top 16 kHz",
     }
     return [legend, Image(data=png, format="png")]
+
+
+# ------------------------------------------------------------------- endings
+
+@tool(annotations=READ_ONLY)
+def check_ending(
+    kind: Annotated[Literal["continuous", "ending", "stinger"], Field(description=(
+        "continuous: the piece flows into the next one (a game crossfading tracks, a DJ mix): it must not fade out "
+        "or end in silence. ending: a real ending that dies away. stinger: a short cue with a hard stop"))] = "continuous",
+    tail_seconds: Annotated[float, Field(ge=0, le=30, description="The tail you'll export with (export_mix tail_seconds)")] = 0.0,
+) -> dict:
+    """Checks how the song ends against how it will be used, by rendering its last
+    16 seconds (plus the export tail) and measuring the level: a fade-out, a quiet or
+    silent end, a tail cut off mid-ring, or a stinger that lingers. Also reports the
+    song's length."""
+    overview = call("get_project_overview")
+    length = overview["length"]["seconds"]
+    if length <= 0:
+        raise ValueError("the project is empty")
+    window = min(16.0, length)
+    render = call("render_audio", timeout=600.0, track="master", start_seconds=max(0.0, length - window),
+                  tail_seconds=tail_seconds)
+    renders = (bridge.directory / "renders").resolve()
+    try:
+        for f in render["files"]:
+            if renders not in Path(f).resolve().parents:
+                raise BridgeError(f"refusing to use a render outside {renders}: {f}")
+        audio, fs = sf.read(render["files"][0], always_2d=True)
+    finally:
+        for f in render["files"]:
+            Path(f).unlink(missing_ok=True)
+    prof = perception.ending_profile(audio, int(fs))
+    total = length + tail_seconds
+    out: dict = {"kind": kind, "length": f"{int(total // 60)}:{int(total % 60):02d}", **prof}
+    problems, tips = [], []
+    drop = prof.get("end_vs_loudest_db")
+    silence = prof.get("trailing_silence_s", 0)
+    if kind == "continuous":
+        if silence >= 0.5:
+            problems.append(f"it ends with {silence:g} s of silence")
+            tips.append("end the project on the last bar line (or trim the silence) and export with tail_seconds=0")
+        if drop is not None and drop < -6:
+            problems.append(f"its final 2 seconds are {-drop:g} dB quieter than its loudest moment just before: "
+                            "a fade-out")
+            tips.append("keep the last section's parts playing to the end at full level; remove fade-out "
+                        "automation or item fades on the final bar (if the end is meant to be a quieter section, "
+                        "it still mustn't die away)")
+    elif kind == "ending":
+        if prof.get("abrupt"):
+            problems.append("it stops while still ringing: the tail is cut off")
+            tips.append("export with a longer tail_seconds (4-8 s for a long final chord), or let the last chord "
+                        "ring longer before the project's end")
+        elif silence < 0.3 and prof.get("final_50ms_db_below_peak", 99) < 40:
+            problems.append("it doesn't quite reach silence")
+            tips.append("give the final chord time to die away (a longer tail or a fade on the last chord)")
+    else:
+        if not 5 <= total <= 15:
+            problems.append(f"it's {total:.1f} s long; stingers are usually 5-15 s")
+        if silence >= 0.3:
+            problems.append(f"{silence:g} s of silence after the hit")
+            tips.append("trim the end right after the final hit's decay")
+    out["verdict"] = "fine for its use" if not problems else "; ".join(problems)
+    if tips:
+        out["tips"] = tips
+    return out

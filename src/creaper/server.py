@@ -139,6 +139,9 @@ Arranging:
   write the hook note by note when you have a stronger idea, and give the track at
   least one signature element (a vocal chop, a found sample, an unusual sound or
   rhythm) that makes it memorable.
+- How it ends depends on where it's going: a game or playlist that crossfades tracks
+  needs no fade-out or silence at the end; an album closer or victory cue needs a real
+  ending. check_ending measures it (kind continuous, ending or stinger).
 - Before calling it done, go through the arrangement section by section and say what
   changes in each. Rework any section that only repeats an earlier one with nothing
   new. You measure rather than hear, so ask the user for their reaction to specific
@@ -178,6 +181,10 @@ Composition and music theory:
   edit_midi_notes develops motifs (invert, retrograde, sequence, add_harmony...).
   Harmony lines over a progression take chords_item (the chord part), or chords from
   outside the key (secondary dominants like F#7 in F# minor) make them rub.
+- Motifs across songs (a game or film score's leitmotif, an album's recurring theme):
+  save_motif once, then list_motifs / place_motif put it in any project, in that
+  song's key and mode (D minor to D major for a victory), slower for a grand statement
+  or an octave down for low brass.
 - Name chords and keys the way musicians spell them (the tools return correct
   spellings), explain choices in theory terms briefly when it helps the user learn,
   and check your own writing with analyze_harmony or check_voice_leading.
@@ -1758,6 +1765,7 @@ from . import record_tools  # noqa: E402,F401  (recording, takes, time selection
 from . import vocal_tools  # noqa: E402,F401  (robot vocals: text-to-speech through a vocoder)
 from . import ear_tools  # noqa: E402,F401  (vocal clarity, tuning, spectrograms)
 from . import mix_tools  # noqa: E402,F401  (auto_mix)
+from . import motif_tools  # noqa: E402,F401  (motifs reused across songs)
 
 
 def run() -> None:

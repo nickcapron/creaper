@@ -74,3 +74,22 @@ def test_show_spectrogram_returns_a_picture_to_claude(monkeypatch):
     assert "image" in kinds and "text" in kinds
     text = next(b.text for b in blocks if getattr(b, "type", None) == "text")
     assert "Drop" in text
+
+
+def _tone(seconds, fs=FS):
+    t = np.arange(int(seconds * fs)) / fs
+    return 0.3 * np.sin(2 * np.pi * 220 * t)
+
+
+def test_ending_profile_tells_a_fade_a_silence_and_a_cut_apart():
+    steady = perception.ending_profile(_tone(16), FS)
+    assert steady["trailing_silence_s"] == 0 and abs(steady["end_vs_loudest_db"]) < 1 and steady["abrupt"]
+    faded = _tone(16) * np.concatenate([np.ones(10 * FS), np.linspace(1, 0.02, 6 * FS)])
+    assert perception.ending_profile(faded, FS)["end_vs_loudest_db"] < -6
+    long_fade = _tone(16) * np.concatenate([np.ones(8 * FS), np.linspace(1, 0.3, 8 * FS)])   # like REAPER's 8 s fade
+    assert perception.ending_profile(long_fade, FS)["end_vs_loudest_db"] < -6
+    gap = perception.ending_profile(np.concatenate([_tone(14), np.zeros(2 * FS)]), FS)
+    assert 1.9 <= gap["trailing_silence_s"] <= 2.1
+    t = np.arange(16 * FS) / FS
+    dying = _tone(16) * np.exp(-np.maximum(0, t - 8) * 1.5)
+    assert not perception.ending_profile(dying, FS)["abrupt"]

@@ -210,3 +210,45 @@ def spectrogram_png(audio: np.ndarray, fs: int, lines: list[float] = (), width: 
         if 0 <= col < width:
             rgb[:, col] = 255
     return _png(rgb)
+
+
+# ------------------------------------------------------------------- endings
+
+def ending_profile(audio: np.ndarray, fs: int, frame: float = 0.05, silence_db: float = -45.0) -> dict:
+    """How a piece ends: trailing silence (frames more than 45 dB under the loudest in
+    the window), the level of its final 2 s against its loudest 4 s before the last 4 (a
+    fade-out shows up as a big drop, even when the fade is long), and whether it stops
+    abruptly (still loud in its final 50 ms)."""
+    x = np.asarray(audio, dtype=float)
+    if x.ndim > 1:
+        x = x.mean(axis=1)
+    step = max(1, int(frame * fs))
+    n = len(x) // step
+    if n < 4:
+        return {}
+    rms = np.sqrt(np.mean(x[: n * step].reshape(n, step) ** 2, axis=1)) + 1e-12
+    db = 20 * np.log10(rms)
+    top = db.max()
+    sounding = np.nonzero(db > top + silence_db)[0]
+    last_sound = (sounding[-1] + 1) * frame if len(sounding) else 0.0
+    duration = n * frame
+
+    def level(a: float, b: float) -> float | None:
+        i, j = int(max(0, a) / frame), int(max(0, b) / frame)
+        seg = rms[i:j]
+        return float(20 * np.log10(np.sqrt(np.mean(seg ** 2)))) if len(seg) else None
+    end = last_sound if last_sound > 0 else duration
+    final = level(end - 2, end)
+    loudest = None
+    t = 0.0
+    while t + 4 <= end - 4 + 1e-9:
+        v = level(t, t + 4)
+        if v is not None and (loudest is None or v > loudest):
+            loudest = v
+        t += 0.5
+    return {
+        "trailing_silence_s": round(duration - last_sound, 2),
+        "end_vs_loudest_db": None if final is None or loudest is None else round(final - loudest, 1),
+        "final_50ms_db_below_peak": round(float(top - db[-1]), 1),
+        "abrupt": bool(db[-1] > top - 20),
+    }

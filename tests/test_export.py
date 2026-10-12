@@ -52,3 +52,16 @@ def test_avoids_clipping_by_default(tmp_path):
     assert out["true_peak_dbtp"] <= -0.95 and "gain_applied_db" in out
     clipped = E._deliver(str(src), tmp_path / "c.wav", "wav", 24, None, None, -1.0, avoid_clipping=False)
     assert any("clipped" in n for n in clipped["notes"])
+
+
+def test_long_ogg_exports_dont_crash(tmp_path):
+    """libsndfile crashed the process encoding Vorbis from one long write; it's written in blocks."""
+    import numpy as np
+    import soundfile as sf
+    from creaper import export_tools
+    src = tmp_path / "src.wav"
+    t = np.arange(44100 * 40) / 44100
+    sf.write(str(src), np.stack([0.3 * np.sin(2 * np.pi * 220 * t)] * 2, axis=1), 44100, subtype="FLOAT")
+    export_tools.convert(src, tmp_path / "song.ogg", "ogg", ogg_quality=0.6)
+    back, fs = sf.read(str(tmp_path / "song.ogg"))
+    assert fs == 44100 and abs(back.shape[0] / fs - 40) < 0.05

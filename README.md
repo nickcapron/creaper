@@ -42,7 +42,8 @@ own Claude account; no API key needed.
 | **Edit clips** | Move, trim, split, duplicate, fade, re-pitch, time-stretch and delete audio or MIDI items; import audio files |
 | **Vocals** | Uses the best source on your machine: chops real vocal samples into rhythmic, in-key chops; hands a melody and lyrics to singing synths (Synthesizer V, ACE Studio, VOCALOID, OpenUtau) as MIDI with the words on the notes; or sings lyrics itself as a talk box or vocoder from your computer's own voices |
 | **Record** | Audio interface inputs and MIDI devices; arm, monitor and set the record mode (input, resample the track's output, MIDI overdub/replace); record a bar range that stops by itself; pick, compare or explode takes. Claude warns you before REAPER asks which new files to keep, and waits while you answer |
-| **Save & deliver** | Save, save as, and snapshot copies; export the mix (or a region or bar range) to WAV/FLAC/MP3/OGG with loudness and true peak checked and no clipping; stems for every track, lined up |
+| **Save & deliver** | Save, save as, and snapshot copies; export the mix (or a region or bar range) to WAV/FLAC/MP3/OGG (Vorbis quality of your choice) with loudness and true peak checked and no clipping; stems for every track, lined up; a check that the ending suits its use (no fade or silence for tracks a game or playlist crossfades, a real ending for a finale, a tight stinger) |
+| **Themes across songs** | Save a motif (a game's or album's signature theme) and place it in any later song, in that song's key and mode, slower, faster or in another octave |
 | **Arrange** | Tempo changes, ramps and time-signature changes over the song; markers and regions (add, rename, move, resize, recolor, delete); time selection, loop points and repeat; track templates; freeze and unfreeze heavy tracks |
 | **Samples & loops** | Search your sample folders by name, role, tempo and key, with each result checked by ear; place loops stretched to the project tempo and moved into key; build drum kits from any samples in REAPER's sampler |
 | **Routing** | A map of folders, sends, sidechains and outputs; folders; sends; master-send on/off |
@@ -405,6 +406,7 @@ python -m venv .venv
 - `src/creaper/vocal_tools.py`, `speech.py`, `talkbox.py`: vocals (chops, singing-synth MIDI, text-to-speech, talk box and vocoder)
 - `src/creaper/perception.py`, `ear_tools.py`: measuring what a listener would notice (clarity, tuning, spectrograms)
 - `src/creaper/mix_tools.py`: auto_mix
+- `src/creaper/motif_tools.py`: motifs reused across songs
 - `src/creaper/installer.py`, `install.ps1`: `creaper setup` and the one-command Windows installer
 - `assets/make_brand.py`: regenerates the logo, banner and thumbnail in `assets/brand/`
 - `src/creaper/drums.py`: saved drum maps

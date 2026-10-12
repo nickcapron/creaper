@@ -60,8 +60,12 @@ def _cleanup(files: list[str]) -> None:
             Path(f).unlink(missing_ok=True)
 
 
+OGG_QUALITY = 0.6   # Vorbis quality 0-1; 0.6 is about 150-190 kbps for stereo music
+OGG_BLOCK = 8192    # frames per write when encoding Vorbis
+
+
 def convert(src: str | Path, dest: Path, fmt: Format, bit_depth: int = 24, sample_rate: int | None = None,
-            gain_db: float = 0.0) -> dict:
+            gain_db: float = 0.0, ogg_quality: float = OGG_QUALITY) -> dict:
     """Writes a float render as the delivery format: resampled if asked, gain applied,
     TPDF-dithered when going to 16-bit, clipped samples counted."""
     audio, fs = sf.read(str(src), dtype="float64", always_2d=True)
@@ -89,7 +93,13 @@ def convert(src: str | Path, dest: Path, fmt: Format, bit_depth: int = 24, sampl
         sf.write(str(dest), audio, fs, format="MP3", subtype="MPEG_LAYER_III",
                  bitrate_mode="CONSTANT", compression_level=0.0)
     else:
-        sf.write(str(dest), audio, fs, format="OGG", subtype="VORBIS", compression_level=0.1)
+        # libsndfile's compression level is the inverse of Vorbis quality. Write in blocks:
+        # libsndfile crashes the whole process encoding Vorbis from one long write (a
+        # 27-second file was enough).
+        with sf.SoundFile(str(dest), "w", fs, audio.shape[1], format="OGG", subtype="VORBIS",
+                          compression_level=round(1.0 - min(1.0, max(0.0, ogg_quality)), 3)) as out:
+            for i in range(0, len(audio), OGG_BLOCK):
+                out.write(audio[i:i + OGG_BLOCK])
     return {"sample_rate": fs, "clipped_samples": clipped}
 
 
@@ -103,7 +113,7 @@ def _destination(folder: str | None, name: str, fmt: Format, info: dict, overwri
 
 def _deliver(src: str, dest: Path, fmt: Format, bit_depth: int, sample_rate: int | None,
              target_lufs: float | None, ceiling_db: float, avoid_clipping: bool = True,
-             extra_gain: float = 0.0) -> dict:
+             extra_gain: float = 0.0, ogg_quality: float = OGG_QUALITY) -> dict:
     measured = analysis.analyze_file(src)
     loud = measured.get("loudness", {}).get("integrated_lufs")
     peak = measured.get("levels", {}).get("true_peak_dbtp")
@@ -120,8 +130,9 @@ def _deliver(src: str, dest: Path, fmt: Format, bit_depth: int, sample_rate: int
         notes.append(f"turned down {-gain:.1f} dB so the file doesn't clip (the mix peaks at {peak:+.1f} dBTP); "
                      "master_to_target makes it loud without clipping")
     gain += extra_gain
-    written = convert(src, dest, fmt, bit_depth, sample_rate, gain)
-    out = {"file": str(dest), "format": fmt + (f" {bit_depth}-bit" if fmt in ("wav", "flac") else ""),
+    written = convert(src, dest, fmt, bit_depth, sample_rate, gain, ogg_quality)
+    out = {"file": str(dest), "format": fmt + (f" {bit_depth}-bit" if fmt in ("wav", "flac") else
+                                               f" (Vorbis quality {ogg_quality:g})" if fmt == "ogg" else ""),
            "sample_rate": written["sample_rate"], "duration_s": measured.get("duration_seconds"),
            "integrated_lufs": round(loud + gain, 1) if loud is not None else None,
            "true_peak_dbtp": round(peak + gain, 1) if peak is not None else None,
@@ -184,6 +195,7 @@ def export_mix(
     target_lufs: Annotated[float | None, Field(ge=-40, le=-5, description="Turn the file up/down to this loudness (gain only; true peak kept under the ceiling)")] = None,
     ceiling_db: Annotated[float, Field(le=0)] = -1.0,
     avoid_clipping: Annotated[bool, Field(description="Turn the file down instead of clipping when the mix peaks too high")] = True,
+    ogg_quality: Annotated[float, Field(ge=0, le=1, description="OGG Vorbis quality, 0 to 1 (0.6 is about 150-190 kbps)")] = OGG_QUALITY,
     overwrite: bool = False,
 ) -> dict:
     """Exports the finished mix (the master, with its effects) to an audio file and
@@ -201,7 +213,8 @@ def export_mix(
     render = call("render_audio", timeout=900.0, track="master", tail_seconds=tail_seconds, **span)
     _check_renders(render["files"])
     try:
-        out = _deliver(render["files"][0], dest, format, bit_depth, sample_rate, target_lufs, ceiling_db, avoid_clipping)
+        out = _deliver(render["files"][0], dest, format, bit_depth, sample_rate, target_lufs, ceiling_db, avoid_clipping,
+                       ogg_quality=ogg_quality)
     finally:
         _cleanup(render["files"])
     if render.get("warning"):
@@ -219,6 +232,7 @@ def export_stems(
     start_bar: Annotated[float | None, Field(ge=1)] = None,
     end_bar: float | None = None,
     tail_seconds: Annotated[float, Field(ge=0, le=30)] = 2.0,
+    ogg_quality: Annotated[float, Field(ge=0, le=1, description="OGG Vorbis quality, 0 to 1 (0.6 is about 150-190 kbps)")] = OGG_QUALITY,
     overwrite: bool = False,
 ) -> dict:
     """Exports each track as its own audio file (post-fader, with its effects but not the
@@ -249,7 +263,7 @@ def export_stems(
             label = f"{stem['track']['number']:02d} {safe_name(stem['track']['name'])}"
             dest = base / (label + EXTENSIONS[format])
             r = _deliver(stem["file"], dest, format, bit_depth, sample_rate, None, 0.0, avoid_clipping=False,
-                         extra_gain=shared)
+                         extra_gain=shared, ogg_quality=ogg_quality)
             results.append({"track": stem["track"]["name"], "file": r["file"], "true_peak_dbtp": r["true_peak_dbtp"],
                             **({"notes": r["notes"]} if r.get("notes") else {})})
     finally:
