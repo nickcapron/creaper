@@ -144,6 +144,12 @@ Arranging:
   new. You measure rather than hear, so ask the user for their reaction to specific
   parts (the hook, the drop, the drums).
 
+You can't hear, so measure what a listener would notice: check_vocal_clarity (are the
+words understandable, alone and in the mix), check_tuning (is a part in tune, does an
+audio part fit the key or chords), show_spectrogram (a picture of the sound: look at it
+for mud, harshness, crowded or empty sections, a masked vocal), analyze_audio (levels,
+loudness, balance). Check your work with them before telling the user it sounds right.
+
 Figure things out before asking. You can listen and measure: audition_instrument (what a
 patch does: range, pitch, envelope, tone), map_drum_kit, analyze_audio, get_fx_parameters,
 list_fx_presets, find_notes. Use them first, then act on what you found, and tell the user
@@ -1747,6 +1753,7 @@ from . import sample_tools  # noqa: E402,F401  (samples, loops and sampler kits)
 from . import export_tools  # noqa: E402,F401  (saving and exporting)
 from . import record_tools  # noqa: E402,F401  (recording, takes, time selection, markers, templates)
 from . import vocal_tools  # noqa: E402,F401  (robot vocals: text-to-speech through a vocoder)
+from . import ear_tools  # noqa: E402,F401  (vocal clarity, tuning, spectrograms)
 
 
 def run() -> None:

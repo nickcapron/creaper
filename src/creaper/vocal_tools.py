@@ -109,7 +109,8 @@ def add_robot_vocal(
     and a carrier synth that can play the melody's chords).
     Robot vocals are only understood when they're sparse: a short hook of a few words,
     repeated (think "one more time", "around the world"), at most one syllable per beat,
-    on quarter notes or longer. Dense, fast verses turn to mush."""
+    on quarter notes or longer. Dense, fast verses turn to mush. The result includes a
+    measured clarity score (alone and in the mix): act on it rather than guessing."""
     data = call("get_midi_notes", item_id=item_id)
     line = melody_line(data.get("notes", []))
     if not line:
@@ -135,6 +136,8 @@ def add_robot_vocal(
             pitches = [(max(0.0, t - start_s), n["pitch"]) for n, t in zip(line, note_times)
                        if w["start"] - 1e-6 <= n["start"] < w["end"] - 1e-6] or [(0.0, line[0]["pitch"])]
             x, fs = speech._read(f)
+            (folder / "speech").mkdir(exist_ok=True)
+            speech._write(folder / "speech" / f.name, x, fs)  # the clean words, for check_vocal_clarity
             speech._write(f, talkbox.cross_synthesize(x, fs, pitches, seed=i), talkbox.RATE)
         clips.append({"path": str(f), "start_qn": base + w["start"], "end_qn": base + w["end"], "word": w["word"]})
     if style == "talkbox":
@@ -161,6 +164,12 @@ def add_robot_vocal(
         result["voice_license"] = license_ + ("" if license_.startswith(speech.COMMERCIAL_OK)
                                               else ": don't use it in music that will be released")
     result["word_files"] = str(folder)
+    try:  # how understandable it came out, alone and with everything else playing
+        from .ear_tools import measure_vocal_clarity
+        others = len(call("get_project_overview").get("tracks", [])) > 4
+        result["clarity"] = measure_vocal_clarity(result["vocal"]["name"], in_mix=others)
+    except Exception as e:  # noqa: BLE001  (a failed measurement mustn't undo the vocal)
+        result["clarity"] = {"error": f"couldn't measure clarity: {e}"}
     if rushed:
         result["note"] = (f"{len(rushed)} of {len(words)} words had to be sped up more than {RUSHED:g}x to fit "
                           "their notes, which blurs them: " + ", ".join(rushed[:12]) + (" ..." if len(rushed) > 12

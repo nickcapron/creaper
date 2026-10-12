@@ -161,7 +161,11 @@ def vocal_pitch(x: np.ndarray, fs: int, fmin: float = 70.0, fmax: float = 1100.0
         return None, 0.0
     best = max(seg[i] for i in peaks)
     lag = lo + next(i for i in peaks if seg[i] >= 0.9 * best)
-    return fs / lag, float(min(1.0, max(0.0, ac[lag])))
+    # Refine to a fraction of a sample (parabola through the peak): whole samples are
+    # several cents apart at higher pitches, too coarse to judge tuning.
+    a, b, c = ac[lag - 1], ac[lag], ac[lag + 1]
+    shift = 0.5 * (a - c) / (a - 2 * b + c) if (a - 2 * b + c) != 0 else 0.0
+    return fs / (lag + float(np.clip(shift, -0.5, 0.5))), float(min(1.0, max(0.0, ac[lag])))
 
 
 def slice_vocal(path: str, floor_db: float = -35.0, min_gap: float = 0.08, min_length: float = 0.06,
