@@ -482,6 +482,22 @@ end
 
 -- One parameter change: {parameter, value | display_value | display_text}.
 -- Restores the parameter if anything goes wrong.
+-- ReaEQ's bands can be switched off (its 5th band, a high-pass, is off by default), so
+-- setting a band's frequency or gain would silently do nothing: switch that band on.
+local REAEQ_BANDS = { ["low shelf"] = 0, ["band 2"] = 1, ["band 3"] = 2, ["high shelf 4"] = 3, ["high pass 5"] = 4 }
+local function enable_reaeq_band(t, fx, param_name)
+  if not fx_name(t, fx):find("ReaEQ", 1, true) then return nil end
+  local kind, band = param_name:lower():match("^(%a+)%-(.+)$")
+  local index = band and REAEQ_BANDS[band]
+  if not index or (kind ~= "freq" and kind ~= "gain") then return nil end
+  local ok, enabled = reaper.TrackFX_GetNamedConfigParm(t, fx, "BANDENABLED" .. index)
+  if ok and enabled == "0" then
+    reaper.TrackFX_SetNamedConfigParm(t, fx, "BANDENABLED" .. index, "1")
+    return "this ReaEQ band was switched off; it's on now"
+  end
+  return nil
+end
+
 local function apply_param_change(t, fx, change)
   local param = find_param(t, fx, change.parameter)
   local _, param_name = reaper.TrackFX_GetParamName(t, fx, param, "")
@@ -499,8 +515,10 @@ local function apply_param_change(t, fx, change)
       fail("give value (0 to 1), display_value or display_text")
     end
     reaper.TrackFX_SetParamNormalized(t, fx, param, math.max(0, math.min(1, value)))
+    local switched_on = enable_reaeq_band(t, fx, param_name)
     local info = param_info(t, fx, param)
     if clamped then info.note = "the requested value is outside this parameter's range, so it was set to the limit" end
+    if switched_on then info.band = switched_on end
     return info
   end)
   if not ok then

@@ -1754,6 +1754,7 @@ from . import export_tools  # noqa: E402,F401  (saving and exporting)
 from . import record_tools  # noqa: E402,F401  (recording, takes, time selection, markers, templates)
 from . import vocal_tools  # noqa: E402,F401  (robot vocals: text-to-speech through a vocoder)
 from . import ear_tools  # noqa: E402,F401  (vocal clarity, tuning, spectrograms)
+from . import mix_tools  # noqa: E402,F401  (auto_mix)
 
 
 def run() -> None:
