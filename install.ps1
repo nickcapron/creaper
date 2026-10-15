@@ -19,8 +19,26 @@ function Refresh-Path {
     $env:Path = [Environment]::GetEnvironmentVariable('Path', 'User') + ';' +
                 [Environment]::GetEnvironmentVariable('Path', 'Machine')
 }
+function Add-UserPath($dir) {
+    $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+    if (-not $userPath) { $userPath = '' }
+    if (($userPath -split ';') -notcontains $dir) {
+        [Environment]::SetEnvironmentVariable('Path', ($userPath.TrimEnd(';') + ';' + $dir).TrimStart(';'), 'User')
+    }
+    Refresh-Path
+}
 
 Say "`ncreaper installer`n"
+
+# An administrator window can belong to a different account, and then creaper would
+# install for that account instead of yours.
+$identity = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
+if ($identity.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    Warn "This PowerShell is running as administrator. creaper installs for one user, so a normal"
+    Warn "(non-administrator) PowerShell window is better."
+    $answer = Read-Host "Continue anyway? [y/N]"
+    if ($answer -notmatch '^[yY]') { return }
+}
 
 # REAPER has to have been opened once, so its settings folder exists.
 $reaper = Join-Path $env:APPDATA 'REAPER'
@@ -81,18 +99,35 @@ if ($LASTEXITCODE -ne 0) {
     return
 }
 
-# Claude Code runs the chat panel on your own Claude account.
+# Claude Code runs the chat panel on your own Claude account. Its installer puts it in
+# ~\.local\bin but doesn't always add that to PATH, and then `claude` isn't recognized.
+$claudeBin = Join-Path $env:USERPROFILE '.local\bin'
 $haveClaude = (Get-Command claude -ErrorAction SilentlyContinue) -or
-              (Test-Path (Join-Path $env:USERPROFILE '.local\bin\claude.exe'))
+              (Test-Path (Join-Path $claudeBin 'claude.exe'))
 if (-not $haveClaude) {
     Write-Host ""
     Write-Host "creaper's chat panel runs on Claude Code, signed in with your own Claude account."
     $answer = Read-Host "Install Claude Code now, with Anthropic's official installer? [Y/n]"
     if ($answer -eq '' -or $answer -match '^[yY]') {
-        Invoke-RestMethod https://claude.ai/install.ps1 | Invoke-Expression
+        # In its own PowerShell: that installer calls `exit` when something fails, which
+        # would close this window, and it turns on strict mode for the whole session.
+        powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://claude.ai/install.ps1 | iex"
+        if ($LASTEXITCODE -ne 0) {
+            Warn "Claude Code didn't install. You can install it later from https://claude.com/claude-code, then run this again."
+        }
         Refresh-Path
     }
 }
+if ((Test-Path (Join-Path $claudeBin 'claude.exe')) -and -not (Get-Command claude -ErrorAction SilentlyContinue)) {
+    Add-UserPath $claudeBin
+}
+
+# A `creaper` command for new terminals (creaper doctor, creaper install-bridge ...),
+# without putting the environment's own python.exe on PATH.
+$bin = Join-Path $root 'bin'
+New-Item -ItemType Directory -Force -Path $bin | Out-Null
+Set-Content -Path (Join-Path $bin 'creaper.cmd') -Encoding ASCII -Value "@`"$venv\Scripts\creaper.exe`" %*"
+Add-UserPath $bin
 
 # Everything else: ReaImGui, creaper's scripts in REAPER, Claude Desktop / Claude Code.
 & (Join-Path $venv 'Scripts\creaper.exe') setup
@@ -101,4 +136,5 @@ Write-Host ""
 Say "Done. Last steps:"
 Write-Host "  1. If you haven't signed in to Claude Code yet: open a new terminal and run  claude"
 Write-Host "  2. Restart REAPER. The creaper panel opens by itself."
+Write-Host "  3. To check the connection, run  creaper doctor  in a new terminal."
 Write-Host "To update creaper later, run this installer again."

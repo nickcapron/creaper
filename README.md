@@ -170,11 +170,16 @@ You need **REAPER 7** (opened at least once) and a **Claude** account.
 
 ### Windows: one command
 
-Open PowerShell and run:
+Open **PowerShell** (Start menu → type `powershell` → Enter; not *Run as administrator*,
+so creaper installs for your own account), paste this whole line and press Enter:
 
 ```powershell
 irm https://raw.githubusercontent.com/nickcapron/creaper/main/install.ps1 | iex
 ```
+
+Copy it in one piece: `irm` on its own asks for a `Uri:`, and without `| iex` at the end
+PowerShell only prints the installer instead of running it. When it's running you'll
+see **creaper installer**, then *Installing creaper…*, then a few questions.
 
 It installs Python if needed, puts creaper in its own folder (`%LOCALAPPDATA%\creaper`),
 offers to install Claude Code with Anthropic's official installer, then runs
@@ -185,8 +190,9 @@ offers to install Claude Code with Anthropic's official installer, then runs
 - installs creaper's scripts in REAPER and starts them with REAPER;
 - offers to connect creaper to **Claude Desktop** and to **Claude Code**.
 
-Then sign in to Claude Code once (run `claude` in a new terminal) and restart REAPER:
-the creaper panel opens by itself. Run the same command again to update.
+It also adds a `creaper` command (`creaper doctor`, `creaper install-bridge` …) for new
+terminals. Then sign in to Claude Code once (run `claude` in a new terminal) and restart
+REAPER: the creaper panel opens by itself. Run the same command again to update.
 
 The installer never asks for a Claude password or key; signing in happens in Claude's
 own apps. To see what it does first, [read install.ps1](install.ps1).
@@ -206,7 +212,7 @@ individual steps are below if you'd rather do them yourself.
 **1. Install creaper** (manual steps)
 
 ```bash
-pip install git+https://github.com/nickcapron/creaper
+pip install https://github.com/nickcapron/creaper/archive/refs/heads/main.zip
 ```
 
 **2. Install the bridge script into REAPER**
@@ -360,8 +366,9 @@ HFC) are for non-commercial use only.
 - **Portable REAPER installs:** set `CREAPER_REAPER_RESOURCE_PATH` to the portable
   folder for both `creaper install-bridge --reaper-resource-path ...` and the MCP
   server's environment.
-- **Updating:** `pip install --upgrade git+https://github.com/nickcapron/creaper`, then
-  `creaper install-bridge` again and restart the bridge. A newly started bridge takes
+- **Updating:** on Windows, run the installer command again. Otherwise
+  `pip install --upgrade https://github.com/nickcapron/creaper/archive/refs/heads/main.zip`,
+  then `creaper install-bridge` again and restart the bridge. A newly started bridge takes
   over from a running one, so you don't need to restart REAPER.
 
 ## Troubleshooting
@@ -374,6 +381,7 @@ HFC) are for non-commercial use only.
 | A plugin parameter won't take a `display_value` | It may show text instead; use `display_text`, or the raw 0–1 `value`. |
 | Drums land on the wrong sounds | The kit doesn't follow General MIDI or report note names. Tell Claude which note each drum is on; it saves a drum map for that instrument. |
 | The chat panel says it needs ReaImGui | Install ReaImGui through ReaPack (see *Chat inside REAPER*) and restart REAPER. |
+| `claude` or `creaper` "is not recognized" | Open a new PowerShell window (PATH changes only reach new ones). Still not found? Run the installer again: it adds both to your PATH. |
 | The chat panel says Claude Code wasn't found | Install Claude Code, run `claude` once to sign in, then `creaper install-bridge` again. |
 | An analysis of a hardware/Overbridge track is silent | Real-time-only plugins can't render offline. Record their output to an audio track first. |
 
