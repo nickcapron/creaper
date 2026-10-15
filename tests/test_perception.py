@@ -93,3 +93,29 @@ def test_ending_profile_tells_a_fade_a_silence_and_a_cut_apart():
     t = np.arange(16 * FS) / FS
     dying = _tone(16) * np.exp(-np.maximum(0, t - 8) * 1.5)
     assert not perception.ending_profile(dying, FS)["abrupt"]
+
+
+def test_check_ending_measures_one_region(monkeypatch, tmp_path):
+    import soundfile as sf
+    from creaper import ear_tools
+    renders = tmp_path / "renders"
+    renders.mkdir()
+    monkeypatch.setattr(ear_tools.bridge, "directory", tmp_path)
+    asked = {}
+
+    def fake_call(cmd, **kw):
+        if cmd == "get_project_overview":
+            return {"length": {"seconds": 60.0}, "regions": [
+                {"name": "shipment_arrived", "start": {"seconds": 0.0}, "end": {"seconds": 8.0}},
+                {"name": "country_falls", "start": {"seconds": 20.0}, "end": {"seconds": 32.0}}]}
+        asked.update(kw)
+        f = renders / "r.wav"
+        hit = _tone(12)                     # a cue that stops while still sounding: a stinger's hard end
+        sf.write(str(f), np.stack([hit, hit], axis=1), FS)
+        return {"files": [str(f)]}
+    monkeypatch.setattr(ear_tools, "call", fake_call)
+    r = ear_tools.check_ending(kind="stinger", region="Country_Falls")
+    assert (asked["start_seconds"], asked["end_seconds"]) == (20.0, 32.0)
+    assert r["region"] == "Country_Falls" and r["length_seconds"] == 12.0 and r["verdict"] == "fine for its use"
+    with pytest.raises(ValueError, match="regions: shipment_arrived, country_falls"):
+        ear_tools.check_ending(kind="stinger", region="tdi_founded")

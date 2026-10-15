@@ -241,17 +241,27 @@ def check_ending(
         "continuous: the piece flows into the next one (a game crossfading tracks, a DJ mix): it must not fade out "
         "or end in silence. ending: a real ending that dies away. stinger: a short cue with a hard stop"))] = "continuous",
     tail_seconds: Annotated[float, Field(ge=0, le=30, description="The tail you'll export with (export_mix tail_seconds)")] = 0.0,
+    region: Annotated[str | None, Field(description=(
+        "Check this region (by name) instead of the whole project's end, e.g. one of several stingers in one "
+        "project, exported with export_mix region="))] = None,
 ) -> dict:
     """Checks how the song ends against how it will be used, by rendering its last
     16 seconds (plus the export tail) and measuring the level: a fade-out, a quiet or
     silent end, a tail cut off mid-ring, or a stinger that lingers. Also reports the
-    song's length."""
+    song's length. With region, checks that region (its length and its end) instead."""
     overview = call("get_project_overview")
-    length = overview["length"]["seconds"]
+    start, end = 0.0, overview["length"]["seconds"]
+    if region:
+        found = [r for r in overview.get("regions", []) if r.get("name", "").lower() == region.lower()]
+        if not found:
+            names = ", ".join(r["name"] for r in overview.get("regions", [])) or "none"
+            raise ValueError(f"there's no region called '{region}' (regions: {names})")
+        start, end = found[0]["start"]["seconds"], found[0]["end"]["seconds"]
+    length = end - start
     if length <= 0:
-        raise ValueError("the project is empty")
+        raise ValueError("the project is empty" if not region else f"the region '{region}' is empty")
     window = min(16.0, length)
-    render = call("render_audio", timeout=600.0, track="master", start_seconds=max(0.0, length - window),
+    render = call("render_audio", timeout=600.0, track="master", start_seconds=end - window, end_seconds=end,
                   tail_seconds=tail_seconds)
     renders = (bridge.directory / "renders").resolve()
     try:
@@ -264,7 +274,8 @@ def check_ending(
             Path(f).unlink(missing_ok=True)
     prof = perception.ending_profile(audio, int(fs))
     total = length + tail_seconds
-    out: dict = {"kind": kind, "length": f"{int(total // 60)}:{int(total % 60):02d}", **prof}
+    out: dict = {"kind": kind, "length": f"{int(total // 60)}:{int(total % 60):02d}",
+                 **({"region": region, "length_seconds": round(total, 2)} if region else {}), **prof}
     problems, tips = [], []
     drop = prof.get("end_vs_loudest_db")
     silence = prof.get("trailing_silence_s", 0)
