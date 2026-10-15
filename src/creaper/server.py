@@ -257,6 +257,24 @@ Vocals: use the best source the user has, and say which you used and why:
    Carrier track's item.
 Choir and vocal-pad instruments cover wordless vocals.
 
+Sound effects (games, apps, video):
+- One project per family of sounds. Put each sound and each variation in its own
+  region named exactly as its file (shot_01, shot_02 ...), with a little room after it
+  for its tail and a gap before the next, then export_regions writes every region as
+  its own file in one pass: mono one-shots (stereo by pattern, e.g. crowd_*), the start
+  trimmed to the sound, DC removed, peak at -1 dBFS, a warning when a region cuts a
+  tail off. Loops (beds, room tones, skating): run the sound past the region's end by
+  the crossfade length and list them in loops=; they come out seamless.
+- Design by layers: a transient (a click, stick, woodblock or noise burst), a body (a
+  pitched thump, a low sine drop, a sampled impact) and a tail (a short room, a
+  rattle); shape each with EQ, pitch, envelopes and compression. Short sounds need a
+  sharp start; check them with show_spectrogram and measure_tracks.
+- Variations differ for real: a different layer or sample, pitch moved 1-2 semitones,
+  a different envelope or weight, so a sound heard often doesn't machine-gun.
+- Real-world sounds (crowds, footsteps, skates, paper) need recordings: use the
+  user's samples or recordings they provide; synthesized versions sound fake, so
+  say so rather than pass them off.
+
 Recording and editing:
 - list_inputs shows the audio interface's inputs and the MIDI devices. To record:
   set_record_settings (input, arm, monitoring), then record (a start bar and an
@@ -1806,6 +1824,7 @@ from . import vocal_tools  # noqa: E402,F401  (robot vocals: text-to-speech thro
 from . import ear_tools  # noqa: E402,F401  (vocal clarity, tuning, spectrograms)
 from . import mix_tools  # noqa: E402,F401  (auto_mix)
 from . import motif_tools  # noqa: E402,F401  (motifs reused across songs)
+from . import sfx_tools  # noqa: E402,F401  (sound effects: one file per region)
 
 
 def run() -> None:
