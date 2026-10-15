@@ -181,11 +181,14 @@ def get_plugin_catalog(
     role: Annotated[str | None, Field(description=(
         "e.g. reverb, delay, compressor, limiter, eq/filter, saturation, distortion, modulation, stereo, pitch, "
         "gate/expander, pitched instrument, drum kit"))] = None,
-    kind: Literal["instrument", "effect"] | None = None,
+    kind: Annotated[Literal["instrument", "effect"] | None, Field(description="Only instruments or only effects")] = None,
     search: Annotated[str | None, Field(description="Words in the plugin name, developer or summary")] = None,
 ) -> dict:
-    """What creaper has learned about the user's plugins by testing them (scan_plugins):
-    each plugin's roles and a summary of what it does at default settings."""
+    """Shows what creaper measured about the user's plugins when it tested them with
+    scan_plugins: each plugin's roles (reverb, compressor, drum kit...) and a summary
+    of what it does at default settings. Use it to choose a plugin for a job by what
+    it does; list_installed_fx lists every installed plugin, tested or not, and
+    scan_plugins tests more. Read-only."""
     entries = []
     for load_as, e in plugin_catalog.all().items():
         if kind and e.get("kind") != kind:

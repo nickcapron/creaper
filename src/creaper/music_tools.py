@@ -158,9 +158,11 @@ def _write(item_id: str, notes: list[dict], replace: bool) -> dict:
 
 @tool(annotations=READ_ONLY)
 def get_scale(key: Annotated[str, Field(description="e.g. 'D dorian', 'F# major', 'A harmonic minor', 'E phrygian dominant'")]) -> dict:
-    """A key or mode explained: its notes spelled correctly, intervals, sound and uses,
-    the chords on each degree (triads and 7ths with Roman numerals and functions),
-    and the modes that share its notes."""
+    """Explains one key or mode: its notes spelled correctly, intervals, sound and
+    uses, the chords on each degree (triads and 7ths with Roman numerals and
+    functions), and the modes that share its notes. Use it to know which notes and
+    chords fit before writing; list_scales browses all the scales by family and
+    sound. Read-only."""
     k = harmony.parse_key(key)
     out: dict = {"key": k.name, "notes": k.spell_scale(), "intervals": _interval_names(k.scale),
                  "family": k.scale.family, "sound": k.scale.sound}
@@ -189,7 +191,10 @@ def get_scale(key: Annotated[str, Field(description="e.g. 'D dorian', 'F# major'
 
 @tool(annotations=READ_ONLY)
 def list_scales(family: Annotated[str | None, Field(description="diatonic mode, melodic minor mode, harmonic minor mode, heptatonic, pentatonic, hexatonic, symmetric, bebop, octatonic")] = None) -> dict:
-    """The scales and modes creaper knows, with what each sounds like."""
+    """Lists the scales and modes creaper knows (all of them, or one family), each
+    with its intervals, what it sounds like and its other names: for choosing a scale
+    by mood or finding a name creaper accepts. To spell one scale in a given key, use
+    get_scale. Read-only."""
     items = [s for s in scales_db.SCALE_LIST if not family or family.lower() in s.family]
     return {"count": len(items), "scales": [{"name": s.name, "family": s.family, "intervals": _interval_names(s),
                                              "sound": s.sound, **({"also": list(s.aliases)} if s.aliases else {})}
@@ -257,13 +262,15 @@ def suggest_progressions(
     genre: Annotated[str | None, Field(description="A genre from list_genres; its typical progressions come first")] = None,
     mood: Annotated[str | None, Field(description="e.g. uplifting, sad, dark, epic, dreamy, jazzy, nostalgic, menacing, romantic")] = None,
     length: Annotated[int, Field(ge=2, le=16, description="Chords in newly generated progressions")] = 4,
-    count: Annotated[int, Field(ge=1, le=20)] = 8,
-    sevenths: bool = False,
-    seed: int | None = None,
+    count: Annotated[int, Field(ge=1, le=20, description="How many progressions to suggest")] = 8,
+    sevenths: Annotated[bool, Field(description="Use seventh chords in generated progressions")] = False,
+    seed: Annotated[int | None, Field(description="Varies the generated progressions; same seed, same suggestions")] = None,
 ) -> dict:
-    """Chord progressions for a key: the genre's own idioms, famous named progressions
-    that fit the mood, and fresh ones generated from functional harmony. Each comes
-    with numerals, chord symbols in the key and what makes it work."""
+    """Suggests chord progressions for a key: the genre's own idioms, famous named
+    progressions that fit the mood, and fresh ones generated from functional
+    harmony. Each comes with numerals, chord symbols in the key and what makes it
+    work. Use it to choose chords before writing parts with add_chord_progression;
+    to rework chords you already have, use reharmonize. Read-only; writes nothing."""
     k = harmony.parse_key(key)
     out: list[dict] = []
     seen: set[str] = set()
@@ -314,10 +321,13 @@ def reharmonize(
     ] = ("sevenths", "secondary_dominants"),
     lengths: LengthsArg = None,
     amount: Annotated[float, Field(ge=0, le=1, description="How often optional changes are made")] = 0.7,
-    seed: int | None = None,
+    seed: Annotated[int | None, Field(description="Varies which optional changes are made; same seed, same result")] = None,
 ) -> dict:
-    """Reharmonizes a progression with jazz, soul, classical and film techniques,
-    keeping its length, and explains each change."""
+    """Reharmonizes an existing progression with jazz, soul, classical and film
+    techniques (tritone subs, secondary dominants, borrowed chords...), keeping its
+    length, and explains each change. Works on chord symbols, not on the project:
+    write the result with add_chord_progression. For new progressions from scratch,
+    use suggest_progressions. Read-only."""
     k = _key(key)
     parsed, _, k = _parse_list(chords, k)
     lens = lengths or [4.0] * len(parsed)
@@ -414,9 +424,12 @@ def list_genres(
     tempo: Annotated[float | None, Field(description="Genres that fit this BPM (or half/double)")] = None,
     mode: Annotated[str | None, Field(description="Genres that use this mode, e.g. dorian, phrygian")] = None,
 ) -> dict:
-    """Browse the genre library: every profile covers composition (modes, progressions,
+    """Browses and searches the library of genre profiles (by family, artist,
+    instrument, mood, tempo or mode) and returns the matching genres with their
+    family and tempo range. Every profile covers composition (modes, progressions,
     voicings, bass, melody), rhythm (groove, swing, feel), arrangement (form,
-    instruments, sound design) and mixing (loudness, tone, width)."""
+    instruments, sound design) and mixing (loudness, tone, width); get_genre_profile
+    shows one in full. Read-only."""
     found = genres.search(search, family, tempo, mode)
     families: dict[str, int] = {}
     for g in genres.GENRES:
@@ -486,13 +499,18 @@ def add_chord_progression(
     octave: Annotated[int, Field(ge=1, le=7, description="Register; 4 is around middle C")] = 4,
     bass_octave: Annotated[int | None, Field(ge=0, le=6, description="Also add the root (or slash bass) in this octave, e.g. 2")] = None,
     arp_rate: Annotated[float, Field(gt=0, le=4, description="Note length for arpeggio patterns in QN (0.25 = 16ths)")] = 0.5,
-    velocity: Annotated[int, Field(ge=1, le=127)] = 80,
+    velocity: Annotated[int, Field(ge=1, le=127, description="Note velocity, 1-127")] = 80,
     start: Annotated[float, Field(ge=0, description="Where the first chord starts, in QN from the item start")] = 0.0,
-    replace: bool = False,
-    seed: int | None = None,
+    replace: Annotated[bool, Field(description="Delete the item's existing notes first")] = False,
+    seed: Annotated[int | None, Field(description="Seeds the small random velocity variations; same seed, same part")] = None,
 ) -> dict:
-    """Writes a chord part from chord symbols or Roman numerals (with a key), in any
-    voicing and comping rhythm, with smooth voice leading. Returns the notes chosen."""
+    """Writes a chord part (pads, piano or guitar comping, stabs, arpeggios) into a
+    MIDI item from chord symbols or Roman numerals with a key, in the voicing and
+    comping rhythm you choose, with smooth voice leading between chords. Use it for
+    harmony parts; write_bassline and write_melody write the bass and lead over the
+    same chords, and add_midi_notes takes exact notes you've written yourself.
+    suggest_progressions or a genre profile can supply the chords. Returns each
+    chord's Roman numeral and the notes chosen."""
     k = _key(key)
     events, k = _events(chords, k, chord_length, start)
     voicings = composer.voice_chords([e.chord for e in events], voicing, octave, key=k)
@@ -518,14 +536,17 @@ def write_bassline(
         "walking (jazz quarters with chromatic approaches), 808 (trap), syncopated (funk/house), offbeat (trance/house), "
         "one_drop (reggae), tumbao (salsa, anticipated), arpeggio, pedal (tonic pedal), boogie, motown, alberti"))] = "root",
     key: KeyArg = None,
-    chord_length: Annotated[float, Field(gt=0)] = 4.0,
+    chord_length: Annotated[float, Field(gt=0, description="QN per chord when chords is a string")] = 4.0,
     octave: Annotated[int, Field(ge=0, le=4, description="2 puts the bass around C2")] = 2,
-    velocity: Annotated[int, Field(ge=1, le=127)] = 100,
-    start: Annotated[float, Field(ge=0)] = 0.0,
-    replace: bool = False,
-    seed: int | None = None,
+    velocity: Annotated[int, Field(ge=1, le=127, description="Note velocity, 1-127")] = 100,
+    start: Annotated[float, Field(ge=0, description="Where the bassline starts, in QN from the item start")] = 0.0,
+    replace: Annotated[bool, Field(description="Delete the item's existing notes first")] = False,
+    seed: Annotated[int | None, Field(description="Varies the line in styles with choices (walking, syncopated...); same seed, same line")] = None,
 ) -> dict:
-    """Writes a bassline that follows the chords in a chosen style."""
+    """Composes a bassline into a MIDI item that follows a chord progression in a
+    chosen style (walking, 808, one-drop, octaves, tumbao...), in the project's meter.
+    Use it to have creaper write the bass from chords; add_midi_notes takes a bass
+    line you've written note by note. Returns the key, the style and the first notes."""
     k = _key(key)
     events, k = _events(chords, k, chord_length, start)
     notes = composer.bassline(events, style, k, octave, meter=_project_meter(), velocity=velocity, seed=seed)
@@ -544,16 +565,19 @@ def write_melody(
     high: Annotated[str | int, Field(description="Highest note, e.g. G5")] = "G5",
     scale: Annotated[str | None, Field(description="Scale the melody uses, e.g. 'minor pentatonic', 'blues'; default: the key's")] = None,
     phrase_bars: Annotated[int, Field(ge=1, le=16, description="Phrase length: the motif repeats and the phrase closes every this many bars")] = 4,
-    syncopation: Annotated[float, Field(ge=0, le=1)] = 0.3,
-    chord_length: Annotated[float, Field(gt=0)] = 4.0,
-    velocity: Annotated[int, Field(ge=1, le=127)] = 92,
-    start: Annotated[float, Field(ge=0)] = 0.0,
-    replace: bool = False,
+    syncopation: Annotated[float, Field(ge=0, le=1, description="How often notes land off the beat, 0-1")] = 0.3,
+    chord_length: Annotated[float, Field(gt=0, description="QN per chord when chords is a string")] = 4.0,
+    velocity: Annotated[int, Field(ge=1, le=127, description="Note velocity, 1-127")] = 92,
+    start: Annotated[float, Field(ge=0, description="Where the melody starts, in QN from the item start")] = 0.0,
+    replace: Annotated[bool, Field(description="Delete the item's existing notes first")] = False,
     seed: Annotated[int | None, Field(description="Same seed, same melody; change it for another idea")] = None,
 ) -> dict:
-    """Composes a melody over chords: a rhythmic motif developed in phrases, chord tones
-    on strong beats, stepwise lines with leaps recovered, a high point, a half-close at
-    the end of the first phrase and the tonic at the end. Try several seeds."""
+    """Composes a melody into a MIDI item over a chord progression: a rhythmic motif
+    developed in phrases, chord tones on strong beats, stepwise lines with leaps
+    recovered, a high point, a half-close at the end of the first phrase and the
+    tonic at the end. Use it to have creaper invent a lead or topline; add_midi_notes
+    writes a melody you've worked out note by note, and place_motif reuses a saved
+    theme. Try several seeds. Returns the notes and the non-chord tones used."""
     k = _key(key)
     events, k = _events(chords, k, chord_length, start)
     notes = composer.melody(events, k, density, theory.note_to_midi(low), theory.note_to_midi(high), scale,
@@ -567,14 +591,16 @@ def write_melody(
 @tool()
 def add_genre_groove(
     item_id: ItemId,
-    genre: str,
+    genre: Annotated[str, Field(description="A genre from list_genres, e.g. 'house', 'boom bap', 'bossa nova'")],
     repeats: Annotated[int, Field(ge=1, le=256, description="Times to play the groove (it's 1, 2 or 4 bars)")] = 4,
-    humanize: Annotated[float, Field(ge=0, le=1)] = 0.15,
-    start: Annotated[float, Field(ge=0)] = 0.0,
-    replace: bool = False,
+    humanize: Annotated[float, Field(ge=0, le=1, description="Random velocity variation, 0-1")] = 0.15,
+    start: Annotated[float, Field(ge=0, description="Start in QN from the item start")] = 0.0,
+    replace: Annotated[bool, Field(description="Delete the item's existing notes first")] = False,
 ) -> dict:
-    """Programs a genre's signature drum groove (from its profile) on the track's drum
-    instrument, with the genre's swing."""
+    """Programs a genre's stock drum groove (from its genre profile, with the genre's
+    swing) on the track's drum instrument in one call: a quick, idiomatic starting
+    beat. For your own pattern, fills and variations use add_drum_pattern, which this
+    calls. Returns the lanes and notes used, and how drums work in that genre."""
     g = genres.find(genre)
     groove = g.groove
     result = add_drum_pattern(item_id=item_id, pattern=dict(groove["pattern"]), step=groove.get("step", 0.25),

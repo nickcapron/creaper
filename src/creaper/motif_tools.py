@@ -106,7 +106,9 @@ def save_motif(
 
 @tool(annotations=READ_ONLY)
 def list_motifs() -> dict:
-    """The motifs saved with save_motif, for place_motif."""
+    """Lists the motifs (signature themes) saved with save_motif, in any project: each
+    one's name, key, description, notes and length. Use it to pick a theme for
+    place_motif, which puts it into a song in that song's key. Read-only."""
     return {"motifs": [{"name": m["name"], "key": m["key"], "description": m.get("description"),
                         "notes": _names(m["notes"], m["key"]),
                         "length_qn": max(n["start"] + n["length"] for n in m["notes"])} for m in _load().values()]}

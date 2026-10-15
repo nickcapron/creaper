@@ -22,8 +22,10 @@ class TempoChange(BaseModel):
 
 @tool(annotations=READ_ONLY)
 def get_tempo_map() -> dict:
-    """The project's tempo and time-signature changes, with where each happens and
-    whether it ramps to the next."""
+    """Reads the project's tempo map: every tempo and time-signature change, with the
+    bar where each happens and whether it ramps to the next. Use it before writing
+    parts in a song with tempo or meter changes; set_tempo_map writes them and
+    set_tempo sets a single tempo for the whole song. Read-only."""
     return call("get_tempo_map")
 
 
@@ -90,13 +92,16 @@ def add_program_change(
     item_id: ItemId,
     program: Annotated[int | str, Field(description="1-128, or a General MIDI name like 'Electric Piano 1', 'String Ensemble 1'")],
     position: Annotated[float, Field(ge=0, description="QN from the item start")] = 0.0,
-    channel: Annotated[int, Field(ge=1, le=16)] = 1,
+    channel: Annotated[int, Field(ge=1, le=16, description="MIDI channel the instrument listens on")] = 1,
     bank_msb: Annotated[int | None, Field(ge=0, le=127, description="Bank select MSB (CC0), for synths with banks")] = None,
     bank_lsb: Annotated[int | None, Field(ge=0, le=127, description="Bank select LSB (CC32)")] = None,
 ) -> dict:
-    """Switches the sound of a MIDI instrument that follows program changes (General MIDI
-    synths, hardware synths through ReaControlMIDI, multitimbral plugins), with an
-    optional bank select first."""
+    """Writes a program change into a MIDI item, to switch the sound of an instrument
+    that follows program changes (General MIDI synths, hardware synths through
+    ReaControlMIDI, multitimbral plugins), with an optional bank select first. Most
+    plugin synths ignore these: for them, load_sound, list_fx_presets/update_fx or
+    set_fx_parameters change the sound. Returns the program number and its General
+    MIDI name."""
     number = _program_number(program)
     events = []
     if bank_msb is not None:
@@ -117,13 +122,15 @@ def get_midi_cc(
     item_id: ItemId,
     kind: Annotated[CCKind | None, Field(description="Only this kind of event")] = None,
     cc: Annotated[int | None, Field(ge=0, le=127, description="Only this controller number (1 mod wheel, 7 volume, 11 expression, 64 sustain)")] = None,
-    channel: Annotated[int | None, Field(ge=1, le=16)] = None,
+    channel: Annotated[int | None, Field(ge=1, le=16, description="Only events on this MIDI channel")] = None,
     start: Annotated[float | None, Field(description="From this QN position in the item")] = None,
     end: Annotated[float | None, Field(description="Up to this QN position")] = None,
-    limit: Annotated[int, Field(ge=1, le=20000)] = 2000,
+    limit: Annotated[int, Field(ge=1, le=20000, description="Most events to return")] = 2000,
 ) -> dict:
     """Reads a MIDI item's controller events: CCs (mod wheel, sustain, expression...),
-    pitch bend, program changes and aftertouch, with positions in QN."""
+    pitch bend, program changes and aftertouch, with positions in QN. The notes
+    themselves are read with get_midi_notes; add_midi_cc writes controllers and
+    delete_midi_cc clears them. Read-only."""
     return call("get_midi_cc", item_id=item_id, kind=kind, cc=cc, channel=channel, start=start, end=end, limit=limit)
 
 
@@ -168,5 +175,8 @@ def set_master_send(
     track: Annotated[str | int, Field(description="Track number or name")],
     enabled: Annotated[bool, Field(description="False: the track only plays through its sends (e.g. a pure sidechain trigger)")],
 ) -> dict:
-    """Turns a track's direct output to the master (or its parent folder) on or off."""
+    """Turns a track's direct output to the master (or its parent folder) on or off,
+    keeping its sends. Turn it off for a track that should only be heard through a
+    bus or used as a sidechain trigger; set_send manages the sends themselves and
+    get_routing shows the result. Returns the track's state."""
     return call("set_track_properties", track=track, main_send=enabled)

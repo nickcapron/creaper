@@ -505,10 +505,13 @@ def list_fx_presets(
 @tool(annotations=READ_ONLY)
 def get_instrument_notes(
     track: TrackRef,
-    channel: Annotated[int, Field(ge=1, le=16)] = 1,
+    channel: Annotated[int, Field(ge=1, le=16, description="MIDI channel to ask about; multitimbral instruments name each channel's notes separately")] = 1,
 ) -> dict:
-    """Note names the track's instrument reports (drum kits and samplers often name
-    their notes: 'Kick', 'Snare Rim'...), plus any saved drum map for it."""
+    """Shows which note plays what on a track's instrument: the note names it reports
+    (drum kits and samplers often name their notes: 'Kick', 'Snare Rim'...), any
+    saved drum map for it, and tips on how to play it. Use it before writing drums on
+    an unfamiliar kit; when the kit reports no useful names, map_drum_kit works the
+    layout out by ear. Read-only."""
     result = call("get_instrument_notes", track=track, channel=channel)
     for n in result["note_names"]:
         n["note"] = theory.midi_to_note(n["pitch"])
@@ -534,23 +537,28 @@ def get_midi_notes(item_id: ItemId) -> dict:
 
 @tool()
 def set_tempo(
-    bpm: Annotated[float | None, Field(gt=0, le=960)] = None,
+    bpm: Annotated[float | None, Field(gt=0, le=960, description="Tempo in beats per minute; omit to keep it")] = None,
     numerator: Annotated[int | None, Field(ge=1, le=64, description="Time signature top number")] = None,
     denominator: Annotated[Literal[1, 2, 4, 8, 16, 32] | None, Field(description="Time signature bottom number")] = None,
 ) -> dict:
-    """Sets the project's starting tempo and/or time signature."""
+    """Sets the project's starting tempo and/or time signature, i.e. the one tempo
+    the whole song uses. For tempo or meter changes partway through (a ritardando, a
+    bar of 7/8, a faster chorus), use set_tempo_map; get_tempo_map reads them.
+    Returns the tempo and time signature now in effect."""
     return call("set_tempo", bpm=bpm, numerator=numerator, denominator=denominator)
 
 
 @tool()
 def create_track(
-    name: str,
+    name: Annotated[str, Field(description="Track name, e.g. 'Bass', 'Lead Synth'")],
     instrument: Annotated[str | None, Field(description="Instrument plugin to load, e.g. 'Analog Lab V', 'Pigments', 'ReaSynth' (see list_installed_fx kind='instrument')")] = None,
     position: Annotated[int | None, Field(description="Track number it should become; default: last")] = None,
     color: Annotated[str | None, Field(description="#RRGGBB")] = None,
     show_instrument: Annotated[bool, Field(description="Open the instrument's window so the user can pick a sound")] = False,
 ) -> dict:
-    """Adds a track, optionally with an instrument so MIDI on it makes sound. For
+    """Adds one new track, optionally with an instrument plugin so MIDI on it makes
+    sound. For folders use create_folder, for submix buses create_bus, and for a
+    sampler built from audio files build_sampled_instrument or build_drum_kit. For
     instruments creaper knows, the result includes what they are and how they behave."""
     result = call("create_track", timeout=60.0, name=name, instrument=instrument, position=position,
                   color=color, show_instrument=show_instrument)
@@ -564,15 +572,18 @@ def create_track(
 @tool()
 def set_track_properties(
     track: TrackRef,
-    name: str | None = None,
+    name: Annotated[str | None, Field(description="New track name")] = None,
     volume_db: Annotated[float | None, Field(le=12, description="Fader level in dB (0 = unity)")] = None,
     pan: Annotated[float | None, Field(ge=-1, le=1, description="-1 = hard left, 0 = center, 1 = hard right")] = None,
-    mute: bool | None = None,
-    solo: bool | None = None,
+    mute: Annotated[bool | None, Field(description="True mutes the track, False unmutes it")] = None,
+    solo: Annotated[bool | None, Field(description="True solos the track, False unsolos it")] = None,
     color: Annotated[str | None, Field(description="#RRGGBB")] = None,
-    selected: bool | None = None,
+    selected: Annotated[bool | None, Field(description="Select (True) or deselect (False) the track")] = None,
 ) -> dict:
-    """Changes a track's name, fader, pan, mute, solo, color or selection."""
+    """Changes a track's own settings: name, fader level, pan, mute, solo, color or
+    selection. Only the arguments given change; the rest stay as they are. For effects
+    use add_fx/set_fx_parameters, for sends set_send, for folders create_folder, and
+    for whether it feeds the master set_master_send. Returns the track's new state."""
     return call("set_track_properties", track=track, name=name, volume_db=volume_db, pan=pan,
                 mute=mute, solo=solo, color=color, selected=selected)
 
@@ -588,32 +599,39 @@ def delete_track(track: Annotated[str | int, Field(description="Track number, or
 
 @tool()
 def add_marker(
-    name: str,
+    name: Annotated[str, Field(description="Marker or region name, e.g. 'Chorus', 'Drop', 'shot_01'")],
     bar: Annotated[float, Field(ge=1, description="Bar number, 1-based")],
     beat: Beat = None,
     end_bar: Annotated[float | None, Field(description="Give this to make a region (e.g. a song section) ending at this bar")] = None,
     color: Annotated[str | None, Field(description="#RRGGBB")] = None,
 ) -> dict:
-    """Adds a marker, or a region when end_bar is given (e.g. 'Chorus' from bar 17 to 25)."""
+    """Adds a marker at a point, or a region over a span when end_bar is given (e.g.
+    'Chorus' from bar 17 to 25). Regions name song sections and are what
+    export_regions turns into separate files (one sound effect per region).
+    edit_marker changes an existing one and delete_marker removes it."""
     return call("add_marker", name=name, start_bar=bar, start_beat=beat, end_bar=end_bar, color=color)
 
 
 @tool()
 def transport(
-    action: Literal["play", "stop", "pause", "go_to"],
+    action: Annotated[Literal["play", "stop", "pause", "go_to"], Field(description="play, stop, pause, or go_to (move the edit cursor to start_bar without playing)")],
     start_bar: Bar = None,
     start_beat: Beat = None,
     end_bar: Annotated[float | None, Field(description="With play: stop (or loop) here")] = None,
-    loop: bool = False,
+    loop: Annotated[bool, Field(description="With play and end_bar: repeat the range until stopped")] = False,
 ) -> dict:
-    """Plays, stops, pauses or moves the edit cursor. play with start_bar/end_bar lets
-    the user hear a section ('play bars 9 to 17')."""
+    """Controls REAPER's playback for the user to listen: plays, stops, pauses or
+    moves the edit cursor. play with start_bar/end_bar lets the user hear a section
+    ('play bars 9 to 17'). Playing doesn't let you hear: to check the sound yourself,
+    measure it with analyze_audio or show_spectrogram."""
     return call("transport", action=action, start_bar=start_bar, start_beat=start_beat, end_bar=end_bar, loop=loop)
 
 
 @tool()
-def undo(steps: Annotated[int, Field(ge=1, le=50)] = 1) -> dict:
-    """Undoes the most recent changes in REAPER (Claude's or the user's)."""
+def undo(steps: Annotated[int, Field(ge=1, le=50, description="How many undo steps to go back; each creaper tool call is one step")] = 1) -> dict:
+    """Undoes the most recent changes in REAPER, like Ctrl+Z: whatever was done last,
+    by Claude or by the user, one tool call per step. Use it to back out a change
+    that made things worse. Returns what was undone."""
     return call("undo", steps=steps)
 
 
@@ -658,11 +676,15 @@ def create_midi_item(
 @tool()
 def add_midi_notes(
     item_id: ItemId,
-    notes: list[Note],
+    notes: Annotated[list[Note], Field(description="The notes to write: pitch, start and length in quarter notes from the item start, optional velocity and channel")],
     replace: Annotated[bool, Field(description="Delete the item's existing notes first")] = False,
 ) -> dict:
-    """Writes notes into a MIDI item: melodies, basslines, arpeggios, anything. The item
-    grows to fit notes past its end."""
+    """Writes exact notes you specify into a MIDI item: a hook written note by note,
+    a riff, an arpeggio, any part you've worked out yourself. The item grows to fit
+    notes past its end. To have creaper compose a part instead, use write_melody,
+    write_bassline or add_chord_progression; for drums, add_drum_pattern. Returns how
+    many notes were added, the item's total note count, and where it now ends if it
+    grew."""
     payload = [
         {"pitch": theory.note_to_midi(n.pitch), "start": n.start, "length": n.length,
          "velocity": n.velocity, "channel": n.channel}
@@ -687,10 +709,13 @@ def add_drum_pattern(
     humanize: Annotated[float, Field(ge=0, le=1, description="Random velocity variation, 0-1")] = 0,
     start: Annotated[float, Field(ge=0, description="Start in QN from the item start")] = 0.0,
     channel: Annotated[int, Field(ge=1, le=16, description="MIDI channel; GM drums use 10")] = 10,
-    replace: bool = False,
+    replace: Annotated[bool, Field(description="Delete the item's existing notes first")] = False,
 ) -> dict:
-    """Programs drums step-sequencer style on whatever drum instrument the track has.
-    The result's 'lanes' shows which note each lane landed on and why."""
+    """Programs a drum pattern you write, step-sequencer style, on whatever drum
+    instrument the track has. Use it for your own beats, fills and variations; for a
+    genre's stock groove in one call, add_genre_groove. The result's 'lanes' shows
+    which note each lane landed on and why (the kit's own names, a saved drum map or
+    General MIDI), so a wrong drum is easy to spot."""
     context = call("get_instrument_notes", item_id=item_id, channel=channel)
     instrument = context.get("instrument")
     note_names = {n["pitch"]: n["name"] for n in context["note_names"]}
@@ -771,10 +796,14 @@ def delete_midi_notes(
 @tool()
 def add_midi_cc(
     item_id: ItemId,
-    events: list[CCEvent],
-    channel: Annotated[int, Field(ge=1, le=16)] = 1,
+    events: Annotated[list[CCEvent], Field(description="Controller events, each with a position in quarter notes, a controller and a value")],
+    channel: Annotated[int, Field(ge=1, le=16, description="MIDI channel the events go on; match the notes' channel")] = 1,
 ) -> dict:
-    """Adds controller events: sustain pedal, mod wheel, expression swells, pitch bend."""
+    """Adds MIDI controller events inside a MIDI item: sustain pedal, mod wheel,
+    expression swells, pitch bend, aftertouch. They travel with the notes to the
+    instrument. To move a mixer or plugin setting over time (volume, pan, filter
+    cutoff), use write_automation instead; get_midi_cc reads existing controllers
+    and delete_midi_cc clears them. Returns how many events were added."""
     return call("add_midi_cc", item_id=item_id, channel=channel, events=[e.model_dump() for e in events])
 
 
@@ -788,8 +817,11 @@ def add_fx(
     position: Annotated[int | None, Field(ge=1, description="Chain position (1 = first); default: end")] = None,
     show: Annotated[bool, Field(description="Open the plugin's window")] = False,
 ) -> dict:
-    """Adds a plugin to a track's FX chain (use 'master' for the master bus). For
-    plugins creaper knows, the result includes how they work."""
+    """Adds one plugin (an effect, or an instrument) to a track's FX chain; use
+    'master' for the master bus. Then shape it with set_fx_parameters. For whole
+    chains in one call use the jobs instead: add_vocal_chain, master_to_target,
+    setup_sidechain, add_parallel_compression. For plugins creaper knows, the result
+    includes how they work."""
     result = call("add_fx", timeout=60.0, track=track, name=fx_name, position=position, show=show)
     profile = plugin_profiles.find_profile(result.get("name"))
     if profile:
@@ -807,7 +839,9 @@ def set_fx_parameter(
     value: Annotated[float | None, Field(ge=0, le=1, description="Raw normalized value 0-1")] = None,
 ) -> dict:
     """Sets one FX parameter in the plugin's own terms; creaper finds the setting that
-    displays that number or text. Returns what the plugin now displays."""
+    displays that number or text. For more than one change on the same plugin, use
+    set_fx_parameters (one call, one undo step); get_fx_parameters lists a plugin's
+    parameters. Returns what the plugin now displays."""
     return call("set_fx_parameter", track=track, fx=fx, parameter=parameter, value=value,
                 display_value=display_value, display_text=display_text)
 
@@ -833,7 +867,11 @@ def update_fx(
     preset_index: Annotated[int | None, Field(ge=1, description="Preset number from list_fx_presets, instead of the name")] = None,
     show: Annotated[bool | None, Field(description="Open (true) or close (false) the plugin window")] = None,
 ) -> dict:
-    """Bypasses or enables an FX, loads a preset, or opens its window for the user."""
+    """Changes a plugin already on a track as a whole: bypasses or re-enables it,
+    loads one of its presets, or opens or closes its window so the user can click
+    something. Only the arguments given change. To change individual settings use
+    set_fx_parameter(s); to add or remove a plugin, add_fx/remove_fx. Returns the
+    plugin's name, whether it's enabled and the preset loaded."""
     return call("update_fx", track=track, fx=fx, enabled=enabled, preset=preset,
                 preset_index=preset_index, show=show)
 
@@ -845,8 +883,10 @@ def split_instrument_outputs(
     outputs: Annotated[list[str | int] | None, Field(description="Only these outputs, by name ('Track 3') or pair number (2 = outputs 3/4); default: all")] = None,
 ) -> dict:
     """Gives each stereo output of a multi-output instrument its own track (drum
-    machines, Elektron Overbridge, multitimbral synths, samplers). The main pair stays
-    on the instrument's track; new tracks are named after the plugin's outputs."""
+    machines, Elektron Overbridge, multitimbral synths, samplers), so each drum or
+    part can be mixed and measured separately. The main pair stays on the
+    instrument's track; new tracks are named after the plugin's outputs, and the MIDI
+    stays on the original track. Returns the new tracks."""
     return call("split_instrument_outputs", track=track, fx=fx, outputs=outputs)
 
 
@@ -887,9 +927,13 @@ def list_sounds(
     search: Annotated[str | None, Field(description="Words to match in names, tags, descriptions, e.g. 'dark pad'")] = None,
     tag: Annotated[str | None, Field(description="Only sounds with this tag")] = None,
     plugin: Annotated[str | None, Field(description="Only sounds from this plugin, e.g. 'Mini V3'")] = None,
-    kind: Literal["instrument", "effect"] | None = None,
+    kind: Annotated[Literal["instrument", "effect"] | None, Field(description="Only instrument sounds or only effect settings")] = None,
 ) -> dict:
-    """Browses the user's sound library. Check here before designing a sound from scratch."""
+    """Browses the user's own sound library: plugin sounds saved with save_sound, with
+    their tags and descriptions. Check here before designing a sound from scratch;
+    load_sound puts one on a track. (Audio files are searched with find_samples, and
+    plugin presets listed with list_fx_presets.) Returns the matching sounds and every
+    tag in use. Read-only."""
     matches = sound_library.search(search, tag, plugin, kind)
     tag_counts: dict[str, int] = {}
     for entry in sound_library.search():
@@ -925,20 +969,25 @@ def load_sound(
 
 @tool()
 def update_sound(
-    name: str,
-    new_name: str | None = None,
+    name: Annotated[str, Field(description="The saved sound's name, as list_sounds shows it")],
+    new_name: Annotated[str | None, Field(description="Rename the sound to this")] = None,
     tags: Annotated[list[str] | None, Field(description="Replace all tags")] = None,
     add_tags: Annotated[list[str] | None, Field(description="Add these tags")] = None,
-    description: str | None = None,
+    description: Annotated[str | None, Field(description="Replace the sound's description")] = None,
 ) -> dict:
-    """Renames a saved sound or changes its tags or description."""
+    """Edits a saved sound's library entry: renames it or changes its tags or
+    description. The sound itself (the plugin state) is untouched: to change the
+    sound, load_sound it, adjust it, and save_sound it again. delete_sound removes it.
+    Returns the updated entry."""
     return describe_sound(sound_library.update(name, new_name=new_name, tags=tags, add_tags=add_tags,
                                                description=description))
 
 
 @tool(annotations=DESTRUCTIVE)
 def delete_sound(name: Annotated[str, Field(description="The sound's exact name")]) -> dict:
-    """Deletes a sound from the library. This can't be undone."""
+    """Permanently deletes a saved sound from the user's sound library, after asking
+    the user. This can't be undone, and doesn't touch any track already using the
+    sound. To rename or retag it instead, use update_sound. Returns the deleted name."""
     _, entry = sound_library.find(name)
     confirm_with_user(f"delete \"{entry['name']}\" from your sound library (this can't be undone)")
     sound_library.delete(name)
@@ -947,7 +996,8 @@ def delete_sound(name: Annotated[str, Field(description="The sound's exact name"
 
 @tool(annotations=DESTRUCTIVE)
 def remove_fx(track: TrackRef, fx: FxRef) -> dict:
-    """Removes an FX from a track's chain."""
+    """Removes one plugin from a track's FX chain, with its settings (undoable). To
+    switch it off but keep its settings, bypass it with update_fx(enabled=False)."""
     return call("remove_fx", track=track, fx=fx)
 
 
@@ -955,13 +1005,19 @@ def remove_fx(track: TrackRef, fx: FxRef) -> dict:
 def set_send(
     source: TrackRef,
     destination: TrackRef,
-    volume_db: float | None = None,
-    pan: Annotated[float | None, Field(ge=-1, le=1)] = None,
-    mute: bool | None = None,
-    mode: Literal["post-fader", "pre-fx", "post-fx"] | None = None,
-    remove: bool = False,
+    volume_db: Annotated[float | None, Field(description="Send level in dB (0 = unity)")] = None,
+    pan: Annotated[float | None, Field(ge=-1, le=1, description="Send pan: -1 = left, 0 = center, 1 = right")] = None,
+    mute: Annotated[bool | None, Field(description="Mute (True) or unmute (False) the send")] = None,
+    mode: Annotated[Literal["post-fader", "pre-fx", "post-fx"] | None, Field(description=(
+        "Where the send taps the track: post-fader (follows the fader; usual for reverb and delay), "
+        "pre-fx (the raw input), or post-fx (after the effects, before the fader)"))] = None,
+    remove: Annotated[bool, Field(description="Delete the send instead")] = False,
 ) -> dict:
-    """Creates or adjusts a send (e.g. vocals to a reverb bus), or removes it."""
+    """Creates a send from one track to another (e.g. vocals to a reverb bus), adjusts
+    an existing one, or removes it. Only the arguments given change. For one-call
+    setups use the jobs instead: setup_sidechain (ducking), create_bus (submixes),
+    add_parallel_compression; get_routing shows every send. Returns the send's
+    settings, or that it was removed."""
     return call("set_send", source=source, destination=destination, volume_db=volume_db,
                 pan=pan, mute=mute, mode=mode, remove=remove)
 
@@ -975,10 +1031,13 @@ def analyze_audio(
     start_bar: Bar = None,
     end_bar: Annotated[float | None, Field(description="Bar to stop at; default: end of project")] = None,
 ) -> dict:
-    """Renders the mix or one track and measures it: integrated/short-term loudness
-    (LUFS), loudness range, true peak, RMS, crest factor, clipping, stereo correlation
-    (including the low end), and frequency balance by band and octave. Rendering runs
-    faster than real time but takes a moment for long ranges."""
+    """Renders the mix or one track and measures it in depth: integrated/short-term
+    loudness (LUFS), loudness range, true peak, RMS, crest factor, clipping, stereo
+    correlation (including the low end), and frequency balance by band and octave.
+    Use it for the full numbers on one thing (the master, or a single track); to
+    balance many tracks use measure_tracks (one pass for all), and to judge the mix
+    against a genre, compare_mix_to_style. Rendering runs faster than real time but
+    takes a moment for long ranges. Read-only."""
     render = call("render_audio", timeout=900.0, track=track, start_bar=start_bar, end_bar=end_bar)
     # Only ever read and delete files in creaper's own render folder.
     renders = (bridge.directory / "renders").resolve()
@@ -1107,11 +1166,13 @@ def write_automation(
 def read_automation(
     track: TrackRef,
     target: Annotated[Literal["volume", "pan", "fx"] | None, Field(description="Leave empty to list the track's envelopes")] = None,
-    fx: str | int | None = None,
-    parameter: str | int | None = None,
+    fx: Annotated[str | int | None, Field(description="With target 'fx': the plugin, by chain position or name")] = None,
+    parameter: Annotated[str | int | None, Field(description="With target 'fx': the parameter, by number or name")] = None,
 ) -> dict:
-    """Reads a track's automation points (bars/beats with values in real units), or
-    lists which envelopes it has."""
+    """Reads a track's automation: the points of one envelope (bars/beats with
+    values in real units), or, with no target, which envelopes the track has. Use it
+    before changing automation; write_automation writes points, ramps or LFOs and
+    clear_automation removes them. Read-only."""
     return call("read_automation", track=track, target=_target(target, fx, parameter) if target else None)
 
 
@@ -1137,22 +1198,27 @@ def edit_item(
     item_id: Annotated[str, Field(description='Item id (audio or MIDI) from get_track_details, or "selected"')],
     start_bar: Annotated[float | None, Field(ge=1, description="Move the item to this bar")] = None,
     start_beat: Beat = None,
-    length_bars: Annotated[float | None, Field(gt=0)] = None,
-    length_qn: Annotated[float | None, Field(gt=0)] = None,
+    length_bars: Annotated[float | None, Field(gt=0, description="New length in bars, from the item's start")] = None,
+    length_qn: Annotated[float | None, Field(gt=0, description="New length in quarter notes, instead of bars")] = None,
     trim_start_seconds: Annotated[float | None, Field(description="Trim this much off the start, keeping the content in place (negative extends)")] = None,
-    fade_in_seconds: Annotated[float | None, Field(ge=0)] = None,
-    fade_out_seconds: Annotated[float | None, Field(ge=0)] = None,
-    volume_db: float | None = None,
+    fade_in_seconds: Annotated[float | None, Field(ge=0, description="Fade-in length; 0 removes it")] = None,
+    fade_out_seconds: Annotated[float | None, Field(ge=0, description="Fade-out length; 0 removes it")] = None,
+    volume_db: Annotated[float | None, Field(description="The item's own gain in dB (0 = unchanged level), separate from the track fader")] = None,
     pitch_semitones: Annotated[float | None, Field(ge=-48, le=48, description="Audio items: transpose")] = None,
     playrate: Annotated[float | None, Field(gt=0, le=16, description="Audio items: speed, 1 = normal")] = None,
     preserve_pitch: Annotated[bool | None, Field(description="Audio items: keep pitch when changing playrate")] = None,
-    mute: bool | None = None,
+    mute: Annotated[bool | None, Field(description="Mute (True) or unmute (False) just this item")] = None,
     loop: Annotated[bool | None, Field(description="Loop the source when the item is longer than it")] = None,
-    name: str | None = None,
+    name: Annotated[str | None, Field(description="New name for the item's active take")] = None,
     color: Annotated[str | None, Field(description="#RRGGBB")] = None,
     track: Annotated[str | int | None, Field(description="Move the item to this track")] = None,
 ) -> dict:
-    """Moves, trims, fades, re-pitches or otherwise edits an audio or MIDI item."""
+    """Edits one audio or MIDI item as a clip: moves it (in time or to another track),
+    changes its length, trims its start, sets fades, item gain, mute, name or color,
+    and for audio re-pitches or speeds it up. Only the arguments given change. The
+    notes inside a MIDI item are edited with edit_midi_notes instead; split_item,
+    duplicate_item and delete_item do those jobs. Returns the item's new position,
+    length and settings."""
     return call("edit_item", item_id=item_id, start_bar=start_bar, start_beat=start_beat, length_bars=length_bars,
                 length_qn=length_qn, trim_start_seconds=trim_start_seconds, fade_in_seconds=fade_in_seconds,
                 fade_out_seconds=fade_out_seconds, volume_db=volume_db, pitch_semitones=pitch_semitones,
@@ -1162,29 +1228,34 @@ def edit_item(
 
 @tool()
 def split_item(
-    item_id: ItemId,
-    at_bar: Annotated[float, Field(ge=1)],
+    item_id: Annotated[str, Field(description='Item id (audio or MIDI) from get_track_details, or "selected"')],
+    at_bar: Annotated[float, Field(ge=1, description="Bar to cut at, 1-based")],
     at_beat: Beat = None,
 ) -> dict:
-    """Splits an item in two at a bar/beat; returns both halves' ids."""
+    """Cuts one audio or MIDI item in two at a bar/beat, e.g. to treat part of a clip
+    differently or delete a section of it. Returns both halves' ids, for edit_item,
+    delete_item or duplicate_item."""
     return call("split_item", item_id=item_id, at_bar=at_bar, at_beat=at_beat)
 
 
 @tool()
 def duplicate_item(
-    item_id: ItemId,
-    count: Annotated[int, Field(ge=1, le=256)] = 1,
+    item_id: Annotated[str, Field(description='Item id (audio or MIDI) from get_track_details, or "selected"')],
+    count: Annotated[int, Field(ge=1, le=256, description="How many copies to make")] = 1,
     start_bar: Annotated[float | None, Field(ge=1, description="Where the first copy goes; default: right after the item")] = None,
     start_beat: Beat = None,
 ) -> dict:
-    """Copies an item (e.g. repeat a 4-bar loop, or reuse the chorus). Copies are
-    placed back to back."""
+    """Copies an audio or MIDI item on the same track (e.g. repeat a 4-bar loop, or
+    reuse the chorus). Copies are placed back to back; vary them afterwards so
+    sections keep developing. Returns the copies' ids and positions."""
     return call("duplicate_item", item_id=item_id, count=count, start_bar=start_bar, start_beat=start_beat)
 
 
 @tool(annotations=DESTRUCTIVE)
-def delete_item(item_id: ItemId) -> dict:
-    """Deletes an item (undoable)."""
+def delete_item(item_id: Annotated[str, Field(description='Item id (audio or MIDI) from get_track_details, or "selected"')]) -> dict:
+    """Deletes one audio or MIDI item and its contents from its track (undoable with
+    undo). To remove only some notes from a MIDI item, use delete_midi_notes; to mute
+    an item without deleting it, edit_item(mute=True). Returns what was deleted."""
     return call("delete_item", item_id=item_id)
 
 
@@ -1195,7 +1266,10 @@ def insert_audio_file(
     start_bar: Annotated[float | None, Field(ge=1, description="Default: the edit cursor")] = None,
     start_beat: Beat = None,
 ) -> dict:
-    """Imports an audio or MIDI file onto a track."""
+    """Imports an audio or MIDI file from disk onto a track as a new item, as is: at
+    its own tempo and pitch. For loops that should be stretched to the project tempo
+    and moved into key, use place_loop; find_samples searches the sample folders.
+    Returns the new item's id, position and length."""
     return call("insert_audio_file", timeout=120.0, path=path, track=track, start_bar=start_bar, start_beat=start_beat)
 
 
@@ -1388,8 +1462,10 @@ def add_parallel_compression(
     blend_db: Annotated[float, Field(le=0, description="Level of the crushed copy under the original")] = -10,
     compressor: Annotated[str | None, Field(description="Default: ReaComp, set up to squash hard")] = None,
 ) -> dict:
-    """New York-style parallel compression: a bus with a heavily compressed copy of the
-    track, blended underneath the untouched original."""
+    """Sets up New York-style parallel compression on a track in one call: a new bus
+    with a heavily compressed copy of the track, blended underneath the untouched
+    original (adds punch and density without squashing the transients). For plain
+    compression add a compressor with add_fx instead. Returns the bus and its level."""
     info = call("describe_track", track=track)
     bus = call("create_bus", name=f"{info['name']} Parallel", tracks=[info["number"]], keep_main_send=True,
                fx=[compressor or "ReaComp"])
@@ -1692,13 +1768,17 @@ def get_plugin_profile(
 
 @tool(annotations=READ_ONLY)
 def compare_mix_to_style(
-    style: str,
+    style: Annotated[str, Field(description="A genre from list_genres, e.g. 'house', 'trap', 'jazz'")],
     track: Annotated[str | int, Field(description='"master" for the mix')] = "master",
     start_bar: Bar = None,
     end_bar: Annotated[float | None, Field(description="Default: end of project")] = None,
 ) -> dict:
-    """Measures the mix and compares it with a style profile: loudness, true peak,
-    dynamics and low-end mono get verdicts; low end and tone are reported to judge by ear."""
+    """Judges a mix against a genre's targets: measures it (as analyze_audio does) and
+    gives pass/fail verdicts on loudness, true peak, dynamics and low-end mono, and
+    reports low end and tone against the genre to judge by ear. Use it to check a mix
+    is right for its style before mastering; analyze_audio gives the raw numbers
+    without a verdict, and measure_tracks compares the tracks with each other.
+    Read-only. Returns the genre's targets and the findings."""
     profile = styles.find_style(style)
     measured = analyze_audio(track=track, start_bar=start_bar, end_bar=end_bar)
     return {"style": styles.describe(profile), "findings": styles.compare(measured, profile),
@@ -1724,18 +1804,24 @@ def save_note(
 @tool(annotations=READ_ONLY)
 def find_notes(
     search: Annotated[str | None, Field(description="Words to look for, e.g. a plugin name or 'pad'")] = None,
-    topic: NoteTopic | None = None,
-    subject: str | None = None,
+    topic: Annotated[NoteTopic | None, Field(description="Only notes on this topic: plugin, preference, mix, sound, project, other")] = None,
+    subject: Annotated[str | None, Field(description="Only notes about this subject, e.g. a plugin name")] = None,
 ) -> dict:
-    """Recalls saved notes. Check for the user's preferences and plugin notes before
-    designing sounds or mixing."""
+    """Recalls the notes creaper saved between sessions with save_note: the user's
+    taste, plugin quirks, mix lessons. Check for the user's preferences and plugin
+    notes before designing sounds or mixing. Each note has an id for delete_note.
+    Read-only."""
     notes = knowledge.find(search, topic, subject)
     return {"count": len(notes), "notes": notes[:100]}
 
 
 @tool(annotations=DESTRUCTIVE)
 def delete_note(note_id: Annotated[str, Field(description="The note's id from find_notes")]) -> dict:
-    """Deletes a saved note."""
+    """Permanently forgets one note creaper saved between sessions (a preference, a
+    plugin quirk, a mix lesson) with save_note, e.g. when the user's taste changed or
+    it was wrong. Asks the user first. To correct a note, save the right one and
+    delete the old. Returns the deleted note. Not project data: this doesn't touch
+    REAPER."""
     note = next((n for n in knowledge.find() if n["id"] == note_id.strip()), None)
     if note is None:
         raise ValueError(f"there's no note with id '{note_id}'")

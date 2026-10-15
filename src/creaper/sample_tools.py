@@ -31,8 +31,11 @@ def sample_folders(
     add: Annotated[str | None, Field(description="A folder of samples to add, e.g. 'D:/Samples'")] = None,
     remove: Annotated[str | None, Field(description="A folder to stop indexing")] = None,
 ) -> dict:
-    """Lists, adds or removes the folders creaper searches for samples and loops (by
-    default the ones it finds: Arturia's sample library, SILA's, Music, REAPER Media)."""
+    """Shows, adds to or removes from the list of folders creaper indexes for samples
+    and loops (by default the ones it finds: Arturia's sample library, SILA's, Music,
+    REAPER Media). With no arguments it only lists them. Use it when the user's
+    samples live somewhere else; find_samples searches what's indexed. Returns the
+    folder list."""
     folders = library.folders()
     if add:
         if not Path(add).is_dir():
@@ -53,11 +56,15 @@ def find_samples(
     bpm: Annotated[float | None, Field(description="Loops at (or double/half) this tempo")] = None,
     key: Annotated[str | None, Field(description="Loops in this key, e.g. 'A minor'")] = None,
     listen: Annotated[bool, Field(description="Also analyse the top results by ear (type, pitch, tempo, key)")] = True,
-    max_results: Annotated[int, Field(ge=1, le=100)] = 15,
+    max_results: Annotated[int, Field(ge=1, le=100, description="Most files to return")] = 15,
     refresh: Annotated[bool, Field(description="Re-scan the folders for new files")] = False,
 ) -> dict:
-    """Searches the user's sample folders by name, role, loop tempo and key, and (by
-    default) listens to the top results to say what each actually is."""
+    """Searches the audio files in the user's sample folders (sample_folders) by
+    name, role, loop tempo and key, and (by default) listens to the top results to
+    say what each actually is. Use it to find drum hits, loops, risers or vocals;
+    place_loop puts a loop in time and key, build_drum_kit and
+    build_sampled_instrument turn hits into playable instruments. (Saved plugin
+    sounds are in list_sounds.) Read-only."""
     if refresh:
         library.index(refresh=True)
     hits = library.search(search, role, kind, bpm, key)
@@ -99,16 +106,18 @@ def analyze_sample(path: Annotated[str, Field(description="Full path of an audio
 def place_loop(
     path: Annotated[str, Field(description="The loop's file (from find_samples)")],
     track: Annotated[str | int, Field(description="Track to put it on")],
-    bar: Annotated[float, Field(ge=1)] = 1,
+    bar: Annotated[float, Field(ge=1, description="Bar where the loop starts, 1-based")] = 1,
     bars: Annotated[float | None, Field(gt=0, description="Repeat it to fill this many bars")] = None,
     match_tempo: Annotated[bool, Field(description="Stretch it to the project tempo (pitch kept)")] = True,
     loop_bpm: Annotated[float | None, Field(gt=0, description="The loop's own tempo, if known; else it's measured")] = None,
     to_key: Annotated[str | None, Field(description="Transpose it into this key (needs its key: from the name or by ear)")] = None,
     semitones: Annotated[float | None, Field(ge=-24, le=24, description="Or transpose by this much")] = None,
 ) -> dict:
-    """Puts a loop on a track in time: stretched from its own tempo to the project's
-    (pitch preserved), optionally moved into the project's key, and repeated to fill
-    a number of bars."""
+    """Puts an audio loop on a track in time: stretched from its own tempo to the
+    project's (pitch preserved), optionally moved into a key, and repeated to fill a
+    number of bars. Use it for loops found with find_samples; insert_audio_file
+    imports a file as it is, without stretching. Returns the item, the loop's and the
+    project's tempo, and notes on what was changed."""
     path = _check_audio(path)
     analysis = None
     if (match_tempo and not loop_bpm) or (to_key and semitones is None):

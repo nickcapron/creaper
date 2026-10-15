@@ -46,9 +46,12 @@ def set_record_settings(
         "What gets recorded: the input (default), the track's output (resampling), nothing (monitor only), "
         "or MIDI merged into / replacing existing notes"))] = None,
 ) -> dict:
-    """Sets what a track records and whether it's armed: an audio input (a mic, a
-    guitar, a hardware synth's outputs on the interface) or a MIDI device (a keyboard,
-    a hardware synth's MIDI out), input monitoring, and the record mode."""
+    """Sets up a track for recording: what it records (an audio input such as a mic,
+    a guitar or a hardware synth's outputs on the interface, or a MIDI device such as
+    a keyboard), whether it's armed, input monitoring, and the record mode
+    (resampling the track's output, MIDI overdub...). Only the arguments given
+    change. list_inputs names the inputs; record then records a bar range. Returns
+    the track's record settings."""
     return call("set_record_settings", track=track, arm=arm, audio_input=audio_input, stereo=stereo,
                 midi_device=midi_device, midi_channel=midi_channel, no_input=no_input, monitor=monitor, mode=mode)
 
@@ -92,18 +95,24 @@ def recording_status() -> dict:
 
 
 @tool(annotations=READ_ONLY)
-def list_takes(item_id: ItemId) -> dict:
-    """The takes in an item (each recording pass over the same spot), and which is active."""
+def list_takes(item_id: Annotated[str, Field(description='Item id (usually a recorded audio item) from get_track_details, or "selected"')]) -> dict:
+    """Lists the takes stacked in one item (each recording pass over the same spot)
+    with their numbers and names, and which one is playing. Use it after recording
+    in loop or take mode; choose_take switches the playing take and explode_takes
+    puts each on its own track to compare. Read-only."""
     return call("list_takes", item_id=item_id)
 
 
 @tool()
 def choose_take(
-    item_id: ItemId,
+    item_id: Annotated[str, Field(description='Item id (usually a recorded audio item) from get_track_details, or "selected"')],
     take: Annotated[int | None, Field(ge=1, description="Take number from list_takes")] = None,
     name: Annotated[str | None, Field(description="Or the take's name")] = None,
 ) -> dict:
-    """Makes a take the one that plays (for picking the best performance)."""
+    """Makes one take of an item the one that plays, for picking the best
+    performance; the other takes stay in the item. list_takes shows the takes and
+    explode_takes puts them on separate tracks to compare. Returns the item's takes
+    with the active one marked."""
     if take is None and not name:
         raise ValueError("give a take number or name")
     return call("set_active_take", item_id=item_id, take=take, name=name)
@@ -148,15 +157,17 @@ def _marker_ref(ref: str | int) -> dict:
 def edit_marker(
     marker: MarkerRef,
     region: Annotated[bool | None, Field(description="True for a region, False for a marker, when names clash")] = None,
-    new_name: str | None = None,
+    new_name: Annotated[str | None, Field(description="Rename it to this")] = None,
     start_bar: Bar = None,
-    start_beat: Annotated[float | None, Field(ge=1)] = None,
+    start_beat: Annotated[float | None, Field(ge=1, description="Beat within start_bar, 1-based")] = None,
     end_bar: Annotated[float | None, Field(ge=1, description="Regions: new end bar")] = None,
-    end_beat: Annotated[float | None, Field(ge=1)] = None,
+    end_beat: Annotated[float | None, Field(ge=1, description="Regions: beat within end_bar, 1-based")] = None,
     color: Annotated[str | None, Field(description="#RRGGBB")] = None,
 ) -> dict:
-    """Renames, moves, resizes or recolors a marker or region (e.g. rename 'Chorus' to
-    'Chorus 1', or extend the bridge region to bar 49)."""
+    """Changes an existing marker or region: renames, moves, resizes or recolors it
+    (e.g. rename 'Chorus' to 'Chorus 1', or extend the bridge region to bar 49). Only
+    the arguments given change, and the audio and MIDI under it don't move.
+    add_marker makes a new one and delete_marker removes one. Returns its new state."""
     return call("edit_marker", **_marker_ref(marker), region=region, new_name=new_name, start_bar=start_bar,
                 start_beat=start_beat, end_bar=end_bar, end_beat=end_beat, color=color)
 
@@ -179,22 +190,28 @@ def _template_name(name: str) -> str:
 @tool()
 def save_track_template(
     name: Annotated[str, Field(description="e.g. 'Vocal chain', 'Drum bus' (a/b makes a subfolder)")],
-    tracks: Annotated[list[str | int], Field(min_length=1)],
+    tracks: Annotated[list[str | int], Field(min_length=1, description="The tracks to include, by number or name")],
 ) -> dict:
     """Saves tracks (with their plugins, sends between them, settings and items) as a
-    REAPER track template, to reuse in any project."""
+    REAPER track template, to reuse in any project with apply_track_template. To
+    keep one plugin's sound rather than whole tracks, use save_sound. Returns the
+    template's file and how many tracks it holds."""
     return call("save_track_template", name=_template_name(name), tracks=tracks)
 
 
 @tool(annotations=READ_ONLY)
 def list_track_templates() -> dict:
-    """The user's REAPER track templates."""
+    """Lists the user's REAPER track templates (saved tracks with their FX, routing
+    and settings, e.g. a vocal chain), by name. apply_track_template adds one to the
+    project and save_track_template saves tracks as a new one. Read-only."""
     return call("list_track_templates")
 
 
 @tool()
 def apply_track_template(name: Annotated[str, Field(description="A name from list_track_templates")]) -> dict:
-    """Adds a track template's tracks to the project."""
+    """Adds a saved track template's tracks (with their plugins, routing and
+    settings) to the current project, e.g. the user's vocal chain or drum bus.
+    list_track_templates shows the names. Returns the tracks added."""
     return call("apply_track_template", name=_template_name(name))
 
 
