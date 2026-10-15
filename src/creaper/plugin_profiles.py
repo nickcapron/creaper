@@ -148,6 +148,15 @@ PROFILES: tuple[Profile, ...] = (
                   "saw": "Saw mix", "square": "Square mix", "triangle": "Triangle mix", "volume": "Volume"},
     ),
     Profile(
+        "Rev INTENSITY", "reverb",
+        "Arturia's algorithmic reverb. Its tail length follows Size, not Decay: Decay is a small bipolar "
+        "offset (display = value - 0.5) that barely shortens it, while Size 0.85 rang for 6+ seconds with "
+        "tonal lines. For about a 2 s arena tail: Size 0.5, Decay 0.3, Damping 0.55, Post Filter 6 kHz, "
+        "Modulation on (it smears ringing). On a return track set Dry/Wet Balance to 1; Function Destination "
+        "1/2 amounts start slightly off centre, so set them to 0.5 for no effect.",
+        controls={"size": "Size", "decay": "Decay", "damping": "Damping", "mix": "Dry/Wet Balance"},
+    ),
+    Profile(
         "Augmented VOICES", "instrument",
         "Arturia's sampled-voice and choir instrument (sampler layers plus synth layers). Its default patch "
         "sounds like a low rumble: the sampler layers have Sustain 0 and the synth layers 5-second attacks. "
