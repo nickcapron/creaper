@@ -11,7 +11,9 @@ import json
 import math
 import os
 import re
+import threading
 import time
+import uuid
 from pathlib import Path
 
 import numpy as np
@@ -292,19 +294,39 @@ class SampleLibrary:
         self.config_path.write_text(json.dumps({"folders": folders}, indent=1), encoding="utf-8")
         return folders
 
+    # Several searches at once (Claude runs tools in parallel) fought over the index:
+    # one shared temp file, and Windows refusing to replace a file another reader has
+    # open ("Access denied"). Writes now take turns, use their own temp file, and retry.
+    _lock = threading.RLock()
+
     def _load_index(self) -> dict:
-        try:
-            return json.loads(self.index_path.read_text(encoding="utf-8"))
-        except (FileNotFoundError, ValueError):
-            return {}
+        for attempt in range(50):
+            try:
+                return json.loads(self.index_path.read_text(encoding="utf-8"))
+            except (FileNotFoundError, ValueError):
+                return {}
+            except PermissionError:
+                time.sleep(0.02)
+        raise OSError(f"the sample index ({self.index_path}) is locked by another program; try again")
 
     def _save_index(self, index: dict) -> None:
         self.index_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.index_path.with_suffix(".tmp")
+        tmp = self.index_path.with_name(f"{self.index_path.stem}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
         tmp.write_text(json.dumps(index), encoding="utf-8")
-        tmp.replace(self.index_path)
+        for attempt in range(50):
+            try:
+                tmp.replace(self.index_path)
+                return
+            except PermissionError:
+                time.sleep(0.02)
+        tmp.unlink(missing_ok=True)
+        raise OSError(f"couldn't update the sample index ({self.index_path}): another program has it open")
 
     def index(self, refresh: bool = False) -> dict:
+        with self._lock:  # one scan at a time, not one per parallel search
+            return self._index(refresh)
+
+    def _index(self, refresh: bool) -> dict:
         index = self._load_index()
         folders = self.folders()
         if index and not refresh and index.get("folders") == folders:
@@ -347,12 +369,17 @@ class SampleLibrary:
         return index
 
     def remember(self, path: str, analysis: dict) -> None:
-        index = self._load_index()
-        for f in index.get("files", []):
-            if f["path"] == path:
-                f["analysis"] = analysis
-                self._save_index(index)
-                return
+        """Caches a sample's analysis in the index (best effort: a cache)."""
+        with self._lock:
+            try:
+                index = self._load_index()
+                for f in index.get("files", []):
+                    if f["path"] == path:
+                        f["analysis"] = analysis
+                        self._save_index(index)
+                        return
+            except OSError:
+                pass
 
     def search(self, text: str | None = None, role: str | None = None, kind: str | None = None,
                bpm: float | None = None, key: str | None = None, max_duration: float | None = None) -> list[dict]:

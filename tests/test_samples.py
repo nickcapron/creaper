@@ -100,3 +100,31 @@ def test_kit_keys_match_the_pattern_lanes():
             assert theory.drum_pitch(lane) == note, lane
         except ValueError:
             pass  # a lane add_drum_pattern doesn't name
+
+
+def test_parallel_searches_dont_fight_over_the_index(tmp_path):
+    """Claude's parallel find_samples calls failed with 'Access denied' on the shared index."""
+    import json
+    import threading
+    from creaper.samplelib import SampleLibrary
+    lib = SampleLibrary(tmp_path)
+    files = [{"path": f"C:/s/{i}.wav", "name": str(i)} for i in range(40)]
+    lib._save_index({"folders": [], "files": files})
+    errors = []
+
+    def worker(k):
+        try:
+            for i in range(k, 40, 8):
+                lib.remember(f"C:/s/{i}.wav", {"kind": "one-shot", "n": i})
+                lib._load_index()
+        except Exception as e:  # noqa: BLE001
+            errors.append(e)
+    threads = [threading.Thread(target=worker, args=(k,)) for k in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not errors
+    saved = json.loads(lib.index_path.read_text(encoding="utf-8"))
+    assert all(f.get("analysis", {}).get("n") == i for i, f in enumerate(saved["files"]))
+    assert not list(tmp_path.glob("*.tmp"))
