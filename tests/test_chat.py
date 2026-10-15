@@ -45,6 +45,47 @@ def test_result_errors_are_reported():
     assert t.error_text == "error_max_turns"
 
 
+def test_notices_when_creapers_tools_did_not_start():
+    # The shape Claude Code reports when an MCP server fails to start.
+    _, t = collect()
+    t.feed({"type": "system", "subtype": "init", "session_id": "abc",
+            "mcp_servers": [{"name": "creaper", "status": "failed", "source": "dynamic"}]})
+    assert t.tools_missing
+    _, ok = collect()
+    ok.feed({"type": "system", "subtype": "init", "session_id": "abc",
+             "mcp_servers": [{"name": "creaper", "status": "connected"}]})
+    assert not ok.tools_missing
+
+
+def test_turn_retries_once_when_the_tools_did_not_start(tmp_path, monkeypatch):
+    runs = []
+
+    def fake_run(cmd, prompt, cwd, translator, cancel):
+        runs.append(cmd)
+        if len(runs) == 1:
+            translator.feed({"type": "system", "subtype": "init", "session_id": "abc",
+                             "mcp_servers": [{"name": "creaper", "status": "failed"}]})
+            return 1, "", False
+        translator.feed({"type": "system", "subtype": "init", "session_id": "abc",
+                         "mcp_servers": [{"name": "creaper", "status": "connected"}]})
+        translator.feed({"type": "result", "subtype": "success", "is_error": False, "result": "ok"})
+        return 0, "", False
+
+    monkeypatch.setattr(chat, "find_claude", lambda configured=None: "claude")
+    monkeypatch.setattr(chat, "run_claude", fake_run)
+    events = []
+    ok, cancelled = chat._turn({"prompt": "hi"}, tmp_path, None, lambda **e: events.append(e))
+    assert ok and not cancelled and len(runs) == 2
+    assert any(e["t"] == "info" and "didn't start in time" in e["message"] for e in events)
+
+
+def test_claude_gets_a_longer_mcp_start_timeout(monkeypatch):
+    monkeypatch.delenv("MCP_TIMEOUT", raising=False)
+    assert chat.claude_env()["MCP_TIMEOUT"] == chat.MCP_START_TIMEOUT_MS
+    monkeypatch.setenv("MCP_TIMEOUT", "5000")  # the user's own setting wins
+    assert chat.claude_env()["MCP_TIMEOUT"] == "5000"
+
+
 def test_describe_tool_keeps_it_short():
     assert chat.describe_tool("mcp__creaper__add_chord_progression",
                               {"item_id": "x", "chords": [{"chord": "Am7"}, {"chord": "D9"}]}) == "add_chord_progression(Am7 D9)"

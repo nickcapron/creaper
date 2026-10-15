@@ -1,6 +1,6 @@
 -- @description creaper chat: talk to Claude from a dockable panel inside REAPER
 -- @author nickcapron
--- @version 0.19.1
+-- @version 0.19.2
 -- @link https://github.com/nickcapron/creaper
 -- @about
 --   A chat panel for creaper. Messages go to your own Claude Code (your Claude
@@ -410,6 +410,39 @@ local function draw_welcome(ctx)
   ImGui.Dummy(ctx, 0, 14)
 end
 
+-- The panel's text can't be selected, so messages are copied with a button or a
+-- right-click instead.
+local copied_until = 0
+
+local function message_text(m)
+  if m.role == "user" then return "You: " .. m.text end
+  if m.role == "assistant" then return "creaper: " .. plain(m.text) end
+  if m.role == "tool" then return "  > " .. m.text .. (m.error and ("  [" .. m.error .. "]") or "") end
+  return m.text
+end
+
+local function chat_text()
+  local lines = {}
+  for _, m in ipairs(state.messages) do
+    if m.role == "user" and #lines > 0 then lines[#lines + 1] = "" end
+    lines[#lines + 1] = message_text(m)
+  end
+  return table.concat(lines, "\n")
+end
+
+local function copy(ctx, text)
+  ImGui.SetClipboardText(ctx, text)
+  copied_until = reaper.time_precise() + 2
+end
+
+local function copy_menu(ctx, i, m)
+  if ImGui.BeginPopupContextItem(ctx, "copy" .. i) then
+    if ImGui.MenuItem(ctx, "Copy this message") then copy(ctx, m.role == "assistant" and plain(m.text) or m.text) end
+    if ImGui.MenuItem(ctx, "Copy the whole chat") then copy(ctx, chat_text()) end
+    ImGui.EndPopup(ctx)
+  end
+end
+
 local function draw_messages(ctx)
   if #state.messages == 0 then
     draw_welcome(ctx)
@@ -437,6 +470,7 @@ local function draw_messages(ctx)
     else
       wrapped(ctx, COLOR.info, m.text)
     end
+    copy_menu(ctx, i, m)
   end
   local confirmation = pending_confirmation()
   if confirmation then
@@ -510,6 +544,13 @@ local function frame()
     ImGui.SameLine(ctx)
     local docked = ImGui.IsWindowDocked(ctx)
     if ImGui.Button(ctx, docked and "Undock" or "Dock") then dock_request = docked and 0 or -1 end
+    ImGui.SameLine(ctx)
+    if ImGui.Button(ctx, reaper.time_precise() < copied_until and "Copied" or "Copy chat") then
+      copy(ctx, chat_text())
+    end
+    if ImGui.IsItemHovered(ctx) then
+      ImGui.SetTooltip(ctx, "Copy the whole conversation. Right-click a message to copy just that one.")
+    end
     ImGui.SameLine(ctx)
     draw_status(ctx)
     ImGui.Separator(ctx)

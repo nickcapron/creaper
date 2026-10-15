@@ -82,11 +82,18 @@ class Translator:
         self.emit = emit
         self.got_result = False
         self.error_text: str | None = None
+        self.tools_missing = False
 
     def feed(self, event: dict[str, Any]) -> None:
         kind = event.get("type")
         if kind == "system" and event.get("subtype") == "init":
             self.emit(t="session", id=event.get("session_id"))
+            # creaper's server didn't start in time: Claude would answer without its
+            # tools ("I've lost the connection to REAPER"), so the turn is retried.
+            for server in event.get("mcp_servers") or []:
+                if isinstance(server, dict) and server.get("name") == "creaper" \
+                        and server.get("status") not in (None, "connected", "pending"):
+                    self.tools_missing = True
         elif kind == "stream_event":
             inner = event.get("event", {})
             if inner.get("type") == "content_block_start" and inner.get("content_block", {}).get("type") == "text":
@@ -176,11 +183,25 @@ def _kill_tree(proc: subprocess.Popen) -> None:
         proc.kill()
 
 
+# How long Claude Code waits for creaper's server to start. Its default (30 s) was
+# too short on a busy machine: Python normally starts it in a few seconds, but a
+# virus scan or a loaded disk sometimes stretched that past 30 s, and the turn went
+# ahead without creaper's tools.
+MCP_START_TIMEOUT_MS = "120000"
+
+
+def claude_env() -> dict[str, str]:
+    env = dict(os.environ)
+    env.setdefault("MCP_TIMEOUT", MCP_START_TIMEOUT_MS)
+    return env
+
+
 def run_claude(cmd: list[str], prompt: str, cwd: Path, translator: Translator, cancel: Path | None) -> tuple[int, str, bool]:
-    """Runs one claude invocation. Returns (exit code, stderr, cancelled)."""
+    """Runs one claude invocation. Returns (exit code, stderr, cancelled). Stops it
+    early when creaper's tools didn't load (translator.tools_missing)."""
     flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
     proc = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            text=True, encoding="utf-8", errors="replace", creationflags=flags)
+                            text=True, encoding="utf-8", errors="replace", creationflags=flags, env=claude_env())
     stderr_lines: list[str] = []
 
     def read_stdout() -> None:
@@ -206,6 +227,9 @@ def run_claude(cmd: list[str], prompt: str, cwd: Path, translator: Translator, c
     while proc.poll() is None:
         if cancel is not None and cancel.exists():
             cancelled = True
+            _kill_tree(proc)
+            break
+        if translator.tools_missing:
             _kill_tree(proc)
             break
         time.sleep(0.1)
@@ -264,6 +288,13 @@ def _turn(request: dict, workdir: Path, cancel_path: Path | None, emit: Callable
         code, stderr, cancelled = run_claude(cmd, request["prompt"], workdir, translator, cancel_path)
         if cancelled:
             return False, True
+        if translator.tools_missing:
+            if attempt == 0:
+                emit(t="info", message="creaper's tools didn't start in time, so this message is being sent again.")
+                continue
+            emit(t="error", message="creaper's tools didn't start. Send your message again; if it keeps "
+                                    "happening, restart REAPER.")
+            return False, False
         if code != 0 and session_id and attempt == 0 and "No conversation found" in stderr:
             # The saved conversation is gone (expired or deleted): start a fresh one.
             emit(t="info", message="The previous conversation couldn't be resumed, so this starts a new one.")

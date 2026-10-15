@@ -177,7 +177,8 @@ def save_project(
     path.parent.mkdir(parents=True, exist_ok=True)
     result = call("save_project", timeout=120.0, mode="copy" if copy else "save_as", path=str(path))
     if not copy:
-        result["note"] = "Saved and reopened from the new file; the undo history starts fresh from here."
+        reopened = "Saved and reopened from the new file; the undo history starts fresh from here."
+        result["note"] = reopened + (" " + result["note"] if result.get("note") else "")
     return result
 
 

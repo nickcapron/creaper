@@ -1,6 +1,6 @@
 -- @description creaper bridge: lets Claude work in REAPER through the creaper MCP server
 -- @author nickcapron
--- @version 0.19.1
+-- @version 0.19.2
 -- @link https://github.com/nickcapron/creaper
 -- @provides
 --   [nomain] creaper_json.lua
@@ -13,7 +13,7 @@
 --   Every change it makes is a named undo point ("creaper: ..."), so Ctrl+Z
 --   reverts anything Claude did.
 
-local BRIDGE_VERSION = "0.19.1"
+local BRIDGE_VERSION = "0.19.2"
 local PROTOCOL = 2
 
 ----------------------------------------------------------------------- JSON
@@ -1748,8 +1748,60 @@ function commands.render_stems(p)
   return { stems = by_track, files = files, start = time_to_pos(start_t), ["end"] = time_to_pos(end_t) }
 end
 
+-- Every plugin's parameters, by track and plugin GUID. Reopening a project reloads
+-- each plugin from the state it saved itself, and some (Arturia's Mini V3, for one)
+-- came back with settings creaper had made reset to zero: a silent bass, drums
+-- 18 dB louder. save-as compares against this and puts them back.
+local SNAPSHOT_MAX_PARAMS = 4096
+
+local function each_track(fn)
+  fn(reaper.GetMasterTrack(0))
+  for i = 0, reaper.CountTracks(0) - 1 do fn(reaper.GetTrack(0, i)) end
+end
+
+local function snapshot_fx_params()
+  local snap = {}
+  each_track(function(tr)
+    local _, tguid = reaper.GetSetMediaTrackInfo_String(tr, "GUID", "", false)
+    for fx = 0, reaper.TrackFX_GetCount(tr) - 1 do
+      local values = {}
+      for i = 0, math.min(reaper.TrackFX_GetNumParams(tr, fx), SNAPSHOT_MAX_PARAMS) - 1 do
+        values[i] = reaper.TrackFX_GetParamNormalized(tr, fx, i)
+      end
+      snap[tguid .. reaper.TrackFX_GetFXGUID(tr, fx)] = values
+    end
+  end)
+  return snap
+end
+
+local function restore_fx_params(snap)
+  local restored, plugins = 0, {}
+  each_track(function(tr)
+    local _, tguid = reaper.GetSetMediaTrackInfo_String(tr, "GUID", "", false)
+    for fx = 0, reaper.TrackFX_GetCount(tr) - 1 do
+      local values = snap[tguid .. reaper.TrackFX_GetFXGUID(tr, fx)]
+      if values then
+        local changed = 0
+        for i, v in pairs(values) do
+          if math.abs(reaper.TrackFX_GetParamNormalized(tr, fx, i) - v) > 0.0005 then
+            reaper.TrackFX_SetParamNormalized(tr, fx, i, v)
+            changed = changed + 1
+          end
+        end
+        if changed > 0 then
+          restored = restored + changed
+          local _, name = reaper.TrackFX_GetFXName(tr, fx, "")
+          plugins[#plugins + 1] = track_ref(tr).name .. ": " .. name
+        end
+      end
+    end
+  end)
+  return restored, plugins
+end
+
 function commands.save_project(p)
   local proj, current = reaper.EnumProjects(-1)
+  local restored, plugins
   if p.mode == "save" then
     if current == "" then fail("the project has no file yet: give a name to save it as") end
     reaper.Main_OnCommand(40026, 0) -- File: Save project
@@ -1757,13 +1809,23 @@ function commands.save_project(p)
     reaper.Main_SaveProjectEx(proj, p.path, 0)
     if not reaper.file_exists(p.path) then fail("REAPER couldn't write " .. p.path) end
   else -- save as: write the file, then open it in this tab so the project is attached to it
+    local snap = snapshot_fx_params()
     reaper.Main_SaveProjectEx(proj, p.path, 0)
     if not reaper.file_exists(p.path) then fail("REAPER couldn't write " .. p.path) end
     reaper.Main_openProject("noprompt:" .. p.path)
+    restored, plugins = restore_fx_params(snap)
+    if restored > 0 then reaper.Main_SaveProject(0, false) end
   end
   local _, now = reaper.EnumProjects(-1)
-  return { path = now ~= "" and now or nil, written = p.path or now, dirty = reaper.IsProjectDirty(0) == 1,
-           project = reaper.GetProjectName(0, "") }
+  local out = { path = now ~= "" and now or nil, written = p.path or now, dirty = reaper.IsProjectDirty(0) == 1,
+                project = reaper.GetProjectName(0, "") }
+  if restored and restored > 0 then
+    out.restored_plugins = plugins
+    out.note = "Reopening the saved copy reset " .. restored .. " plugin setting(s); they were put back and the "
+      .. "copy saved again. These plugins may not keep settings changed from outside their own window: after "
+      .. "the user reopens this project, check they still sound right."
+  end
+  return out
 end
 
 function commands.project_paths()

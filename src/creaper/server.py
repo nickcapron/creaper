@@ -135,6 +135,15 @@ Arranging:
   (a noise synth with automation, or find_samples for risers and reverse cymbals), a
   crash on the downbeat. Long sections need slow movement: write_automation ramps on
   filter cutoff, sends or levels across builds and breakdowns.
+- A big moment (a solo, a drop, a final chorus; "make it slap", "make it crazy",
+  "huge") comes from the arrangement, not from level and harshness: a riser and a
+  crash into it, a fill, a drop-out before it, a wider or doubled part, a richer
+  sound, the band thinning under it. A featured lead sits 2-4 LU above the other
+  instruments and under the drums, and the section should come out at most 1-2 LU
+  louder than the one before; measure both with analyze_audio before exporting.
+  Don't boost a lead's 2-5 kHz, max its resonance or drive it hard to make it stand
+  out: that is painful on headphones. Take one step, tell the user, and go further
+  only if they ask.
 - Generators (sketch_song, write_melody, write_bassline, add_genre_groove) give
   competent starting points that sound generic as they are. Edit what they give you,
   write the hook note by note when you have a stronger idea, and give the track at
