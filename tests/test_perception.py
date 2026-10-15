@@ -119,3 +119,32 @@ def test_check_ending_measures_one_region(monkeypatch, tmp_path):
     assert r["region"] == "Country_Falls" and r["length_seconds"] == 12.0 and r["verdict"] == "fine for its use"
     with pytest.raises(ValueError, match="regions: shipment_arrived, country_falls"):
         ear_tools.check_ending(kind="stinger", region="tdi_founded")
+
+
+def test_measure_tracks_reads_every_stem_from_one_render(monkeypatch, tmp_path):
+    import soundfile as sf
+    from creaper import ear_tools
+    renders = tmp_path / "renders"
+    renders.mkdir()
+    monkeypatch.setattr(ear_tools.bridge, "directory", tmp_path)
+    calls = []
+
+    def fake_call(cmd, **kw):
+        calls.append(cmd)
+        if cmd == "get_project_overview":
+            return {"tracks": [{"number": 1, "name": "Bass", "item_count": 1}, {"number": 2, "name": "Hats", "item_count": 1},
+                               {"number": 3, "name": "Empty", "item_count": 0}]}
+        t = np.arange(4 * FS) / FS
+        low, high = 0.4 * np.sin(2 * np.pi * 60 * t), 0.1 * np.random.default_rng(0).standard_normal(len(t))
+        files = []
+        for n, sig in ((1, low), (2, np.convolve(high, [1, -1], mode="same"))):
+            f = renders / f"stem_{n}.wav"
+            sf.write(str(f), np.stack([sig, sig], axis=1), FS)
+            files.append(str(f))
+        return {"stems": [{"track": {"number": 1, "name": "Bass"}, "file": files[0]},
+                          {"track": {"number": 2, "name": "Hats"}, "file": files[1]}], "files": files}
+    monkeypatch.setattr(ear_tools, "call", fake_call)
+    r = ear_tools.measure_tracks()
+    assert calls.count("render_stems") == 1
+    assert r["tracks"]["Bass"]["energy_pct"]["low"] > 80 and r["tracks"]["Hats"]["energy_pct"]["high"] > 50
+    assert not list(renders.iterdir())   # the stems are cleaned up

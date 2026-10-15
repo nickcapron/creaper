@@ -27,6 +27,10 @@ REVERB_DB = {"vocal": -14, "lead": -17, "keys": -18, "pad": -15, "snare": -21, "
 PAN_WIDTH = {"perc": 0.35, "keys": 0.25, "pad": 0.2, "fx": 0.4, "other": 0.3, "lead": 0.0}
 COMPRESS = {"vocal": (3.0, 5, 80), "bass": (4.0, 20, 120), "lead": (2.5, 10, 100)}  # ratio, attack ms, release ms
 HEADROOM_PEAK_DB = -6.0
+# Loudness (K-weighted) underrates sub-bass, so a sustained sub drone measured "quiet"
+# and got boosted +6 to +12 dB until it was most of the mix: boosts are capped.
+MAX_BOOST_DB, MAX_BOOST_LOW_DB = 6.0, 2.0
+LOW_HEAVY_PCT = 50   # sub + bass share above which a part counts as low-heavy
 
 ROLE_WORDS = [
     ("kick", r"\bkick|\bbd\b"),
@@ -59,6 +63,41 @@ def role_of(name: str, spectrum: dict | None = None) -> str:
     return "other"
 
 
+def low_share(spectrum: dict | None) -> float:
+    bands = (spectrum or {}).get("bands", {})
+    return sum((bands.get(k) or {}).get("share_pct", 0) for k in ("sub (20-60 Hz)", "bass (60-250 Hz)"))
+
+
+def lowest_strong_hz(spectrum: dict | None, within_db: float = 18.0) -> float | None:
+    """The bottom edge of the lowest octave band within `within_db` of the strongest:
+    roughly the part's lowest fundamental, which a high-pass must stay under."""
+    octaves = (spectrum or {}).get("octave_bands_db") or {}
+    levels = []
+    for label, db in octaves.items():
+        if db is None:
+            continue
+        number = float(label.split()[0]) * (1000 if label.endswith("kHz") else 1)
+        levels.append((number, db))
+    if not levels:
+        return None
+    top = max(db for _, db in levels)
+    lowest = min(f for f, db in levels if db >= top - within_db)
+    return lowest / 2 ** 0.5
+
+
+def highpass_for(role: str, spectrum: dict | None) -> int | None:
+    """The role's usual high-pass, but never above about 0.6x the part's lowest strong
+    content (so low cellos, brass and pulse basses keep their fundamentals), and none at
+    all when that would be under 40 Hz."""
+    if role not in HIGHPASS_HZ:
+        return None
+    hz = float(HIGHPASS_HZ[role])
+    lowest = lowest_strong_hz(spectrum)
+    if lowest is not None:
+        hz = min(hz, 0.6 * lowest)
+    return int(round(hz)) if hz >= 40 else None
+
+
 def plan_mix(channels: list[dict], style: dict | None = None) -> dict:
     """What to do to each channel. channels: name, role, level (max short-term LUFS),
     peak_db, crest_db, spectrum, pan, has_eq, has_comp. style: a genre profile's mix
@@ -84,9 +123,12 @@ def plan_mix(channels: list[dict], style: dict | None = None) -> dict:
             actions.append({**a, "skipped": "silent in this range"})
             continue
         want = anchor + offsets.get(c["role"], -7)
-        a["gain_db"] = round(max(-18.0, min(12.0, want - c["level"])), 1)
+        boost = MAX_BOOST_LOW_DB if (c["role"] == "bass" or low_share(c.get("spectrum")) > LOW_HEAVY_PCT)             else MAX_BOOST_DB
+        a["gain_db"] = round(max(-18.0, min(boost, want - c["level"])), 1)
         if c["role"] in HIGHPASS_HZ and not c.get("has_eq"):
-            a["highpass_hz"] = HIGHPASS_HZ[c["role"]]
+            hp = highpass_for(c["role"], c.get("spectrum"))
+            if hp:
+                a["highpass_hz"] = hp
             bands = (c.get("spectrum") or {}).get("bands", {})
             mud = (bands.get("low mids (250-500 Hz)") or {}).get("share_pct", 0)
             if c["role"] in ("keys", "pad", "lead", "vocal", "other") and mud > 25:
@@ -117,12 +159,18 @@ def plan_mix(channels: list[dict], style: dict | None = None) -> dict:
 # ------------------------------------------------------------------ executing
 
 def _channels() -> list[dict]:
-    """The tracks whose sound reaches the master on their own: skips folders, muted and
-    empty tracks, robot-vocal helpers and reverb returns; a track that plays through a
-    sidechain 'Duck' bus is mixed on that bus."""
+    """The tracks to mix: each source of sound, wherever it's routed. Skips folders,
+    muted and empty tracks, robot-vocal helpers and effects returns. A track that plays
+    through a sidechain 'Duck' bus is mixed on that bus; a submix bus (a track fed by
+    others) isn't mixed like an instrument, its sources are."""
     overview = call("get_project_overview")
     routing = {t["name"]: t for t in call("get_routing")["tracks"]}
     by_name = {t["name"]: t for t in overview["tracks"]}
+    feeds: dict[str, list[str]] = {}
+    for src, r in routing.items():
+        for snd in r.get("sends") or []:
+            if not snd.get("note"):  # not a sidechain input
+                feeds.setdefault(snd["to"], []).append(src)
     out = []
     for t in overview["tracks"]:
         name = t["name"]
@@ -132,11 +180,11 @@ def _channels() -> list[dict]:
         if re.search(r"verb|reverb|delay|return", name, re.I) and not t.get("item_count"):
             continue  # an effects return
         source = name[:-5] if name.endswith(" Duck") else None
-        if source is None and not t.get("item_count") and not any(
-                s["to"] == name for other in routing.values() for s in other.get("sends") or []):
-            continue  # nothing plays here
-        if source is None and not (r.get("to_master") or r.get("to_parent_folder")):
-            continue  # plays through a Duck bus or another track, which is mixed instead
+        robot_vocal = f"{name} Voice" in by_name or f"{name} Carrier" in by_name
+        if source is None and not robot_vocal and not t.get("item_count"):
+            continue  # nothing plays here itself: empty, or a bus whose sources are mixed instead
+        if f"{name} Duck" in by_name:
+            continue  # plays through its Duck bus, which is mixed instead
         fx = " ".join(t.get("fx", [])).lower()
         out.append({"name": name, "track": t["number"], "pan": t.get("pan", 0), "volume_db": t.get("volume_db", 0),
                     "has_eq": "eq" in fx, "has_comp": "comp" in fx or "limit" in fx,
@@ -277,6 +325,8 @@ def auto_mix(
     else:
         report["backup"] = "the project isn't saved, so there's no copy: Ctrl+Z steps back through the changes"
     verb = _reverb_return() if reverb and any("reverb_send_db" in a for a in plan["channels"]) else None
+    already_sending = {src for src, r in ((t["name"], t) for t in call("get_routing")["tracks"])
+                       for snd in r.get("sends") or [] if verb and snd["to"] == verb}
     numbers = {c["name"]: c for c in channels}
     for a in plan["channels"]:
         c = numbers[a["name"]]
@@ -286,11 +336,13 @@ def auto_mix(
             call("set_track_properties", track=a["name"], pan=a["pan"])
         if a.get("skipped"):
             continue
-        if "highpass_hz" in a:
-            # First effect after the instrument (an EQ before a synth does nothing).
-            instrument = call("get_track_details", track=a["name"]).get("instrument_fx")
-            eq = call("add_fx", track=a["name"], name="ReaEQ", position=(instrument or 0) + 1)
-            changes = [{"parameter": "Freq-High Pass 5", "display_value": a["highpass_hz"]}]
+        if "highpass_hz" in a or "mud_cut_db" in a:
+            # After the last instrument: an EQ before a synth does nothing, and one between
+            # sampler slots filters only the slots before it.
+            fx = call("get_track_details", track=a["name"]).get("fx", [])
+            last_instrument = max((f["index"] for f in fx if f.get("instrument")), default=0)
+            eq = call("add_fx", track=a["name"], name="ReaEQ", position=last_instrument + 1)
+            changes = [{"parameter": "Freq-High Pass 5", "display_value": a["highpass_hz"]}] if "highpass_hz" in a else []
             if "mud_cut_db" in a:
                 changes += [{"parameter": "Freq-Band 2", "display_value": 350},
                             {"parameter": "Gain-Band 2", "display_value": a["mud_cut_db"]},
@@ -304,8 +356,10 @@ def auto_mix(
                 {"parameter": "Ratio", "display_value": k["ratio"]},
                 {"parameter": "Attack", "display_value": k["attack_ms"]},
                 {"parameter": "Release", "display_value": k["release_ms"]}])
-        if verb and "reverb_send_db" in a:
+        if verb and "reverb_send_db" in a and a["name"] not in already_sending:
             call("set_send", source=a["name"], destination=verb, volume_db=a["reverb_send_db"])
+        elif a["name"] in already_sending:
+            a["reverb_send_kept"] = True  # the user's (or an earlier pass's) send level stays
     if sidechain:
         for d in plan["sidechains"]:
             try:
@@ -335,4 +389,8 @@ def auto_mix(
                                 "compare_mix_to_style; then master_to_target."}
     if verb:
         report["reverb_return"] = verb
+    # The faders as they now stand (the headroom move shifted every one of them).
+    tracks = {t["name"]: t for t in call("get_project_overview")["tracks"]}
+    report["faders_db"] = {name: tracks[name].get("volume_db") for name in [c["name"] for c in channels] + ([verb] if verb else [])
+                           if name in tracks}
     return report

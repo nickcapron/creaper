@@ -28,6 +28,8 @@ HEARTBEAT_MAX_AGE = 5.0
 STALE_HEARTBEAT_GRACE = 15.0
 # How long to wait for the user to answer REAPER's save/delete prompt after recording.
 STOP_PROMPT_WAIT = 300.0
+# Extra time past a render's expected end before deciding something's wrong.
+BUSY_GRACE = 30.0
 
 NOT_RUNNING_HELP = (
     "REAPER isn't answering. Make sure REAPER is open and the creaper bridge script "
@@ -114,6 +116,14 @@ class Bridge:
         beat = self.heartbeat()
         return bool(beat and beat["age"] > HEARTBEAT_MAX_AGE and beat.get("stop_prompt"))
 
+    def busy_for(self) -> float:
+        """Seconds REAPER expects to stay busy with a long job (a render) that blocks the
+        bridge, or 0. A stale heartbeat that says so isn't a REAPER that's gone."""
+        beat = self.heartbeat()
+        if not beat or not beat.get("busy") or beat["age"] <= HEARTBEAT_MAX_AGE:
+            return 0.0
+        return max(0.0, float(beat.get("busy_until", 0)) + BUSY_GRACE - time.time())
+
     def call(self, cmd: str, params: dict[str, Any] | None = None, timeout: float = 30.0,
              on_user_wait: Callable[[], None] | None = None) -> Any:
         """Runs a bridge command. While REAPER waits for the user to answer its
@@ -127,8 +137,11 @@ class Bridge:
             if beat is None:
                 raise BridgeError(STOP_PROMPT_HELP)
         else:
-            # Give up soon if the bridge isn't there at all; wait if it's just late.
+            # Give up soon if the bridge isn't there at all; wait if it's just late, or
+            # for as long as a render it announced is expected to take.
             beat = self.wait_until_running(STALE_HEARTBEAT_GRACE if self.heartbeat_path.exists() else 1.0)
+            while beat is None and self.busy_for() > 0:
+                beat = self.wait_until_running(min(self.busy_for(), 30.0))
             if beat is None:
                 raise BridgeError(NOT_RUNNING_HELP)
         request_id = uuid.uuid4().hex
@@ -156,7 +169,7 @@ class Bridge:
         """Waits for the answer; with a request_id, ignores answers to other requests."""
         deadline = time.monotonic() + timeout
         give_up = deadline + STOP_PROMPT_WAIT
-        next_check, waiting_for_user, told = 0.0, False, False
+        next_check, waiting_for_user, told, busy_seen = 0.0, False, False, False
         while True:
             now = time.monotonic()
             if now >= next_check or now >= deadline:
@@ -169,6 +182,13 @@ class Bridge:
                     deadline = max(deadline, now + 1.0)
                 elif waiting_for_user:
                     waiting_for_user = False  # answered: now give REAPER the usual time
+                    deadline = max(deadline, now + timeout)
+                elif self.busy_for() > 0:
+                    # Queued behind a render (another tool's, or another client's): wait for it.
+                    deadline = max(deadline, now + 1.0)
+                    busy_seen = True
+                elif busy_seen:
+                    busy_seen = False  # the render is done: now give REAPER the usual time
                     deadline = max(deadline, now + timeout)
             if now >= deadline:
                 break

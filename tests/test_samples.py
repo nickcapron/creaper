@@ -75,3 +75,28 @@ def test_program_names():
         project_tools._program_number("piano")  # ambiguous
     with pytest.raises(ValueError):
         project_tools._program_number(200)
+
+
+def test_short_hits_analyze_without_crashing(tmp_path):
+    """An envelope shorter than the smoothing window used to crash analyze (FM Perc 1.wav)."""
+    import numpy as np
+    import soundfile as sf
+    from creaper import samplelib
+    fs = 44100
+    hit = np.exp(-np.arange(int(0.12 * fs)) / (0.02 * fs)) * np.random.default_rng(0).standard_normal(int(0.12 * fs))
+    path = tmp_path / "perc.wav"
+    sf.write(str(path), hit * 0.5, fs)
+    for n in range(8, 16):
+        assert samplelib.onset_envelope(np.zeros(2048 + 512 * n), fs).shape == (n,)
+    assert samplelib.analyze(str(path))["kind"] == "one-shot"
+
+
+def test_kit_keys_match_the_pattern_lanes():
+    """build_drum_kit put the toms on other keys than add_drum_pattern plays them on."""
+    from creaper import theory
+    from creaper.sample_tools import GM_LANES
+    for lane, note in GM_LANES.items():
+        try:
+            assert theory.drum_pitch(lane) == note, lane
+        except ValueError:
+            pass  # a lane add_drum_pattern doesn't name

@@ -131,10 +131,40 @@ PROFILES: tuple[Profile, ...] = (
         "the sampled, compressed house piano of a Korg M1 or an electric piano: for those, use a sampled "
         "or preset-based instrument. Hammer Hardness and Brightness near their maximum, plus its EQ's "
         "presence and high-shelf boosts, make it harsh and cheap; small moves from the default are "
-        "usually enough. Other piano models are picked in its own preset browser.",
+        "usually enough. Other piano models are picked in its own preset browser. Its default patch is "
+        "nearly out of phase on low chords (stereo correlation around -0.16: hollow, vanishes in mono), and "
+        "its Stereo Width control doesn't fix it; a stereo-width effect after it (JS: Stereo Width, width "
+        "-12 dB, center +4 dB) brought it to +0.5.",
         controls={"hardness": "Hammer Hardness", "brightness": "Brightness", "low shelf": "Low Shelf Gain",
                   "presence": "Presence Gain", "high shelf": "High Shelf Gain", "width": "Stereo Width",
                   "reverb": "Reverb Dry/Wet"},
+    ),
+    Profile(
+        "Augmented VOICES", "instrument",
+        "Arturia's sampled-voice and choir instrument (sampler layers plus synth layers). Its default patch "
+        "sounds like a low rumble: the sampler layers have Sustain 0 and the synth layers 5-second attacks. "
+        "For a sustained wordless choir: bypass Synth 1 and 2, set Sampler 1/2 Sustain to 1, attack about "
+        "0.1 s, release about 3 s; then it plays in tune. The sample itself is chosen in its own browser, not "
+        "by a parameter, and velocity does nothing by default (use volume automation for dynamics).",
+        controls={},
+    ),
+    Profile(
+        "Synclavier V", "instrument",
+        "Arturia's Synclavier (additive/FM with sampled partials). Its default timbre is about 18-20 cents "
+        "sharp (FM Ratio Fine 1 = +0.019, Partial File Tuning 2 = -17 cents, some Timbre Modulation) with "
+        "2.4 s release tails. For an in-tune clean sound: FM Ratio (Fine) 1-3 to 0, Partial File Tuning 2 to "
+        "0, Timbre Modulation 0, then check_tuning. Its factory sample folder (ProgramData/Arturia/Samples/"
+        "Synclavier V/Factory) has real brass (tuba, trombones, French horn, trumpets) for "
+        "build_sampled_instrument.",
+        controls={},
+    ),
+    Profile(
+        "Filter MINI", "filter",
+        "Arturia's Minimoog ladder filter as an effect. Its Cutoff is 0-1 and very steep at the bottom: on "
+        "a part around C5-A5, about 0.5 barely changes anything, about 0.33 dulls it 2-6 dB, and 0.25 "
+        "silences it. Its default Output Volume (0.37) takes about 4 dB off; make it up with the fader. "
+        "Automate Cutoff for sweeps rather than leaving it low.",
+        controls={"cutoff": "Cutoff", "resonance": "Resonance", "output": "Output Volume"},
     ),
 )
 

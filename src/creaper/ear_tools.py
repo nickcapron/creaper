@@ -11,7 +11,7 @@ import numpy as np
 import soundfile as sf
 from pydantic import Field
 
-from . import harmony, perception
+from . import analysis, harmony, perception
 from .server import READ_ONLY, Bar, BridgeError, bridge, call, tool
 from .vocal_tools import melody_line
 
@@ -307,3 +307,52 @@ def check_ending(
     if tips:
         out["tips"] = tips
     return out
+
+
+# ------------------------------------------------------------ many tracks
+
+@tool(annotations=READ_ONLY)
+def measure_tracks(
+    tracks: Annotated[list[str | int] | None, Field(description="Tracks to measure; default: every track with items")] = None,
+    start_bar: Bar = None,
+    end_bar: Annotated[float | None, Field(description="Default: the end of the project")] = None,
+) -> dict:
+    """Measures many tracks in one render pass and returns a compact table: each track's
+    loudness while it plays (max short-term LUFS), its peak, how bright it is, and where
+    its energy sits (low / mid / high). Use it instead of analyze_audio track by track
+    when balancing a mix: one call instead of dozens."""
+    overview = call("get_project_overview")
+    chosen = tracks or [t["number"] for t in overview["tracks"] if t.get("item_count") and not t.get("mute")]
+    if not chosen:
+        raise ValueError("no tracks with items to measure")
+    stems = call("render_stems", timeout=900.0, tracks=chosen, start_bar=start_bar, end_bar=end_bar)
+    renders = (bridge.directory / "renders").resolve()
+    table = {}
+    try:
+        for stem in stems.get("stems", []):
+            f = Path(stem["file"])
+            if renders not in f.resolve().parents:
+                raise BridgeError(f"refusing to use a render outside {renders}: {f}")
+            m = analysis.analyze_file(f)
+            name = stem["track"]["name"]
+            if m.get("silent"):
+                table[name] = "silent"
+                continue
+            bands = m["spectrum"].get("bands", {})
+
+            def share(*keys: str) -> int:
+                return int(round(sum((bands.get(k) or {}).get("share_pct", 0) for k in keys)))
+            table[name] = {
+                "lufs_playing": m["loudness"].get("max_short_term_lufs"),
+                "peak_dbfs": m["levels"]["sample_peak_dbfs"],
+                "brightness_hz": m["spectrum"].get("spectral_centroid_hz"),
+                "energy_pct": {"low": share("sub (20-60 Hz)", "bass (60-250 Hz)"),
+                               "mid": share("low mids (250-500 Hz)", "mids (500 Hz-2 kHz)"),
+                               "high": share("upper mids (2-4 kHz)", "presence (4-6 kHz)", "air (6-20 kHz)")},
+            }
+    finally:
+        for f in stems.get("files", []):
+            Path(f).unlink(missing_ok=True)
+    return {"range": {"from": stems.get("start"), "to": stems.get("end")}, "tracks": table,
+            "how_to_read": "lufs_playing: how loud each part is while it plays (compare parts by it); energy_pct: "
+                           "where its sound sits; brightness_hz: higher is brighter/harsher"}

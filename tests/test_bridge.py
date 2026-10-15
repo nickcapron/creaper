@@ -183,3 +183,41 @@ def test_tells_the_caller_even_when_the_user_answers_quickly(tmp_path, monkeypat
     finally:
         stop.set()
     assert waits == [1]
+
+
+def rendering_heartbeat(directory, age, busy_for):
+    """The last beat before a render blocked the bridge: busy until about now + busy_for."""
+    (directory / "bridge.json").write_text(json.dumps(
+        {"protocol": 2, "time": time.time() - age, "busy": "rendering", "busy_until": time.time() + busy_for}))
+
+
+def test_waits_for_a_render_instead_of_saying_reaper_is_gone(tmp_path, monkeypatch):
+    monkeypatch.setattr("creaper.bridge.HEARTBEAT_MAX_AGE", 0.2)
+    monkeypatch.setattr("creaper.bridge.STALE_HEARTBEAT_GRACE", 0.3)
+    rendering_heartbeat(tmp_path, age=1, busy_for=5)
+    stop = threading.Event()
+    threading.Timer(1.0, lambda: fake_bridge(tmp_path, 2, stop)).start()   # the render finishes
+    try:
+        assert Bridge(tmp_path).call("get_track_details", timeout=0.3) == "get_track_details"
+    finally:
+        stop.set()
+
+
+def test_a_request_queued_behind_a_render_outlives_its_timeout(tmp_path, monkeypatch):
+    monkeypatch.setattr("creaper.bridge.HEARTBEAT_MAX_AGE", 0.2)
+    rendering_heartbeat(tmp_path, age=0, busy_for=5)          # fresh: the render starts just after this
+    stop = threading.Event()
+    threading.Timer(1.2, lambda: fake_bridge(tmp_path, 2, stop)).start()
+    try:
+        assert Bridge(tmp_path).call("get_track_details", timeout=0.3) == "get_track_details"
+    finally:
+        stop.set()
+
+
+def test_a_long_overdue_render_doesnt_stall_forever(tmp_path, monkeypatch):
+    monkeypatch.setattr("creaper.bridge.HEARTBEAT_MAX_AGE", 0.2)
+    monkeypatch.setattr("creaper.bridge.STALE_HEARTBEAT_GRACE", 0.3)
+    monkeypatch.setattr("creaper.bridge.BUSY_GRACE", 0.0)
+    rendering_heartbeat(tmp_path, age=60, busy_for=-30)      # it should have finished long ago
+    with pytest.raises(BridgeError, match="isn't answering"):
+        Bridge(tmp_path).call("ping", timeout=0.3)

@@ -34,6 +34,7 @@ INSTRUCTIONS = """\
 creaper controls the user's open REAPER project.
 
 Conventions:
+- Start a new song in a new tab with new_project_tab (the user's projects stay open).
 - Tracks are referred to by number (1 = top track), by name, or as "master".
 - Bars and beats are 1-based, as on REAPER's ruler. Beats are time-signature beats.
 - Inside a MIDI item, note positions and lengths are in quarter notes (QN) from the
@@ -139,6 +140,20 @@ Arranging:
   write the hook note by note when you have a stronger idea, and give the track at
   least one signature element (a vocal chop, a found sample, an unusual sound or
   rhythm) that makes it memorable.
+- Songs in a set (a soundtrack, an album, an EP) share a few anchors (a motif, a reverb
+  space, a signature sound) but each needs its own identity: its own groove, lead or
+  keys colour and rhythmic idea. Reusing the same patches in the same roles (the same
+  arp, pad and drone every time) makes them sound "all the same". Steady arpeggios and
+  block pads read as boring: prefer sparse call-and-response figures and quiet pads
+  that move.
+- Modern polish by default (unless the style is deliberately retro): impacts or
+  risers at section changes, filter sweeps or dives into drops, a delay return for
+  throws, parallel compression on drums, chorus or width on sampled strings, a gentle
+  presence lift, glue on the master. Raw parts with no movement sound dated.
+- Tense, dark or suspenseful cues (horror, thriller, sci-fi menace): minor and modal
+  harmony (aeolian, phrygian, harmonic minor), pedal tones, semitone rubs and slow
+  clusters; avoid bright major colours and jazzy 7th/9th extensions, which read as
+  happy or jazzy.
 - How it ends depends on where it's going: a game or playlist that crossfades tracks
   needs no fade-out or silence at the end; an album closer or victory cue needs a real
   ending. check_ending measures it (kind continuous, ending or stinger).
@@ -151,7 +166,8 @@ You can't hear, so measure what a listener would notice: check_vocal_clarity (ar
 words understandable, alone and in the mix), check_tuning (is a part in tune, does an
 audio part fit the key or chords), show_spectrogram (a picture of the sound: look at it
 for mud, harshness, crowded or empty sections, a masked vocal), analyze_audio (levels,
-loudness, balance). Check your work with them before telling the user it sounds right.
+loudness, balance; measure_tracks does every track in one pass). Check your work with
+them before telling the user it sounds right.
 
 Figure things out before asking. You can listen and measure: audition_instrument (what a
 patch does: range, pitch, envelope, tone), map_drum_kit, analyze_audio, get_fx_parameters,
@@ -208,7 +224,11 @@ Samples and loops:
 - place_loop puts a loop on a track stretched to the project tempo (pitch kept),
   optionally moved into the song's key, repeated over bars.
 - build_drum_kit makes a kit from any sample files in ReaSamplOmatic5000 on the General
-  MIDI keys, so patterns land without a drum map. When a plugin's own browser blocks
+  MIDI keys, so patterns land without a drum map (velocity works; release_s cuts long
+  tails like taiko or 808s). For melodic parts from samples (strings, brass, pizzicato,
+  choir multisamples in the user's sample folders) use build_sampled_instrument: it
+  follows the keyboard, measures each sample's real pitch (file names are sometimes an
+  octave off) and tunes it, which a drum kit can't. When a plugin's own browser blocks
   you from picking its drum samples, its samples are often files you can use this way.
 
 Vocals: use the best source the user has, and say which you used and why:
@@ -319,7 +339,7 @@ def call(cmd: str, timeout: float = 30.0, **params: Any) -> Any:
 
 # Set by the REAPER chat panel, which runs Claude without per-tool prompts.
 CONFIRM_FILE_ENV = "CREAPER_CONFIRM_FILE"
-CONFIRM_TIMEOUT = 300.0
+CONFIRM_TIMEOUT = 1800.0  # the user may have stepped away; a refusal after 5 minutes cost whole steps
 _confirm_lock = threading.Lock()
 
 
@@ -580,6 +600,14 @@ def run_action(
     info = call("describe_action", command=command)
     confirm_with_user(f"run the REAPER action \"{info['name']}\"")
     return call("run_action", command=info["command_id"])
+
+
+@tool()
+def new_project_tab() -> dict:
+    """Opens a new, empty project tab and makes it the active project, leaving the
+    user's other projects open and untouched. Use it to start a new song (instead of
+    run_action, which asks the user first)."""
+    return call("new_project_tab")
 
 
 # --------------------------------------------------------------------- MIDI
@@ -1540,6 +1568,9 @@ def _crest(m: dict) -> float:
     return value
 
 
+THRESHOLD_BELOW_RMS_DB = 6.0  # a calibrated threshold stays within this of the material's RMS level
+
+
 def _calibrate_compressor(track: str | int, fx_index: int, profile: plugin_profiles.Profile, target_db: float,
                           start_bar: float | None, end_bar: float | None, passes: int = 7) -> dict:
     """Moves a compressor's drive until it takes about target_db off the transients,
@@ -1548,9 +1579,14 @@ def _calibrate_compressor(track: str | int, fx_index: int, profile: plugin_profi
     fool it). Steps grow while nothing changes, so it finds where compression starts."""
     call("update_fx", track=track, fx=fx_index, enabled=False)
     try:
-        base = _crest(_measure(track, start_bar, end_bar))
+        dry = _measure(track, start_bar, end_bar)
+        base = _crest(dry)
     finally:
         call("update_fx", track=track, fx=fx_index, enabled=True)
+    # A threshold far under the material's average level compresses everything all the
+    # time: on a quiet mix the search once ran down to -52 dB and crushed it 15-20 dB.
+    rms = dry.get("levels", {}).get("rms_dbfs")
+    floor = rms - THRESHOLD_BELOW_RMS_DB if (profile.drive_more == "down" and rms is not None) else None
     params = call("get_fx_parameters", track=track, fx=fx_index, search=profile.drive)["parameters"]
     exact = next((p for p in params if p["name"] == profile.drive), None)
     if exact is None:
@@ -1586,6 +1622,10 @@ def _calibrate_compressor(track: str | int, fx_index: int, profile: plugin_profi
                 jump = (target_db - reduction) * d_drive / d_red
                 jump = max(-0.25 * (hi - lo), min(0.25 * (hi - lo), jump))
                 new_drive = max(lo, min(hi, drive + jump))
+        if floor is not None and new_drive < floor:
+            if drive <= floor:
+                break  # already as low as it should go
+            new_drive = floor
         if new_drive == drive:
             break  # at the end of the control's range
         drive = new_drive

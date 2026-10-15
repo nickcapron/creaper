@@ -93,7 +93,10 @@ def onset_envelope(x: np.ndarray, fs: int, hop: int = 512) -> np.ndarray:
     flux = np.maximum(0, np.diff(mag, axis=1)).sum(axis=0)
     if flux.size < 8:
         return flux
-    smooth = np.convolve(flux, np.ones(16) / 16, mode="same")
+    # A window no longer than the envelope: "same" returns the longer of the two, so a
+    # 16-frame window on a short sample made a shape mismatch (a crash on short hits).
+    width = min(16, flux.size)
+    smooth = np.convolve(flux, np.ones(width) / width, mode="same")
     return np.maximum(0, flux - smooth)
 
 

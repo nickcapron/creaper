@@ -450,8 +450,24 @@ local function solve_display_value(t, fx, param, target)
   end
   -- The display is rounded, so lo and hi straddle the target; keep whichever reads closer.
   local d_lo, d_hi = display_at(lo), display_at(hi)
-  if d_lo and d_hi and math.abs(d_lo - target) < math.abs(d_hi - target) then return lo, false end
-  return hi, false
+  local best = (d_lo and d_hi and math.abs(d_lo - target) < math.abs(d_hi - target)) and lo or hi
+  -- A whole-number display covers a range of real values ("-6" is -6.5 to -5.5), and the
+  -- search above stops at its edge: half a step off (a sampler's pitch came out 50 cents
+  -- flat). Aim for the middle of the range that shows the target instead.
+  local shown = display_string_at(t, fx, param, best)
+  if display_at(best) == target and math.floor(target) == target and not (shown or ""):find("%.") then
+    local function edge(toward)
+      local inside, outside = best, toward
+      for _ = 1, 30 do
+        local mid = (inside + outside) / 2
+        if display_at(mid) == target then inside = mid else outside = mid end
+      end
+      return inside
+    end
+    local a, b = edge(rising and 0.0 or 1.0), edge(rising and 1.0 or 0.0)
+    return (a + b) / 2, false
+  end
+  return best, false
 end
 
 local function param_info(t, fx, i, with_options)
@@ -738,6 +754,10 @@ end
 local commands = {}
 local stop_at -- playback stops when it passes this time (seconds)
 local beat_now -- set to write the heartbeat on the next tick instead of within a second
+-- While a long job (a render) blocks the bridge, the heartbeat says so and until when,
+-- so clients wait for it instead of timing out or deciding REAPER has gone.
+local busy -- { what = "rendering", until_time = os.time() + n }
+local announce -- writes the heartbeat right away (set where the heartbeat writer is defined)
 
 -- REAPER's "prompt to save/delete/rename new files" when recording stops (on by
 -- default). Its window blocks scripts, so the bridge can't answer until the user does.
@@ -1545,6 +1565,17 @@ function commands.time_to_positions(p)
   return out
 end
 
+-- A new, empty project tab that becomes the active project (the user's others stay open).
+function commands.new_project_tab()
+  local before = reaper.EnumProjects(-1)
+  reaper.Main_OnCommand(40859, 0) -- File: New project tab
+  local now = reaper.EnumProjects(-1)
+  if now == before then fail("REAPER didn't open a new tab") end
+  local count = 0
+  while reaper.EnumProjects(count) do count = count + 1 end
+  return { tab = count, tabs_open = count, project = "(unsaved)" }
+end
+
 function commands.bar_to_qn(p)
   return { qn = resolve_qn({ start_bar = p.bar, start_beat = p.beat }, "start") }
 end
@@ -1599,6 +1630,8 @@ local WAV_32_FLOAT = "ZXZhdyAA" -- base64 of the WAV sink config: 'evaw', 32-bit
 -- Renders [start_t, end_t] of a track (stem) or the master to a 32-bit float WAV in
 -- RENDER_DIR, restoring the user's render settings and track selection afterwards.
 local function render_range(t, master, start_t, end_t)
+  busy = { what = "rendering", until_time = os.time() + math.ceil((end_t - start_t) * 1.5 + 30) }
+  if announce then announce() end
   local wanted = {}
   local list = type(t) == "table" and t or { t }
   for _, tr in ipairs(list) do wanted[tr] = true end
@@ -2093,7 +2126,9 @@ function commands.set_tempo_map(p)
     end
     for _, c in ipairs(changes) do
       local t = qn_to_time(bar_to_qn(c.bar, c.beat or 1))
-      local bpm = c.bpm or reaper.TimeMap2_GetDividedBpmAtTime(0, t)
+      -- Markers take quarter-note BPM. The "divided" BPM is per denominator beat, so for
+      -- an x/8 bar it read twice the tempo (220 for 110) and doubled the song's speed.
+      local bpm = c.bpm or select(3, reaper.TimeMap_GetTimeSigAtTime(0, t))
       local existing = -1
       for i = 0, reaper.CountTempoTimeSigMarkers(0) - 1 do
         local _, timepos = reaper.GetTempoTimeSigMarker(0, i)
@@ -2275,10 +2310,70 @@ function commands.build_sampler_kit(p)
       reaper.TrackFX_SetParamNormalized(t, fx, 3, int(pad.note) / 127)  -- note range start
       reaper.TrackFX_SetParamNormalized(t, fx, 4, int(pad.note) / 127)  -- note range end
       if pad.name then reaper.TrackFX_SetNamedConfigParm(t, fx, "renamed_name", pad.name) end
+      -- Velocity changes the level (by default it doesn't, so ghost notes and accents did nothing).
+      local vel = find_param(t, fx, "Gain for minimum velocity")
+      reaper.TrackFX_SetParamNormalized(t, fx, vel, solve_display_value(t, fx, vel, p.velocity_db or -18))
+      if p.release_s then -- long tails (taiko, 808s) stop after the note instead of piling up
+        local function set(name, value)
+          local param = find_param(t, fx, name)
+          reaper.TrackFX_SetParamNormalized(t, fx, param, solve_display_value(t, fx, param, value))
+        end
+        set("Obey note-offs", 1)
+        set("Use note-off release override", 1)
+        set("Release (note-off)", p.release_s * 1000)
+      end
       local _, start_name = reaper.TrackFX_GetFormattedParamValue(t, fx, 3)
       loaded[#loaded + 1] = { fx = fx + 1, note = int(pad.note), plays_on = start_name, sample = pad.path:match("[^\\/]+$") }
     end
     return { track = track_ref(t), pads = loaded }
+  end)
+end
+
+-- RS5K's play mode (a named setting, not a parameter): 1 plays the sample as is on
+-- any note ("Sample (ignores MIDI note)"); 2 maps the key range linearly onto "Pitch
+-- for start note" .. "Pitch for end note" (semitones), which makes it follow the keyboard.
+local RS5K_TRACKING_MODE = "2"
+
+-- A playable instrument from pitched samples, as one undo step: one ReaSamplOmatic5000
+-- zone per sample, each covering a key range and following the keyboard so its root
+-- (measured, with cents) plays in tune, with velocity response, note-offs and a release.
+function commands.build_sampled_instrument(p)
+  local t = get_track(p.track)
+  local zones = p.zones or {}
+  if #zones == 0 then fail("give at least one sample") end
+  for _, z in ipairs(zones) do
+    if type(z.path) ~= "string" or not reaper.file_exists(z.path) then fail("can't find the sample " .. tostring(z.path)) end
+  end
+  local function set(fx, name, value)
+    local param = find_param(t, fx, name)
+    reaper.TrackFX_SetParamNormalized(t, fx, param, solve_display_value(t, fx, param, value))
+  end
+  return with_undo("build sampled instrument on " .. track_name(t), function()
+    local loaded = {}
+    for _, z in ipairs(zones) do
+      local fx = reaper.TrackFX_AddByName(t, "ReaSamplOmatic5000 (Cockos)", false, -1)
+      if fx < 0 then fail("couldn't load ReaSamplOmatic5000") end
+      reaper.TrackFX_SetNamedConfigParm(t, fx, "FILE0", z.path)
+      reaper.TrackFX_SetNamedConfigParm(t, fx, "DONE", "")
+      reaper.TrackFX_SetNamedConfigParm(t, fx, "MODE", tostring(p.mode or RS5K_TRACKING_MODE))
+      local lo, hi = int(z.lo), int(z.hi)
+      reaper.TrackFX_SetParamNormalized(t, fx, find_param(t, fx, "Note range start"), lo / 127)
+      reaper.TrackFX_SetParamNormalized(t, fx, find_param(t, fx, "Note range end"), hi / 127)
+      -- One semitone per key with the root on its own key; the cents go in Pitch adjust.
+      local root_key = math.floor(z.root + 0.5)
+      set(fx, "Pitch for start note", lo - root_key)
+      set(fx, "Pitch for end note", hi - root_key)
+      set(fx, "Pitch adjust", root_key - z.root)
+      set(fx, "Gain for minimum velocity", p.velocity_db or -18)
+      set(fx, "Obey note-offs", 1)
+      set(fx, "Use note-off release override", 1)
+      set(fx, "Release (note-off)", (p.release_s or 0.3) * 1000)
+      set(fx, "Max voices", p.voices or 16)
+      if z.name then reaper.TrackFX_SetNamedConfigParm(t, fx, "renamed_name", z.name) end
+      local _, mode = reaper.TrackFX_GetNamedConfigParm(t, fx, "MODE")
+      loaded[#loaded + 1] = { fx = fx + 1, lo = lo, hi = hi, root = z.root, mode = mode, sample = z.path:match("[^\\/]+$") }
+    end
+    return { track = track_ref(t), zones = loaded }
   end)
 end
 
@@ -3076,6 +3171,7 @@ local unsent = {}
 
 local function answer(raw, response_path, id)
   local response = handle(raw)
+  if busy then busy, beat_now = nil, true end -- the long job is over (or failed)
   response.id = response.id or id
   local ok, encoded = pcall(json.encode, response)
   if not ok then
@@ -3108,8 +3204,10 @@ local function write_heartbeat(now)
     bridge_version = BRIDGE_VERSION, protocol = PROTOCOL, time = os.time(),
     reaper_version = reaper.GetAppVersion(),
     recording = recording or nil, stop_prompt = recording and stop_prompt_on() or nil,
+    busy = busy and busy.what or nil, busy_until = busy and busy.until_time or nil,
   }))
 end
+announce = function() write_heartbeat(reaper.time_precise()) end
 
 local function step()
   local now = reaper.time_precise()
