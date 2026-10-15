@@ -1,6 +1,6 @@
 -- @description creaper bridge: lets Claude work in REAPER through the creaper MCP server
 -- @author nickcapron
--- @version 0.19.2
+-- @version 0.19.3
 -- @link https://github.com/nickcapron/creaper
 -- @provides
 --   [nomain] creaper_json.lua
@@ -13,7 +13,7 @@
 --   Every change it makes is a named undo point ("creaper: ..."), so Ctrl+Z
 --   reverts anything Claude did.
 
-local BRIDGE_VERSION = "0.19.2"
+local BRIDGE_VERSION = "0.19.3"
 local PROTOCOL = 2
 
 ----------------------------------------------------------------------- JSON
@@ -42,6 +42,29 @@ local RENDER_DIR = join(BRIDGE_DIR, "renders")
 local function fail(msg) error({ message = msg }, 0) end
 
 local function int(x) return math.tointeger(math.floor(x + 0.5)) end
+
+-- Which plugin settings creaper has changed, by track and plugin GUID, so a save-as
+-- can check exactly those after REAPER reopens the file (comparing every parameter
+-- flagged meters and self-modulating values as "reset"). Wrapping the API function
+-- here catches every place the bridge sets one; this script has its own `reaper`
+-- table, so nothing outside creaper is affected.
+local touched_params = {}
+do
+  local set_param = reaper.TrackFX_SetParamNormalized
+  reaper.TrackFX_SetParamNormalized = function(t, fx, param, value)
+    local ok, key = pcall(function()
+      local tkey = "master"
+      if t ~= reaper.GetMasterTrack(0) then tkey = reaper.GetTrackGUID(t) end
+      return tkey .. reaper.TrackFX_GetFXGUID(t, fx)
+    end)
+    if ok and key then
+      touched_params[key] = touched_params[key] or {}
+      touched_params[key][param] = true
+    end
+    return set_param(t, fx, param, value)
+  end
+end
+
 local function round(x, places)
   local m = 10 ^ (places or 3)
   return math.floor(x * m + 0.5) / m
@@ -138,6 +161,15 @@ local function get_track(ref, exact)
   end
   local wanted = tostring(ref):lower()
   if wanted == "master" then return reaper.GetMasterTrack(0) end
+  -- A track's GUID (from the overview) names exactly one track, whatever its name
+  -- and wherever it has moved: jobs that change many tracks use it.
+  if wanted:match("^{%x+%-%x+%-%x+%-%x+%-%x+}$") then
+    for i = 0, reaper.CountTracks(0) - 1 do
+      local t = reaper.GetTrack(0, i)
+      if reaper.GetTrackGUID(t):lower() == wanted then return t end
+    end
+    fail("that track is no longer in the project")
+  end
   local partial
   for i = 0, reaper.CountTracks(0) - 1 do
     local t = reaper.GetTrack(0, i)
@@ -153,6 +185,20 @@ local function get_track(ref, exact)
   end
   if partial then return partial end
   fail("there is no track named '" .. tostring(ref) .. "'")
+end
+
+-- The insert index just after a track and, when it's a folder, everything inside it.
+-- A track inserted straight after a folder track becomes its first child, and one fed
+-- by the folder would then feed back into it (REAPER silences the loop).
+local function index_after(t)
+  local index = int(reaper.GetMediaTrackInfo_Value(t, "IP_TRACKNUMBER"))
+  if reaper.GetMediaTrackInfo_Value(t, "I_FOLDERDEPTH") ~= 1 then return index end
+  local depth, count = 1, reaper.CountTracks(0)
+  while depth > 0 and index < count do
+    depth = depth + int(reaper.GetMediaTrackInfo_Value(reaper.GetTrack(0, index), "I_FOLDERDEPTH"))
+    index = index + 1
+  end
+  return index
 end
 
 local function color_hex(native)
@@ -189,6 +235,7 @@ local function track_summary(t)
     fx = fx,
   }
   if not master then
+    summary.guid = reaper.GetTrackGUID(t)
     summary.solo = reaper.GetMediaTrackInfo_Value(t, "I_SOLO") > 0
     summary.armed = reaper.GetMediaTrackInfo_Value(t, "I_RECARM") == 1
     summary.selected = reaper.IsTrackSelected(t)
@@ -1041,15 +1088,20 @@ function commands.apply_fx_state(p)
     end
     local replaced
     if not fx then
-      if s.instrument and p.replace_instrument ~= false then
-        local old = reaper.TrackFX_GetInstrument(t)
-        if old >= 0 then
-          replaced = fx_name(t, old)
-          reaper.TrackFX_Delete(t, old)
-        end
-      end
+      -- Add the sound's plugin before removing the old instrument: when the plugin
+      -- isn't installed (a sound saved on another computer) the track keeps its own.
+      local old = (s.instrument and p.replace_instrument ~= false) and reaper.TrackFX_GetInstrument(t) or -1
       fx = reaper.TrackFX_AddByName(t, s.plugin, false, s.instrument and -1000 or -1)
-      if fx < 0 then fail(s.plugin .. " isn't installed on this computer, so this sound can't be loaded") end
+      if fx < 0 then
+        fail(s.plugin .. " isn't installed on this computer, so this sound can't be loaded"
+          .. (old >= 0 and " (the track's own instrument is unchanged)" or ""))
+      end
+      if old >= 0 then
+        if fx <= old then old = old + 1 end  -- the new plugin went in ahead of it
+        replaced = fx_name(t, old)
+        reaper.TrackFX_Delete(t, old)
+        if old < fx then fx = fx - 1 end
+      end
     end
 
     local restored
@@ -1118,7 +1170,7 @@ function commands.split_instrument_outputs(p)
     reaper.SetMediaTrackInfo_Value(t, "C_MAINSEND_NCH", 2)
     local source_name = track_name(t)
     local color = reaper.GetTrackColor(t)
-    local insert_at = int(reaper.GetMediaTrackInfo_Value(t, "IP_TRACKNUMBER"))
+    local insert_at = index_after(t)
     local created, skipped = {}, {}
     for _, o in ipairs(outputs) do
       if taken[o.channel] then
@@ -1236,8 +1288,8 @@ end
 function commands.describe_track(p)
   local t = get_track(p.track, true)
   local summary = track_summary(t)
-  return { number = summary.number, name = summary.name, item_count = summary.item_count, fx = summary.fx,
-           volume_db = summary.volume_db }
+  return { number = summary.number, name = summary.name, guid = summary.guid, item_count = summary.item_count,
+           fx = summary.fx, volume_db = summary.volume_db }
 end
 
 function commands.delete_track(p)
@@ -1738,6 +1790,13 @@ function commands.render_stems(p)
   if end_t <= start_t then fail("nothing to render: the range is empty") end
   local files = render_range(tracks, false, start_t, end_t)
   local by_track = {}
+  if #tracks == 1 and #files == 1 then
+    -- One track renders without a "_<track number>" suffix (render_range adds it only
+    -- for several), so matching by number found nothing: stems came back empty and
+    -- export_stems/measure_tracks on one track did nothing.
+    return { stems = { { track = track_ref(tracks[1]), file = files[1] } }, files = files,
+             start = time_to_pos(start_t), ["end"] = time_to_pos(end_t) }
+  end
   for _, tr in ipairs(tracks) do
     local number = int(reaper.GetMediaTrackInfo_Value(tr, "IP_TRACKNUMBER"))
     for _, f in ipairs(files) do
@@ -1748,27 +1807,30 @@ function commands.render_stems(p)
   return { stems = by_track, files = files, start = time_to_pos(start_t), ["end"] = time_to_pos(end_t) }
 end
 
--- Every plugin's parameters, by track and plugin GUID. Reopening a project reloads
--- each plugin from the state it saved itself, and some (Arturia's Mini V3, for one)
--- came back with settings creaper had made reset to zero: a silent bass, drums
--- 18 dB louder. save-as compares against this and puts them back.
-local SNAPSHOT_MAX_PARAMS = 4096
-
+-- The plugin settings creaper changed (touched_params), by track and plugin GUID.
+-- Reopening a project reloads each plugin from the state it saved itself, and some
+-- (Arturia's Mini V3, for one) came back with settings creaper had made reset to
+-- zero: a silent bass, drums 18 dB louder. save-as compares these and puts them back.
+-- Only creaper's own changes are checked: meters and values a plugin moves by itself
+-- differ after any reload and aren't a problem. The master is keyed as "master".
 local function each_track(fn)
-  fn(reaper.GetMasterTrack(0))
-  for i = 0, reaper.CountTracks(0) - 1 do fn(reaper.GetTrack(0, i)) end
+  fn(reaper.GetMasterTrack(0), "master")
+  for i = 0, reaper.CountTracks(0) - 1 do
+    local t = reaper.GetTrack(0, i)
+    fn(t, reaper.GetTrackGUID(t))
+  end
 end
 
 local function snapshot_fx_params()
   local snap = {}
-  each_track(function(tr)
-    local _, tguid = reaper.GetSetMediaTrackInfo_String(tr, "GUID", "", false)
+  each_track(function(tr, tkey)
     for fx = 0, reaper.TrackFX_GetCount(tr) - 1 do
-      local values = {}
-      for i = 0, math.min(reaper.TrackFX_GetNumParams(tr, fx), SNAPSHOT_MAX_PARAMS) - 1 do
-        values[i] = reaper.TrackFX_GetParamNormalized(tr, fx, i)
+      local key = tkey .. reaper.TrackFX_GetFXGUID(tr, fx)
+      if touched_params[key] then
+        local values = {}
+        for i in pairs(touched_params[key]) do values[i] = reaper.TrackFX_GetParamNormalized(tr, fx, i) end
+        snap[key] = values
       end
-      snap[tguid .. reaper.TrackFX_GetFXGUID(tr, fx)] = values
     end
   end)
   return snap
@@ -1776,10 +1838,9 @@ end
 
 local function restore_fx_params(snap)
   local restored, plugins = 0, {}
-  each_track(function(tr)
-    local _, tguid = reaper.GetSetMediaTrackInfo_String(tr, "GUID", "", false)
+  each_track(function(tr, tkey)
     for fx = 0, reaper.TrackFX_GetCount(tr) - 1 do
-      local values = snap[tguid .. reaper.TrackFX_GetFXGUID(tr, fx)]
+      local values = snap[tkey .. reaper.TrackFX_GetFXGUID(tr, fx)]
       if values then
         local changed = 0
         for i, v in pairs(values) do
@@ -2800,7 +2861,10 @@ function commands.duplicate_item(p)
     local item_qn = time_to_qn(pos + len) - time_to_qn(pos)
     for _ = 1, count do
       local copy = reaper.AddMediaItemToTrack(track)
-      reaper.SetItemStateChunk(copy, chunk, false)
+      -- A MIDI source keeps its pool id in the chunk; copies sharing it are pooled
+      -- ("ghost") copies, so editing one changed them all. Each gets its own.
+      local own = chunk:gsub("POOLEDEVTS {[^}\n]*}", function() return "POOLEDEVTS " .. reaper.genGuid("") end)
+      reaper.SetItemStateChunk(copy, own, false)
       reaper.SetMediaItemInfo_Value(copy, "D_POSITION", qn_to_time(next_qn))
       copies[#copies + 1] = item_info(copy)
       next_qn = next_qn + item_qn
@@ -3108,7 +3172,7 @@ function commands.create_bus(p)
   for _, name in ipairs(p.fx or {}) do plugins[#plugins + 1] = resolve_plugin(name, false) or name end
   return with_undo("create bus " .. p.name, function()
     local last = 0
-    for _, t in ipairs(sources) do last = math.max(last, int(reaper.GetMediaTrackInfo_Value(t, "IP_TRACKNUMBER"))) end
+    for _, t in ipairs(sources) do last = math.max(last, index_after(t)) end
     reaper.InsertTrackAtIndex(last, true)
     local bus = reaper.GetTrack(0, last)
     reaper.GetSetMediaTrackInfo_String(bus, "P_NAME", p.name, true)

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import math
 import random
+import re
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field
@@ -51,6 +52,9 @@ def _key(key: str | None) -> Key | None:
     return harmony.parse_key(key) if key else None
 
 
+_LETTER_NUMERAL = re.compile(r"^(?:(?:Fr|Ger)\+?6|Cad6/?4)$", re.IGNORECASE)
+
+
 def _parse_list(chords: list[str] | str, key: Key | None) -> tuple[list[SpelledChord], list[str | None], Key | None]:
     text = chords if isinstance(chords, str) else None
     if text is not None and ":" in text:
@@ -63,7 +67,8 @@ def _parse_list(chords: list[str] | str, key: Key | None) -> tuple[list[SpelledC
         raise ValueError("no chords given")
     out, nums = [], []
     for t in tokens:
-        if t[0] in "ABCDEFG":
+        # Ger+6, Fr+6 and Cad64 are numerals that start like a chord letter.
+        if t[0] in "ABCDEFG" and not _LETTER_NUMERAL.match(t):
             out.append(harmony.spelled_from_symbol(t, key))
             nums.append(None)
         else:

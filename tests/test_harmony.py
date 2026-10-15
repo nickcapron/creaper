@@ -185,6 +185,39 @@ def test_melody_is_deterministic_in_range_and_ends_home():
     assert a[-1]["pitch"] % 12 == k.tonic
 
 
+@pytest.mark.parametrize("meter,density", [("2/4", "medium"), ("2/4", "busy"), ("3/8", "busy"), ("3/8", "medium")])
+def test_melody_finishes_in_short_meters(meter, density):
+    # A 2/4 bar has fewer rhythm slots than "medium" or "busy" asked for, and drawing
+    # until the count was reached never finished (seeds 5 and 6 hung).
+    k = H.parse_key("C major")
+    ev = C.timeline([r.chord for r in H.parse_progression("I-IV-V-I", k)], 2.0)
+    for seed in range(1, 12):
+        assert C.melody(ev, k, density, 60, 79, None, meter, 4, seed)
+
+
+@pytest.mark.parametrize("meter", ["3/4", "2/4", "6/8"])
+@pytest.mark.parametrize("style", ["motown", "syncopated", "one_drop", "808", "tumbao"])
+def test_bar_patterns_stay_inside_short_bars(meter, style):
+    # These one-bar patterns are written for 4/4. In a shorter bar their late notes
+    # used to land on top of the next bar's downbeat: stacked and doubled notes.
+    k = H.parse_key("C major")
+    bar = C._bar_len(meter)
+    ev = C.timeline([r.chord for r in H.parse_progression("I-IV-V-I", k)], bar * 2)
+    for seed in (1, 2, 3):
+        notes = C.bassline(ev, style, k, 2, meter=meter, seed=seed)
+        starts = sorted(n["start"] for n in notes)
+        assert all(b - a > 0.01 for a, b in zip(starts, starts[1:])), (style, meter, starts)
+
+
+def test_comping_fills_long_bars():
+    # In 5/4 the 4/4 patterns stopped after beat 4, leaving beat 5 silent every bar.
+    k = H.parse_key("C major")
+    chords = [r.chord for r in H.parse_progression("I-IV", k)]
+    ev = C.timeline(chords, 5.0)
+    notes = C.comp(ev, C.voice_chords(chords, "close"), "quarters", meter="5/4")
+    assert sorted({n["start"] for n in notes}) == [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+
+
 def test_harmonize_melody_cadences_home():
     k = H.parse_key("C")
     ev = C.timeline([r.chord for r in H.parse_progression("I-IV-V-I", k)], 4.0)
@@ -242,3 +275,37 @@ def test_analyze_progression_finds_the_key_and_names():
 def test_get_scale_lists_relatives():
     out = music_tools.get_scale("D dorian")
     assert "C major" in out["same_notes_as"] and out["triads"][3]["chord"] == "G"
+
+
+@pytest.mark.parametrize("key,pc,quality,want", [
+    ("G major", 3, "", "Eb"),         # bVI, was D#
+    ("D major", 0, "7", "C7"),        # backdoor bVII7, was B#7
+    ("G major", 8, "7", "Ab7"),       # tritone sub of D7, was G#7
+    ("E minor", 5, "", "F"),          # Neapolitan, was E#
+    ("A major", 0, "", "C"),          # bIII, was B#
+    ("C major", 1, "dim7", "C#dim7"),  # passing diminished, was Dbdim7
+    ("C major", 8, "dim", "G#dim"),   # vii°/vi, was Abdim
+    ("Bb major", 6, "dim", "F#dim"),  # vii°/vi, was Gbdim
+    ("A minor", 6, "", "F#"),         # the raised 6th of minor stays raised
+    ("C major", 6, "m7", "F#m7"),     # a minor chord on the raised 4th stays raised
+    ("C major", 10, "", "Bb"),
+    ("C major", 2, "m", "Dm"),        # in-key chords are spelled as before
+])
+def test_chromatic_chord_roots_are_spelled_by_function(key, pc, quality, want):
+    k = H.parse_key(key)
+    c = H.chord_in_key(pc, H.CHORD_QUALITIES[quality], k)
+    assert c.root_name + quality == want
+
+
+def test_identify_chord_spells_borrowed_chords_with_flats():
+    r = music_tools.identify_chord(["Eb4", "G4", "Bb4"], key="G major")
+    best = r["chords"][0]
+    assert best["symbol"] == "Eb" and best["notes"] == ["Eb", "G", "Bb"] and best["numeral"] == "bVI"
+
+
+@pytest.mark.parametrize("key,prog,numeral", [
+    ("A minor", "i-iv6-Ger+6-V-i", "Ger+6"), ("A minor", "i-Fr+6-V-i", "Fr+6"), ("C major", "I-IV-Cad64-V-I", "Cad64")])
+def test_numerals_that_start_with_a_note_letter_parse(key, prog, numeral):
+    # Ger+6, Fr+6 and Cad64 were read as chord symbols ("unknown chord quality 'er+6'").
+    chords, nums, _ = music_tools._parse_list(prog, H.parse_key(key))
+    assert numeral in nums and len(chords) == len(nums)

@@ -190,6 +190,8 @@ def spectrogram_png(audio: np.ndarray, fs: int, lines: list[float] = (), width: 
     if x.ndim > 1:
         x = x.mean(axis=1)
     nper = 4096 if fs > 30000 else 2048
+    if len(x) < nper:  # a very short render: scipy refused a window longer than the sound
+        x = np.pad(x, (0, nper - len(x)))
     hop = max(1, len(x) // width) if len(x) // width < nper else nper // 2
     f, t, Z = signal.stft(x, fs=fs, nperseg=nper, noverlap=max(0, nper - hop), boundary=None)
     power = np.abs(Z) ** 2 + 1e-20

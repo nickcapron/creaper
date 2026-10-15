@@ -7,11 +7,10 @@ layout, or Elektron Overbridge machines where each drum is on its own channel.
 
 from __future__ import annotations
 
-import json
-import os
 from pathlib import Path
 from typing import Any
 
+from . import jsonstore
 from .theory import drum_map_entry
 
 # Instruments creaper knows how to play. A map the user saves under the same
@@ -48,19 +47,11 @@ class DrumMaps:
         self.path = Path(path)
 
     def all(self) -> dict[str, dict[str, dict]]:
-        try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            return {}
-        except ValueError as e:
-            raise ValueError(f"{self.path} isn't valid JSON ({e}); fix or delete it") from None
-        return data.get("maps", {})
+        return jsonstore.read(self.path, dict).get("maps", {})
 
-    def _write(self, maps: dict[str, dict[str, dict]]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps({"version": 1, "maps": maps}, indent=2), encoding="utf-8")
-        os.replace(tmp, self.path)
+    def _updating(self):
+        """The maps to change, saved (under the store's lock) when the block ends."""
+        return jsonstore.updating(self.path, lambda: {"version": 1, "maps": {}}, indent=2)
 
     def save(self, instrument: str, mapping: dict[str, Any]) -> dict[str, dict]:
         instrument = instrument.strip()
@@ -69,18 +60,17 @@ class DrumMaps:
         if not mapping:
             raise ValueError("the drum map is empty")
         entries = {lane.strip(): drum_map_entry(value) for lane, value in mapping.items()}
-        maps = self.all()
-        maps[instrument] = entries
-        self._write(maps)
+        with self._updating() as data:
+            data.setdefault("maps", {})[instrument] = entries
         return entries
 
     def delete(self, instrument: str) -> bool:
-        maps = self.all()
-        for key in list(maps):
-            if key.lower() == instrument.strip().lower():
-                del maps[key]
-                self._write(maps)
-                return True
+        with self._updating() as data:
+            maps = data.setdefault("maps", {})
+            for key in list(maps):
+                if key.lower() == instrument.strip().lower():
+                    del maps[key]
+                    return True
         return False
 
     def find(self, fx_name: str | None) -> tuple[str, dict[str, dict]] | None:

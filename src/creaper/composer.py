@@ -1015,8 +1015,13 @@ def comp(events: list[ChordEvent], voicings: list[list[int]], pattern: str = "su
         if template is None:
             raise ValueError(f"unknown comping pattern '{pattern}'")
         cycle = 8.0 if pattern in ("bossa", "montuno") else bar
-        if pattern not in ("bossa", "montuno") and bar != 4:
+        if pattern not in ("bossa", "montuno") and bar < 4:
             template = [x for x in template if x[0] < bar]
+        elif pattern not in ("bossa", "montuno") and bar > 4:
+            # A longer bar (5/4, 7/4): carry on from the top of the one-bar pattern
+            # so the extra beats aren't silent.
+            template = list(template) + [(pos + 4, length, which) for pos, length, which in template
+                                         if pos + 4 < bar - 1e-6]
         cycle_start = math.floor(e.start / cycle) * cycle
         t0 = cycle_start
         while t0 < e.end - 1e-6:
@@ -1109,16 +1114,19 @@ def bassline(events: list[ChordEvent], style: str = "root", key: Key | None = No
             for i, t in enumerate(each_beat(0.5)):
                 note(seq[i % 8], t, 0.45, velocity - (0 if i % 2 == 0 else 8))
         elif style == "motown":
+            # These one-bar patterns are written for 4/4; in a shorter bar the
+            # positions past its end are skipped instead of spilling into the next.
+            lead_in = bar - 0.5
             for t0 in each_beat(bar):
                 pattern = [(0, r, 0.9), (1, r + 12, 0.4), (1.5, fifth, 0.4), (2, r, 0.9), (3, fifth, 0.4)]
                 for pos, p, length in pattern:
-                    if t0 + pos < e.end - 1e-6:
+                    if pos < lead_in - 1e-6 and t0 + pos < e.end - 1e-6:
                         note(p, t0 + pos, length)
-                if nxt and t0 + bar >= e.end - 1e-6 and t0 + 3.5 < e.end:
+                if nxt and t0 + bar >= e.end - 1e-6 and t0 + lead_in < e.end:
                     target = _near(root_of(nxt), r)
-                    note(target + (1 if rng.random() < 0.5 else -1), t0 + 3.5, 0.4, velocity - 8)
-                elif t0 + 3.5 < e.end:
-                    note(fifth, t0 + 3.5, 0.4, velocity - 8)
+                    note(target + (1 if rng.random() < 0.5 else -1), t0 + lead_in, 0.4, velocity - 8)
+                elif t0 + lead_in < e.end:
+                    note(fifth, t0 + lead_in, 0.4, velocity - 8)
         elif style == "alberti":
             seq = [r, fifth, r + 12 + (third - r), fifth]
             for i, t in enumerate(each_beat(0.5)):
@@ -1148,7 +1156,7 @@ def bassline(events: list[ChordEvent], style: str = "root", key: Key | None = No
                 hits = [(0, r), (1.75, r), (2.5, r + 12 if rng.random() < 0.3 else r)]
                 for k, (pos, p) in enumerate(hits):
                     t = t0 + pos
-                    if t >= e.end - 1e-6:
+                    if t >= e.end - 1e-6 or pos >= bar - 1e-6:
                         break
                     nxt_t = t0 + hits[k + 1][0] if k + 1 < len(hits) else min(e.end, t0 + bar)
                     note(p, t, max(0.25, min(nxt_t, e.end) - t))
@@ -1156,19 +1164,19 @@ def bassline(events: list[ChordEvent], style: str = "root", key: Key | None = No
             for t0 in each_beat(bar):
                 pattern = [(0, r, 0.4), (0.75, r, 0.2), (1.5, r + 12, 0.25), (2.5, r, 0.4), (3.25, fifth, 0.2), (3.5, r, 0.4)]
                 for pos, p, length in pattern:
-                    if t0 + pos < e.end - 1e-6:
+                    if pos < bar - 1e-6 and t0 + pos < e.end - 1e-6:
                         note(p, t0 + pos, length, velocity - (0 if pos == 0 else 10))
         elif style == "one_drop":
             for t0 in each_beat(bar):
                 pattern = [(0, r, 0.9), (1.5, fifth_below, 0.4), (2, r, 0.9), (3, third, 0.4), (3.5, fifth, 0.4)]
                 for pos, p, length in pattern:
-                    if t0 + pos < e.end - 1e-6:
+                    if pos < bar - 1e-6 and t0 + pos < e.end - 1e-6:
                         note(p, t0 + pos, length)
         elif style == "tumbao":
             for t0 in each_beat(bar):
-                if t0 + 1.5 < e.end - 1e-6:
+                if 1.5 < bar - 1e-6 and t0 + 1.5 < e.end - 1e-6:
                     note(fifth_below if fifth_below > 28 else fifth, t0 + 1.5, 1.4)
-                if t0 + 3 < e.end - 1e-6:
+                if 3 < bar - 1e-6 and t0 + 3 < e.end - 1e-6:
                     ahead = root_of(nxt) if (nxt and t0 + bar >= e.end - 1e-6) else root_of(e)
                     note(_near(ahead, r), t0 + 3, 2.4)
         else:
@@ -1197,6 +1205,11 @@ def _motif_rhythm(rng: random.Random, density: str, bar: float, syncopation: flo
         else:
             w = 0.6 + syncopation
         weights.append(w)
+    if not grid:
+        return [0.0]
+    # A short bar (2/4, 3/8) can have fewer slots than the density asks for; drawing
+    # until the count was reached never finished there.
+    count = min(count, len(grid))
     chosen = {0.0} if rng.random() < 0.7 else set()
     while len(chosen) < count:
         chosen.add(rng.choices(grid, weights)[0])

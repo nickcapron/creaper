@@ -117,6 +117,35 @@ class Key:
                 return o
         return next(o for o in options if o)
 
+    def spell_chord_root(self, pc: int, intervals: tuple[int, ...]) -> str:
+        """Spells a chord's root in this key. In-key roots are spelled as spell_pc does;
+        a chromatic root follows the chord's function rather than the key signature
+        (which gave D# for bVI in G major and B#7 for the backdoor chord in D major):
+        - diminished and half-diminished chords are leading-tone chords: the raised
+          note below (C#dim7 passing from C to Dm, G#dim as vii°/vi in C);
+        - the raised 6th and 7th of a minor key stay raised (F# major in A minor);
+        - a minor chord on the raised 4th stays raised (F#m in C);
+        - everything else (borrowed chords, the Neapolitan, tritone substitutes,
+          backdoor dominants) is the lowered note above: Eb in G, Ab7 for D7 in G."""
+        pc %= 12
+        rel = (pc - self.tonic) % 12
+        degs = self.degrees
+        if rel in degs:
+            return self.spell_pc(pc)
+        shape = {i % 12 for i in intervals}
+        diminished = 3 in shape and 6 in shape and 7 not in shape
+        minor = 3 in shape and 4 not in shape
+        prefer_sharp = diminished or (self.is_minor and rel in (9, 11)) or (rel == 6 and minor)
+        below = [i for i, d in enumerate(degs) if (rel - d) % 12 == 1]
+        above = [i for i, d in enumerate(degs) if (d - rel) % 12 == 1]
+        sharp = spell(pc, self.degree_letter(below[0] + 1)) if below else None
+        flat = spell(pc, self.degree_letter(above[0] + 1)) if above else None
+        options = [sharp, flat] if prefer_sharp else [flat, sharp]
+        for o in options:
+            if o and o.count("#") + o.count("b") <= 1:
+                return o
+        return next(o for o in options if o)
+
     def sharpness(self) -> int:
         """Sharps (+) or flats (-) in the key signature of this key's parent major scale."""
         rel_major = (self.tonic - (self.degrees[0] if False else _mode_offset(self.degrees))) % 12
@@ -292,7 +321,7 @@ def spelled_from_symbol(symbol: str, key: Key | None = None) -> SpelledChord:
 
 
 def chord_in_key(root: int, intervals: tuple[int, ...], key: Key, bass: int | None = None) -> SpelledChord:
-    root_name = key.spell_pc(root)
+    root_name = key.spell_chord_root(root, intervals)
     bass_name = None
     if bass is not None and bass != root:
         tones = spell_chord(root, root_name[0], intervals)

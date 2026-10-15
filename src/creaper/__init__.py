@@ -1,3 +1,3 @@
 """creaper: let Claude compose, mix and analyze in REAPER."""
 
-__version__ = "0.19.2"
+__version__ = "0.19.3"

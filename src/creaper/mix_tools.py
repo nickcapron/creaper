@@ -118,7 +118,7 @@ def plan_mix(channels: list[dict], style: dict | None = None) -> dict:
     actions = []
     side = 1
     for c in channels:
-        a: dict = {"name": c["name"], "role": c["role"]}
+        a: dict = {"name": c["name"], "role": c["role"], "ref": c.get("ref", c["name"])}
         if c.get("level") is None:
             actions.append({**a, "skipped": "silent in this range"})
             continue
@@ -149,10 +149,11 @@ def plan_mix(channels: list[dict], style: dict | None = None) -> dict:
     duck = []
     if kick and style.get("family") in DANCE_FAMILIES:
         for c in channels:
+            refs = {"source_ref": kick.get("ref", kick["name"]), "target_ref": c.get("ref", c["name"])}
             if c["role"] == "bass" and not c.get("ducked"):
-                duck.append({"source": kick["name"], "target": c["name"], "depth": "medium"})
+                duck.append({"source": kick["name"], "target": c["name"], "depth": "medium", **refs})
             elif c["role"] == "pad" and not c.get("ducked"):
-                duck.append({"source": kick["name"], "target": c["name"], "depth": "light"})
+                duck.append({"source": kick["name"], "target": c["name"], "depth": "light", **refs})
     return {"anchor_lufs": round(anchor, 1), "channels": actions, "sidechains": duck}
 
 
@@ -186,7 +187,10 @@ def _channels() -> list[dict]:
         if f"{name} Duck" in by_name:
             continue  # plays through its Duck bus, which is mixed instead
         fx = " ".join(t.get("fx", [])).lower()
-        out.append({"name": name, "track": t["number"], "pan": t.get("pan", 0), "volume_db": t.get("volume_db", 0),
+        # ref: the track's GUID, so every change reaches this exact track even when
+        # names repeat, look like numbers ("808") or are empty, and when tracks move.
+        out.append({"name": name, "track": t["number"], "ref": t.get("guid") or t["number"],
+                    "pan": t.get("pan", 0), "volume_db": t.get("volume_db", 0),
                     "has_eq": "eq" in fx, "has_comp": "comp" in fx or "limit" in fx,
                     "ducked": source is not None or (by_name.get(f"{name} Duck") is not None)})
     return out
@@ -208,8 +212,9 @@ def _clear_robot_vocals(actions: list[dict], start_bar: float | None, end_bar: f
     for a in actions:
         if a["role"] != "vocal" or a.get("skipped"):
             continue
+        vocal = a.get("ref", a["name"])
         try:
-            now = measure_vocal_clarity(a["name"], start_bar, end_bar)
+            now = measure_vocal_clarity(vocal, start_bar, end_bar)
         except ValueError:
             continue  # not a robot vocal: no clean words to compare with
         entry: dict = {"vocal": a["name"], "before": {k: now.get(k, {}).get("score") for k in ("alone", "in_mix")}}
@@ -219,27 +224,29 @@ def _clear_robot_vocals(actions: list[dict], start_bar: float | None, end_bar: f
             return 0.0 if alone is None or mixed is None else alone - mixed
 
         if covered(now) > COVERED:
-            vol = call("get_track_details", track=a["name"])["volume_db"]
-            call("set_track_properties", track=a["name"], volume_db=round(vol + 2, 1))
+            vol = call("get_track_details", track=vocal)["volume_db"]
+            call("set_track_properties", track=vocal, volume_db=round(vol + 2, 1))
             entry["raised_db"] = 2
-            now = measure_vocal_clarity(a["name"], start_bar, end_bar)
+            now = measure_vocal_clarity(vocal, start_bar, end_bar)
         if covered(now) > COVERED and candidates:
             base = now["in_mix"]["score"]
             gains = []
             for c in candidates:
-                call("set_track_properties", track=c["name"], mute=True)
+                other = c.get("ref", c["name"])
+                call("set_track_properties", track=other, mute=True)
                 try:
-                    without = measure_vocal_clarity(a["name"], start_bar, end_bar, in_mix=True)["in_mix"]["score"]
+                    without = measure_vocal_clarity(vocal, start_bar, end_bar, in_mix=True)["in_mix"]["score"]
                 finally:
-                    call("set_track_properties", track=c["name"], mute=False)
+                    call("set_track_properties", track=other, mute=False)
                 gains.append((without - base, c))
             ducked = []
             for gain, c in sorted(gains, key=lambda g: -g[0]):
                 if gain < 0.01 or covered(now) <= COVERED:
                     break
-                setup_sidechain(source=a["name"], target=c["name"], depth="heavy" if c["role"] == "lead" else "medium")
+                setup_sidechain(source=vocal, target=c.get("ref", c["name"]),
+                                depth="heavy" if c["role"] == "lead" else "medium")
                 ducked.append(c["name"])
-                now = measure_vocal_clarity(a["name"], start_bar, end_bar)
+                now = measure_vocal_clarity(vocal, start_bar, end_bar)
             entry["covering"] = {c["name"]: round(g, 3) for g, c in sorted(gains, key=lambda g: -g[0]) if g > 0.005}
             if ducked:
                 entry["ducked_under_vocal"] = ducked
@@ -327,43 +334,45 @@ def auto_mix(
     verb = _reverb_return() if reverb and any("reverb_send_db" in a for a in plan["channels"]) else None
     already_sending = {src for src, r in ((t["name"], t) for t in call("get_routing")["tracks"])
                        for snd in r.get("sends") or [] if verb and snd["to"] == verb}
-    numbers = {c["name"]: c for c in channels}
+    by_ref = {c["ref"]: c for c in channels}
     for a in plan["channels"]:
-        c = numbers[a["name"]]
+        c = by_ref[a["ref"]]
+        track = a["ref"]
         if "gain_db" in a:
-            call("set_track_properties", track=a["name"], volume_db=round(c.get("volume_db", 0) + a["gain_db"], 1))
+            call("set_track_properties", track=track, volume_db=round(c.get("volume_db", 0) + a["gain_db"], 1))
         if "pan" in a:
-            call("set_track_properties", track=a["name"], pan=a["pan"])
+            call("set_track_properties", track=track, pan=a["pan"])
         if a.get("skipped"):
             continue
         if "highpass_hz" in a or "mud_cut_db" in a:
             # After the last instrument: an EQ before a synth does nothing, and one between
             # sampler slots filters only the slots before it.
-            fx = call("get_track_details", track=a["name"]).get("fx", [])
+            fx = call("get_track_details", track=track).get("fx", [])
             last_instrument = max((f["index"] for f in fx if f.get("instrument")), default=0)
-            eq = call("add_fx", track=a["name"], name="ReaEQ", position=last_instrument + 1)
+            eq = call("add_fx", track=track, name="ReaEQ", position=last_instrument + 1)
             changes = [{"parameter": "Freq-High Pass 5", "display_value": a["highpass_hz"]}] if "highpass_hz" in a else []
             if "mud_cut_db" in a:
                 changes += [{"parameter": "Freq-Band 2", "display_value": 350},
                             {"parameter": "Gain-Band 2", "display_value": a["mud_cut_db"]},
                             {"parameter": "BW-Band 2", "display_value": 1.0}]
-            call("set_fx_parameters", track=a["name"], fx=eq["index"], changes=changes)
+            call("set_fx_parameters", track=track, fx=eq["index"], changes=changes)
         if "compress" in a:
             k = a["compress"]
-            comp = call("add_fx", track=a["name"], name="ReaComp")
-            call("set_fx_parameters", track=a["name"], fx=comp["index"], changes=[
+            comp = call("add_fx", track=track, name="ReaComp")
+            call("set_fx_parameters", track=track, fx=comp["index"], changes=[
                 {"parameter": "Threshold", "display_value": k["threshold_db"]},
                 {"parameter": "Ratio", "display_value": k["ratio"]},
                 {"parameter": "Attack", "display_value": k["attack_ms"]},
                 {"parameter": "Release", "display_value": k["release_ms"]}])
         if verb and "reverb_send_db" in a and a["name"] not in already_sending:
-            call("set_send", source=a["name"], destination=verb, volume_db=a["reverb_send_db"])
+            call("set_send", source=track, destination=verb, volume_db=a["reverb_send_db"])
         elif a["name"] in already_sending:
             a["reverb_send_kept"] = True  # the user's (or an earlier pass's) send level stays
     if sidechain:
         for d in plan["sidechains"]:
             try:
-                setup_sidechain(source=d["source"], target=d["target"], depth=d["depth"])
+                setup_sidechain(source=d.get("source_ref", d["source"]), target=d.get("target_ref", d["target"]),
+                                depth=d["depth"])
             except Exception as e:  # noqa: BLE001
                 report.setdefault("warnings", []).append(f"sidechain {d['source']} -> {d['target']}: {e}")
     # Headroom: move every fader together so the mix peaks around -6 dBFS.
@@ -372,8 +381,8 @@ def auto_mix(
     if peak is not None and abs(peak - HEADROOM_PEAK_DB) > 1.0:
         shift = round(HEADROOM_PEAK_DB - peak, 1)
         for c in (c for c in channels if c.get("level") is not None):
-            now = call("get_track_details", track=c["name"])["volume_db"]
-            call("set_track_properties", track=c["name"], volume_db=round(now + shift, 1))
+            now = call("get_track_details", track=c["ref"])["volume_db"]
+            call("set_track_properties", track=c["ref"], volume_db=round(now + shift, 1))
         if verb:
             now = call("get_track_details", track=verb)["volume_db"]
             call("set_track_properties", track=verb, volume_db=round(now + shift, 1))

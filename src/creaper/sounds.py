@@ -15,10 +15,11 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
-import os
 import re
 from pathlib import Path
 from typing import Any
+
+from . import jsonstore
 
 # Where a sound comes from. Only plugins for now; hardware synths (MIDI out +
 # audio in) can be added as another source later without changing the format.
@@ -54,19 +55,11 @@ class SoundLibrary:
     # ------------------------------------------------------------- storage
 
     def _read(self) -> dict[str, dict]:
-        try:
-            data = json.loads(self.index_path.read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            return {}
-        except ValueError as e:
-            raise ValueError(f"{self.index_path} isn't valid JSON ({e}); fix or delete it") from None
-        return data.get("sounds", {})
+        return jsonstore.read(self.index_path, dict).get("sounds", {})
 
-    def _write(self, sounds: dict[str, dict]) -> None:
-        self.folder.mkdir(parents=True, exist_ok=True)
-        tmp = self.index_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps({"version": 1, "sounds": sounds}, indent=2), encoding="utf-8")
-        os.replace(tmp, self.index_path)
+    def _updating(self):
+        """The index to change, saved (under the library's lock) when the block ends."""
+        return jsonstore.updating(self.index_path, lambda: {"version": 1, "sounds": {}}, indent=2)
 
     def _state_path(self, entry: dict) -> Path:
         path = (self.folder / f"{entry['id']}.state.json").resolve()
@@ -78,7 +71,10 @@ class SoundLibrary:
 
     def find(self, name: str) -> tuple[str, dict]:
         """Exact name (any case), else a single partial match."""
-        sounds = self._read()
+        return self._match(self._read(), name)
+
+    @staticmethod
+    def _match(sounds: dict[str, dict], name: str) -> tuple[str, dict]:
         wanted = name.strip().lower()
         if wanted in sounds:
             return wanted, sounds[wanted]
@@ -95,10 +91,10 @@ class SoundLibrary:
         name = name.strip()
         if not name:
             raise ValueError("give the sound a name, e.g. 'Dark Pad'")
-        sounds = self._read()
         key = name.lower()
-        if key in sounds and not overwrite:
-            raise ValueError(f"there's already a sound named '{sounds[key]['name']}'; "
+        existing = self._read()
+        if key in existing and not overwrite:
+            raise ValueError(f"there's already a sound named '{existing[key]['name']}'; "
                              "pick another name or set overwrite=true")
         entry = {
             "id": _slug(name),
@@ -118,12 +114,9 @@ class SoundLibrary:
         }
         state = {key_: captured.get(key_) for key_ in ("plugin", "file", "format", "instrument", "chunk", "params")}
         self.folder.mkdir(parents=True, exist_ok=True)
-        path = self._state_path(entry)
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(state), encoding="utf-8")
-        os.replace(tmp, path)
-        sounds[key] = entry
-        self._write(sounds)
+        jsonstore.write(self._state_path(entry), state, indent=None)
+        with self._updating() as data:
+            data.setdefault("sounds", {})[key] = entry
         return entry
 
     def state(self, entry: dict) -> dict:
@@ -152,8 +145,14 @@ class SoundLibrary:
 
     def update(self, name: str, new_name: str | None = None, tags: list[str] | None = None,
                add_tags: list[str] | None = None, description: str | None = None) -> dict:
-        sounds = self._read()
-        key, entry = self.find(name)
+        with self._updating() as data:
+            sounds = data.setdefault("sounds", {})
+            key, entry = self._match(sounds, name)
+            return self._edit(sounds, key, entry, new_name, tags, add_tags, description)
+
+    @staticmethod
+    def _edit(sounds: dict[str, dict], key: str, entry: dict, new_name: str | None, tags: list[str] | None,
+              add_tags: list[str] | None, description: str | None) -> dict:
         if tags is not None:
             entry["tags"] = _norm_tags(tags)
         if add_tags:
@@ -170,17 +169,16 @@ class SoundLibrary:
         elif new_name:
             entry["name"] = new_name.strip()
         sounds[key] = entry
-        self._write(sounds)
         return entry
 
     def delete(self, name: str) -> dict:
-        sounds = self._read()
-        key, entry = self.find(name)
-        if key != name.strip().lower():
-            raise ValueError(f"to delete a sound, use its exact name ('{entry['name']}')")
+        with self._updating() as data:
+            sounds = data.setdefault("sounds", {})
+            key, entry = self._match(sounds, name)
+            if key != name.strip().lower():
+                raise ValueError(f"to delete a sound, use its exact name ('{entry['name']}')")
+            del sounds[key]
         self._state_path(entry).unlink(missing_ok=True)
-        del sounds[key]
-        self._write(sounds)
         return entry
 
 

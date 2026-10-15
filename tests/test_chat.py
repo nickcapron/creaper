@@ -79,6 +79,52 @@ def test_turn_retries_once_when_the_tools_did_not_start(tmp_path, monkeypatch):
     assert any(e["t"] == "info" and "didn't start in time" in e["message"] for e in events)
 
 
+def _request(tmp_path, **extra):
+    req = {"prompt": "hi", "events": str(tmp_path / "t.jsonl"), "cancel": str(tmp_path / "t.cancel"), **extra}
+    path = tmp_path / "t.json"
+    path.write_text(json.dumps(req), encoding="utf-8")
+    return path
+
+
+def test_turn_says_started_before_claude_runs(tmp_path, monkeypatch):
+    # The panel gave up after 45 s without an event, but creaper's server may take up
+    # to 2 minutes to start: the helper now says "started" first thing.
+    seen = []
+
+    def fake_turn(request, workdir, cancel, emit):
+        seen.append(json.loads((tmp_path / "t.jsonl").read_text(encoding="utf-8").splitlines()[0]))
+        return True, False
+
+    monkeypatch.setattr(chat, "_turn", fake_turn)
+    assert chat.run_turn(_request(tmp_path)) == 0
+    assert seen == [{"t": "started"}]
+
+
+def test_a_stopped_turn_never_starts_claude(tmp_path, monkeypatch):
+    runs = []
+    monkeypatch.setattr(chat, "find_claude", lambda configured=None: "claude")
+    monkeypatch.setattr(chat, "run_claude", lambda *a: runs.append(a) or (0, "", False))
+    cancel = tmp_path / "t.cancel"
+    cancel.write_text("stop", encoding="utf-8")
+    ok, cancelled = chat._turn({"prompt": "hi"}, tmp_path, cancel, lambda **e: None)
+    assert cancelled and not ok and not runs
+
+
+def test_a_turn_the_panel_gave_up_on_tidies_up_its_files(tmp_path, monkeypatch):
+    # When the panel gives up it removes the request: the helper, finishing later,
+    # removes the events and cancel files nobody will read.
+    request = _request(tmp_path)
+    (tmp_path / "t.cancel").write_text("stop", encoding="utf-8")
+
+    def panel_gives_up(*a):
+        request.unlink()
+        return False, True
+
+    monkeypatch.setattr(chat, "_turn", panel_gives_up)
+    chat.run_turn(request)
+    assert not (tmp_path / "t.jsonl").exists() and not (tmp_path / "t.cancel").exists()
+
+
 def test_claude_gets_a_longer_mcp_start_timeout(monkeypatch):
     monkeypatch.delenv("MCP_TIMEOUT", raising=False)
     assert chat.claude_env()["MCP_TIMEOUT"] == chat.MCP_START_TIMEOUT_MS

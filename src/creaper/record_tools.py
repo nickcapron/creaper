@@ -49,8 +49,10 @@ def set_record_settings(
     """Sets up a track for recording: what it records (an audio input such as a mic,
     a guitar or a hardware synth's outputs on the interface, or a MIDI device such as
     a keyboard), whether it's armed, input monitoring, and the record mode
-    (resampling the track's output, MIDI overdub...). Only the arguments given
-    change. list_inputs names the inputs; record then records a bar range. Returns
+    (resampling the track's output, MIDI overdub...). Choosing an input also sets the
+    record mode back to recording that input unless mode is given; other settings not
+    given stay as they are. list_inputs names the inputs; record then records a bar
+    range. Returns
     the track's record settings."""
     return call("set_record_settings", track=track, arm=arm, audio_input=audio_input, stereo=stereo,
                 midi_device=midi_device, midi_channel=midi_channel, no_input=no_input, monitor=monitor, mode=mode)

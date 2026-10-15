@@ -126,7 +126,10 @@ if ((Test-Path (Join-Path $claudeBin 'claude.exe')) -and -not (Get-Command claud
 # without putting the environment's own python.exe on PATH.
 $bin = Join-Path $root 'bin'
 New-Item -ItemType Directory -Force -Path $bin | Out-Null
-Set-Content -Path (Join-Path $bin 'creaper.cmd') -Encoding ASCII -Value "@`"$venv\Scripts\creaper.exe`" %*"
+# %LOCALAPPDATA% rather than the path itself: a .cmd file is read in the console's code
+# page, so a username like "José" written into it came out as "Jos?" and the command
+# couldn't find creaper.
+Set-Content -Path (Join-Path $bin 'creaper.cmd') -Encoding ASCII -Value '@"%LOCALAPPDATA%\creaper\venv\Scripts\creaper.exe" %*'
 Add-UserPath $bin
 
 # Everything else: ReaImGui, creaper's scripts in REAPER, Claude Desktop / Claude Code.

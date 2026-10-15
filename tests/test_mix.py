@@ -24,8 +24,8 @@ def test_plan_sets_levels_relative_to_the_drums_for_the_genre():
     gains = {a["name"]: a["gain_db"] for a in plan["channels"]}
     assert plan["anchor_lufs"] == -10
     assert gains == {"Kick": 0, "Bass": -5.0, "Pad": -12.0, "Vocal": 4.0}   # bass -1 LU (heavy low end), pad -10, vocal -1
-    assert plan["sidechains"] == [{"source": "Kick", "target": "Bass", "depth": "medium"},
-                                  {"source": "Kick", "target": "Pad", "depth": "light"}]
+    assert [{k: d[k] for k in ("source", "target", "depth")} for d in plan["sidechains"]] == [
+        {"source": "Kick", "target": "Bass", "depth": "medium"}, {"source": "Kick", "target": "Pad", "depth": "light"}]
     pop = plan_mix(chans, {"family": "pop", "mix": {"low_end": "moderate"}})
     assert {a["name"]: a["gain_db"] for a in pop["channels"]}["Vocal"] == 6.0 and not pop["sidechains"]
 
@@ -47,7 +47,25 @@ def test_plan_cleans_up_without_touching_what_the_user_set():
 
 def test_silent_tracks_are_left_alone():
     acts = {a["name"]: a for a in plan_mix([channel("Kick", "kick", -10), channel("Ghost", "lead", None)])["channels"]}
-    assert acts["Ghost"] == {"name": "Ghost", "role": "lead", "skipped": "silent in this range"}
+    assert acts["Ghost"] == {"name": "Ghost", "role": "lead", "ref": "Ghost", "skipped": "silent in this range"}
+
+
+def test_plan_targets_each_track_by_its_own_id():
+    # auto_mix used to apply the plan by track name: two tracks named "Synth" both
+    # went to the first one, "808" was read as track number 808, and an unnamed track
+    # matched track 1. Each action now carries the track's GUID.
+    chans = [
+        {"name": "Synth", "ref": "{AAAAAAAA-0000-0000-0000-000000000001}", "role": "lead", "level": -14.0},
+        {"name": "Synth", "ref": "{AAAAAAAA-0000-0000-0000-000000000002}", "role": "lead", "level": -20.0},
+        {"name": "808", "ref": "{AAAAAAAA-0000-0000-0000-000000000003}", "role": "bass", "level": -12.0},
+        {"name": "Kick", "ref": "{AAAAAAAA-0000-0000-0000-000000000004}", "role": "kick", "level": -10.0},
+    ]
+    plan = plan_mix(chans, {"family": "electronic dance", "mix": {"low_end": "heavy"}})
+    assert [a["ref"] for a in plan["channels"]] == [c["ref"] for c in chans]
+    gains = [a["gain_db"] for a in plan["channels"][:2]]
+    assert gains[0] != gains[1]  # the two Synths get their own levels
+    side = plan["sidechains"][0]
+    assert side["source_ref"] == chans[3]["ref"] and side["target_ref"] == chans[2]["ref"]
 
 
 
@@ -70,3 +88,49 @@ def test_highpass_stays_under_a_parts_lowest_notes():
     hats = octaves(**{"2 kHz": -10, "4 kHz": -4, "8 kHz": -3})
     assert highpass_for("perc", hats) == 300     # nothing low: the usual high-pass
     assert highpass_for("bass", cello) is None
+
+
+def test_sidechain_level_ignores_the_trigger_tracks_fader(monkeypatch):
+    # The send taps the kick before its fader, but the level was measured after it: a
+    # kick turned down 10 dB got 10 dB too much send and ducked ~15 dB, not ~4.5.
+    from creaper import server
+
+    sends = []
+
+    def fake_call(command, **args):
+        if command == "setup_sidechain":
+            return {"target": {"number": 2}, "is_reacomp": True, "fx_index": 1}
+        if command == "describe_track":
+            return {"volume_db": -10.0}
+        if command == "set_send":
+            sends.append(args["volume_db"])
+        return {}
+
+    monkeypatch.setattr(server, "call", fake_call)
+    monkeypatch.setattr(server, "analyze_audio", lambda **a: {"levels": {"sample_peak_dbfs": -16.0}})
+    result = server.setup_sidechain(source="Kick", target="Bass")
+    assert sends == [0.0]  # the kick peaks at -6 dBFS before its fader already
+    assert result["sidechain_level"] == {"source_peak_dbfs": -6.0, "send_gain_db": 0.0}
+
+
+def test_mastering_reports_the_master_as_it_ends_up(monkeypatch):
+    # When the passes ran out right after an adjustment, the report showed the
+    # measurement from before it: "-20 LUFS, not reached" for a master now at -14.2.
+    from creaper import server
+
+    def fake_call(command, **args):
+        if command == "get_track_details":
+            return {"fx": [{"index": 1, "name": "ReaLimit"}]}
+        if command == "get_fx_parameters":
+            return {"parameters": [{"display": "0.0"}]}
+        if command == "describe_track":
+            return {"volume_db": 0.0}
+        return {}
+
+    readings = iter([-20.0, -14.2])
+    monkeypatch.setattr(server, "call", fake_call)
+    monkeypatch.setattr(server, "analyze_audio", lambda **a: {
+        "loudness": {"integrated_lufs": next(readings)}, "levels": {"true_peak_dbtp": -1.5}})
+    result = server.master_to_target(target_lufs=-14.0, glue=False, passes=1)
+    assert [p["integrated_lufs"] for p in result["passes"]] == [-20.0, -14.2]
+    assert result["reached"] is True

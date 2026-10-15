@@ -7,10 +7,10 @@ can read, edit or delete it.
 from __future__ import annotations
 
 import datetime as dt
-import json
-import os
 import uuid
 from pathlib import Path
+
+from . import jsonstore
 
 TOPICS = ("plugin", "preference", "mix", "sound", "project", "other")
 
@@ -20,19 +20,11 @@ class Knowledge:
         self.path = Path(path)
 
     def _read(self) -> list[dict]:
-        try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            return []
-        except ValueError as e:
-            raise ValueError(f"{self.path} isn't valid JSON ({e}); fix or delete it") from None
-        return data.get("notes", [])
+        return jsonstore.read(self.path, dict).get("notes", [])
 
-    def _write(self, notes: list[dict]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps({"version": 1, "notes": notes}, indent=2), encoding="utf-8")
-        os.replace(tmp, self.path)
+    def _updating(self):
+        """The notes list to change, saved (under the store's lock) when the block ends."""
+        return jsonstore.updating(self.path, lambda: {"version": 1, "notes": []}, indent=2)
 
     def add(self, text: str, topic: str = "other", subject: str | None = None) -> dict:
         text = text.strip()
@@ -41,15 +33,15 @@ class Knowledge:
         topic = topic.strip().lower()
         if topic not in TOPICS:
             raise ValueError(f"topic must be one of {', '.join(TOPICS)}")
-        notes = self._read()
         subject_key = (subject or "").strip().lower()
-        for note in notes:  # the same lesson twice adds nothing
-            if note["text"].lower() == text.lower() and (note.get("subject") or "").lower() == subject_key:
-                return note
-        note = {"id": uuid.uuid4().hex[:8], "topic": topic, "subject": (subject or "").strip() or None,
-                "text": text, "saved": dt.date.today().isoformat()}
-        notes.append(note)
-        self._write(notes)
+        with self._updating() as data:
+            notes = data.setdefault("notes", [])
+            for note in notes:  # the same lesson twice adds nothing
+                if note["text"].lower() == text.lower() and (note.get("subject") or "").lower() == subject_key:
+                    return note
+            note = {"id": uuid.uuid4().hex[:8], "topic": topic, "subject": (subject or "").strip() or None,
+                    "text": text, "saved": dt.date.today().isoformat()}
+            notes.append(note)
         return note
 
     def find(self, search: str | None = None, topic: str | None = None, subject: str | None = None) -> list[dict]:
@@ -69,10 +61,10 @@ class Knowledge:
         return out
 
     def delete(self, note_id: str) -> dict:
-        notes = self._read()
-        for i, note in enumerate(notes):
-            if note["id"] == note_id.strip():
-                del notes[i]
-                self._write(notes)
-                return note
+        with self._updating() as data:
+            notes = data.setdefault("notes", [])
+            for i, note in enumerate(notes):
+                if note["id"] == note_id.strip():
+                    del notes[i]
+                    return note
         raise ValueError(f"there's no note with id '{note_id}' (find_notes lists them)")

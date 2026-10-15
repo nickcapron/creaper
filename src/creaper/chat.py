@@ -240,7 +240,8 @@ def run_claude(cmd: list[str], prompt: str, cwd: Path, translator: Translator, c
 
 
 def run_turn(request_path: Path) -> int:
-    request = json.loads(Path(request_path).read_text(encoding="utf-8"))
+    request_path = Path(request_path)
+    request = json.loads(request_path.read_text(encoding="utf-8"))
     events_path = Path(request["events"])
     cancel_path = Path(request["cancel"]) if request.get("cancel") else None
     workdir = events_path.parent
@@ -251,6 +252,9 @@ def run_turn(request_path: Path) -> int:
             out.write(json.dumps(event) + "\n")
             out.flush()
 
+        # Right away, before Claude Code and creaper's server start (which can take up
+        # to MCP_TIMEOUT): the panel's "the helper didn't start" timer stops here.
+        emit(t="started")
         ok, cancelled = False, False
         try:
             ok, cancelled = _turn(request, workdir, cancel_path, emit)
@@ -258,6 +262,12 @@ def run_turn(request_path: Path) -> int:
             emit(t="error", message=f"creaper chat failed: {e}")
         finally:
             emit(t="done", ok=ok, cancelled=cancelled)
+    # The panel removes the request when it gives up on a turn: nobody will read
+    # these files, so tidy them up.
+    if not request_path.exists():
+        for path in (events_path, cancel_path):
+            if path is not None:
+                path.unlink(missing_ok=True)
     return 0 if ok else 1
 
 
@@ -283,6 +293,8 @@ def _turn(request: dict, workdir: Path, cancel_path: Path | None, emit: Callable
 
     session_id = request.get("session_id")
     for attempt in range(2):
+        if cancel_path is not None and cancel_path.exists():
+            return False, True  # stopped (or given up on) before Claude started
         translator = Translator(emit)
         cmd = build_command(claude, "mcp.json", session_id, request.get("model"))
         code, stderr, cancelled = run_claude(cmd, request["prompt"], workdir, translator, cancel_path)

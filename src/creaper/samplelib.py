@@ -72,12 +72,15 @@ def bpm_from_name(name: str) -> float | None:
 
 
 def key_from_name(name: str) -> str | None:
-    m = re.search(r"(?:^|[ _\-(\[])([A-G][#b]?)\s?(m|min|minor|maj|major)(?=$|[ _\-)\].])", name)
+    """The key a file's name gives: 'Pad_Am_120', 'Keys C# minor', 'Pad_in_D_minor',
+    'Guitar key E'. "key"/"in" must be whole words before a capital note letter: matched
+    inside words with any case, 'Main_B_loop' and 'Rain_in_a_jar' became B and A major."""
+    m = re.search(r"(?:^|[ _\-(\[])([A-G][#b]?)[ _\-]?(m|min|minor|maj|major)(?=$|[ _\-)\].])", name)
     if m:
         quality = "minor" if m.group(2).lower().startswith("m") and m.group(2).lower() not in ("maj", "major") else "major"
         return f"{m.group(1)} {quality}"
-    m = re.search(r"(?:key|in)[ _\-]?([A-G][#b]?)(?=$|[ _\-)\].])", name, re.IGNORECASE)
-    return f"{m.group(1).upper()} major" if m else None
+    m = re.search(r"(?:^|[ _\-(\[])(?i:key|in)[ _\-]?([A-G][#b]?)(?=$|[ _\-)\].])", name)
+    return f"{m.group(1)} major" if m else None
 
 
 # ------------------------------------------------------------------ analysis
@@ -90,6 +93,8 @@ def _load(path: str, seconds: float = 30.0) -> tuple[np.ndarray, int, float]:
 
 
 def onset_envelope(x: np.ndarray, fs: int, hop: int = 512) -> np.ndarray:
+    if len(x) < 2048:  # a short hit (a 40 ms click): scipy refused a window longer than the sound
+        x = np.pad(x, (0, 2048 - len(x)))
     _, _, z = signal.stft(x, fs=fs, nperseg=2048, noverlap=2048 - hop, boundary=None, padded=False)
     mag = np.log1p(np.abs(z) * 100)
     flux = np.maximum(0, np.diff(mag, axis=1)).sum(axis=0)

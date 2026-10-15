@@ -128,3 +128,32 @@ def test_parallel_searches_dont_fight_over_the_index(tmp_path):
     saved = json.loads(lib.index_path.read_text(encoding="utf-8"))
     assert all(f.get("analysis", {}).get("n") == i for i, f in enumerate(saved["files"]))
     assert not list(tmp_path.glob("*.tmp"))
+
+
+@pytest.mark.parametrize("name,key", [
+    ("Pad_in_D_minor", "D minor"),     # was D major: "_" wasn't allowed before "minor"
+    ("Main_B_loop_120", None),         # was B major: "in" inside "Main"
+    ("Latin_A_perc", None),            # was A major: "in" inside "Latin"
+    ("Rain_in_a_jar_vox", None),       # was A major: a lowercase "a" taken for a key
+    ("Guitar key E", "E major"),
+    ("Lead in Bb", "Bb major"),
+    ("Strings_C_major_90bpm", "C major"),
+])
+def test_keys_from_names_dont_misfire(name, key):
+    assert samplelib.key_from_name(name) == key
+
+
+def test_very_short_samples_can_be_analysed(tmp_path):
+    # A 23 ms click is shorter than the 2048-sample analysis window, which scipy refused.
+    import numpy as np
+    import soundfile as sf
+
+    from creaper import perception
+    fs = 44100
+    click = np.zeros(1000)
+    click[:40] = np.hanning(40)
+    path = tmp_path / "click.wav"
+    sf.write(str(path), click, fs)
+    assert samplelib.onset_envelope(click, fs) is not None
+    assert samplelib.analyze(str(path))
+    assert perception.spectrogram_png(click, fs)[:4] == b"\x89PNG"

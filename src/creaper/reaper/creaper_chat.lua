@@ -1,6 +1,6 @@
 -- @description creaper chat: talk to Claude from a dockable panel inside REAPER
 -- @author nickcapron
--- @version 0.19.2
+-- @version 0.19.3
 -- @link https://github.com/nickcapron/creaper
 -- @about
 --   A chat panel for creaper. Messages go to your own Claude Code (your Claude
@@ -183,7 +183,9 @@ end
 
 local function handle_event(ev)
   turn.got_event = true
-  if ev.t == "session" then
+  if ev.t == "started" then
+    return  -- the helper is running; Claude's reply follows
+  elseif ev.t == "session" then
     state.session_id = ev.id
   elseif ev.t == "text_start" then
     local last = state.messages[#state.messages]
@@ -237,10 +239,16 @@ local function poll_turn()
       end
     end
   end
+  -- The helper says "started" as soon as Python runs, so this only fires when it
+  -- couldn't start at all. Ask it to stop rather than forget it: a helper that starts
+  -- late would otherwise work in the project with no Stop button.
   if not turn.got_event and os.time() - turn.started > 45 then
     add_message("error", "The chat helper didn't start. Check that creaper is installed for "
       .. tostring(config and config.python) .. " (run `creaper install-bridge` again).")
-    cleanup_turn(turn)
+    write_file(turn.cancel, "stop")
+    os.remove(turn.request)
+    os.remove(turn.events)
+    if turn.confirm then os.remove(turn.confirm) end
     turn = nil
     save_state()
   end

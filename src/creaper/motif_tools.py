@@ -4,7 +4,6 @@ faster, an octave up or down. Kept in <resource>/creaper/motifs.json."""
 
 from __future__ import annotations
 
-import json
 import re
 import time
 from pathlib import Path
@@ -12,7 +11,7 @@ from typing import Annotated
 
 from pydantic import Field
 
-from . import harmony
+from . import harmony, jsonstore
 from .server import READ_ONLY, ItemId, bridge, call, tool
 
 
@@ -21,18 +20,9 @@ def motifs_file() -> Path:
 
 
 def _load() -> dict:
-    try:
-        return json.loads(motifs_file().read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-
-
-def _save(data: dict) -> None:
-    path = motifs_file()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, indent=1), encoding="utf-8")
-    tmp.replace(path)
+    # An unreadable file is an error, not an empty library: treating it as empty let
+    # the next save_motif write over every saved motif.
+    return jsonstore.read(motifs_file(), dict)
 
 
 def _key(name: str) -> str:
@@ -94,12 +84,11 @@ def save_motif(
     data = call("get_midi_notes", item_id=item_id, limit=5000)
     notes = capture(data.get("notes", []), start, end)
     harmony.parse_key(key)
-    motifs = _load()
-    if _key(name) in motifs and not overwrite:
-        raise ValueError(f"there's already a motif called '{name}'; pick another name or set overwrite=true")
-    motifs[_key(name)] = {"name": name.strip(), "key": key, "notes": notes, "description": description,
-                          "saved": time.strftime("%Y-%m-%d")}
-    _save(motifs)
+    with jsonstore.updating(motifs_file(), dict) as motifs:
+        if _key(name) in motifs and not overwrite:
+            raise ValueError(f"there's already a motif called '{name}'; pick another name or set overwrite=true")
+        motifs[_key(name)] = {"name": name.strip(), "key": key, "notes": notes, "description": description,
+                              "saved": time.strftime("%Y-%m-%d")}
     return {"saved": name.strip(), "key": key, "notes": _names(notes, key),
             "length_qn": max(n["start"] + n["length"] for n in notes)}
 

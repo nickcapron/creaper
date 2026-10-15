@@ -10,13 +10,14 @@ the right plugin for a job. Everything describes the plugin at its default setti
 
 from __future__ import annotations
 
-import json
 import math
 import time
 from pathlib import Path
 
 import numpy as np
 from scipy import signal
+
+from . import jsonstore
 
 SIGNAL_VERSION = 2  # bump when the test signal changes, so cached files are rebuilt
 
@@ -406,21 +407,15 @@ class PluginCatalog:
         self.path = Path(path)
 
     def all(self) -> dict[str, dict]:
-        try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            return {}
-        except ValueError as e:
-            raise ValueError(f"{self.path} isn't valid JSON ({e}); fix or delete it") from None
+        data = jsonstore.read(self.path, dict)
         return data.get("plugins", {}) if data.get("version") == self.VERSION else {}
 
     def get(self, name: str) -> dict | None:
         return self.all().get(name)
 
     def put(self, name: str, entry: dict) -> None:
-        plugins = self.all()
-        plugins[name] = {**entry, "tested": time.strftime("%Y-%m-%d")}
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps({"version": self.VERSION, "plugins": plugins}, indent=1), encoding="utf-8")
-        tmp.replace(self.path)
+        with jsonstore.updating(self.path, dict, indent=1) as data:
+            if data.get("version") != self.VERSION:  # an old format starts over, as before
+                data.clear()
+                data.update(version=self.VERSION, plugins={})
+            data.setdefault("plugins", {})[name] = {**entry, "tested": time.strftime("%Y-%m-%d")}
