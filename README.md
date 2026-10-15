@@ -2,24 +2,30 @@
 
 ![creaper: an AI producer that lives inside REAPER](assets/brand/creaper-banner.svg)
 
-**Let Claude compose, mix and analyze in [REAPER](https://www.reaper.fm).**
+**Let Claude compose, arrange, mix and master in [REAPER](https://www.reaper.fm), with
+your own plugins, from a chat panel docked right inside it.**
 
-creaper connects Claude to your open REAPER project. You ask in plain language;
-Claude reads the project, writes MIDI, builds FX chains, sets up routing, and measures
-the actual audio before giving mix feedback.
+creaper connects Claude to your open REAPER project. You ask in plain language; Claude
+writes full-length songs in 264 genres, programs your synths, builds FX chains and
+routing, adds vocals, mixes and masters, and exports finished music and game sound
+effects. Claude can't hear, so creaper measures the actual audio (loudness, tuning,
+clarity, the spectrum) and checks its own work before calling it done.
 
-> "Make an 8-bar lo-fi progression in D minor on a new Keys track, with a swung drum
-> beat underneath."
->
-> "Sketch a bossa nova in F: guitar comping, walking-ish bass, a melody I can sing."
+> "Make a 6-minute piano house track at 124 BPM with a proper DJ intro and outro."
 >
 > "Reharmonize my chorus with tritone subs and tell me what each change does."
 >
+> "Add a robot vocal singing the hook: 'we were never here'."
+>
 > "The chorus feels muddy. Measure the mix from bar 33 to 49 and tell me why."
 >
-> "Put a compressor on the vocal: threshold −18 dB, 4:1, and send it to a reverb bus at −12."
+> "Mix every track, then master it for streaming."
 >
-> "Play bars 17 to 25 so I can hear it."
+> "Make 3:00 of tense laboratory music for my game in 7/8, ending so it crossfades
+> cleanly into the next track."
+>
+> "Design five variations of a hockey slap shot and export each as a trimmed, mono
+> 24-bit WAV for my game."
 
 Every change is a named undo step (`creaper: add ReaComp to Vocal`), so **Ctrl+Z undoes
 anything Claude did**.
