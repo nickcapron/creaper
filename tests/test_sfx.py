@@ -79,3 +79,13 @@ def test_export_regions_writes_one_file_per_region(tmp_path, monkeypatch):
     assert abs(by["shot_01.wav"]["peak_dbfs"] + 1.0) < 0.05 and 18 <= by["shot_01.wav"]["head_trimmed_ms"] <= 20
     assert by["crowd_bed.wav"]["loop_length_s"] == 4.0 and by["crowd_bed.wav"]["seam_db"] < 6
     assert by["shot_02.wav"].get("tail_cut_off") and any("shot_02" in p for p in r["problems"])
+
+
+def test_a_lingering_offset_and_a_minus_100_db_floor_still_trim():
+    """A low sine's DC residue, and a generator fading to -100 dB instead of silence,
+    kept near-silent tails in exported one-shots."""
+    sound = hit(0.2, delay=0)
+    residue = np.concatenate([sound, np.full((FS, 1), 2e-4)])             # an offset left after the sound
+    assert len(x.trim_tail(x.remove_dc(residue, FS))) < len(sound) + FS // 4
+    hiss = np.concatenate([sound, 10 ** (-100 / 20) * np.random.default_rng(0).standard_normal((FS, 1))])
+    assert len(x.trim_tail(hiss)) <= len(sound) + 50

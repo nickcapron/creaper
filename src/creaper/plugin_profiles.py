@@ -140,6 +140,14 @@ PROFILES: tuple[Profile, ...] = (
                   "reverb": "Reverb Dry/Wet"},
     ),
     Profile(
+        "ReaSynth", "instrument",
+        "REAPER's simple synth (square, saw, triangle and sine mix, ADSR). It plays notes shorter than about "
+        "25 ms as nothing, so for clicks and ticks use 25 ms or longer notes and shape them with Decay and "
+        "Sustain -inf. Its default is a pure sine: add Saw or Square mix for anything that needs harmonics.",
+        controls={"attack": "Attack", "decay": "Decay", "sustain": "Sustain", "release": "Release",
+                  "saw": "Saw mix", "square": "Square mix", "triangle": "Triangle mix", "volume": "Volume"},
+    ),
+    Profile(
         "Augmented VOICES", "instrument",
         "Arturia's sampled-voice and choir instrument (sampler layers plus synth layers). Its default patch "
         "sounds like a low rumble: the sampler layers have Sustain 0 and the synth layers 5-second attacks. "

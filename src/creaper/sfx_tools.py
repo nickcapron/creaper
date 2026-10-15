@@ -34,8 +34,20 @@ def to_channels(audio: np.ndarray, channels: Literal["mono", "stereo"]) -> np.nd
     return a if a.shape[1] >= 2 else np.repeat(a, 2, axis=1)
 
 
-def remove_dc(audio: np.ndarray) -> np.ndarray:
-    return audio - audio.mean(axis=0, keepdims=True)
+DC_HIGHPASS_HZ = 15.0
+SILENCE_DBFS = -96.0       # the floor of 24-bit audio: anything quieter counts as silence
+
+
+def remove_dc(audio: np.ndarray, fs: int = 44100) -> np.ndarray:
+    """Removes DC, including an offset that only lingers at the end (a low sine's
+    residue): subtracting the average missed that and kept a near-silent tail. A
+    gentle high-pass under the audible range does it; a causal one, since a zero-phase
+    filter smears energy before the transient and spoils the head trim."""
+    a = audio - audio.mean(axis=0, keepdims=True)
+    if len(a) < int(0.1 * fs):
+        return a
+    sos = signal.butter(2, DC_HIGHPASS_HZ, btype="highpass", fs=fs, output="sos")
+    return signal.sosfilt(sos, a, axis=0)
 
 
 def _level_db(audio: np.ndarray) -> np.ndarray:
@@ -66,9 +78,12 @@ def tail_state(audio: np.ndarray) -> dict:
 
 
 def trim_tail(audio: np.ndarray, floor_db: float = TAIL_FLOOR_DB) -> np.ndarray:
-    """Drops the silence after the sound has died away (keeps everything above floor_db)."""
+    """Drops the silence after the sound has died away: everything after the last
+    moment above floor_db (re its peak) or above -96 dBFS, whichever is higher. A
+    generator fading to "-100 dB" instead of true silence used to keep its tail."""
     level = _level_db(audio)
-    loud = np.nonzero(level > level.max() + floor_db)[0]
+    floor = max(level.max() + floor_db, SILENCE_DBFS)
+    loud = np.nonzero(level > floor)[0]
     return audio[: loud[-1] + 1] if len(loud) else audio
 
 
@@ -165,7 +180,7 @@ def export_regions(
         entry: dict = {"file": dest.name, "channels": channels}
         if is_loop:
             xf = int(loop_crossfade_s * fs)
-            part = remove_dc(to_channels(audio[a:b + xf], channels))
+            part = remove_dc(to_channels(audio[a:b + xf], channels), fs)
             if b - a <= xf * 2:
                 problems.append(f"{region['name']}: too short to loop with a {loop_crossfade_s:g} s crossfade")
                 continue
@@ -177,7 +192,7 @@ def export_regions(
             entry.update(loop=True, loop_length_s=round(len(sound) / fs, 3), loop_samples=len(sound),
                          seam_db=loop_seam_db(sound))
         else:
-            part = remove_dc(to_channels(audio[a:b], channels))
+            part = remove_dc(to_channels(audio[a:b], channels), fs)
             if not np.any(np.abs(part) > 1e-6):
                 problems.append(f"{region['name']}: silent")
                 continue
