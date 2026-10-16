@@ -15,7 +15,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field
 
-from . import composer, genres, harmony, scales as scales_db, theory
+from . import composer, feel, genres, harmony, scales as scales_db, theory
 from .harmony import Key, SpelledChord
 from .server import READ_ONLY, ItemId, add_drum_pattern, call, tool
 
@@ -110,6 +110,31 @@ def _project_meter() -> str:
         return call("get_project_overview").get("time_signature") or "4/4"
     except Exception:  # noqa: BLE001 - fall back to 4/4 if REAPER is busy
         return "4/4"
+
+
+FeelName = Literal["none", "tight", "natural", "laid back", "pushed", "expressive"]
+FeelArg = Annotated[FeelName, Field(description=(
+    "How the part is played: natural (default) adds a player's timing and dynamics for its role; tight for "
+    "quantised electronic styles, laid back or pushed for the pocket, expressive for rubato styles; none for "
+    "exactly on the grid. A genre's profile suggests one (performance_feel)"))]
+
+
+def _perform(notes: list[dict], role: str, feel_name: str, seed: int | None = None, amount: float = 1.0) -> list[dict]:
+    """The notes played with a feel at the project's tempo and meter ('none' leaves them)."""
+    if feel_name == "none" or not notes:
+        return notes
+    try:
+        overview = call("get_project_overview")
+    except Exception:  # noqa: BLE001 - a busy REAPER: play at a typical tempo
+        overview = {}
+    bpm = float(overview.get("tempo_bpm") or 120)
+    bar = composer._bar_len(overview.get("time_signature") or "4/4")
+    return feel.apply(notes, role, feel_name, bpm=bpm, beats_per_bar=bar, seed=seed, amount=amount)
+
+
+def feel_mod_for(g) -> str:
+    """The performance feel a genre's profile suggests (tight, laid back, expressive...)."""
+    return feel.feel_for_genre(g.feel, g.family, g.swing, g.name)
 
 
 def _note_names(pitches: list[int]) -> list[str]:
@@ -473,6 +498,7 @@ def get_genre_profile(
         "genre": g.name, "family": g.family, "also": list(g.aliases), "parent": g.parent,
         "description": g.description, "era": g.era, "touchstones": list(g.touchstones),
         "tempo_bpm": list(g.tempo), "meter": g.meter, "feel": g.feel, "swing": g.swing,
+        "performance_feel": feel_mod_for(g),
         "modes": list(g.modes), "favourite_keys": list(g.keys),
         "progressions": progressions, "shown_in": k.name if not key else key, "chords_per_bar": g.harmonic_rhythm,
         "harmony": g.harmony, "voicing": g.voicing, "comping": g.comping,
@@ -510,6 +536,7 @@ def add_chord_progression(
     start: Annotated[float, Field(ge=0, description="Where the first chord starts, in QN from the item start")] = 0.0,
     replace: Annotated[bool, Field(description="Delete the item's existing notes first")] = False,
     seed: Annotated[int | None, Field(description="Seeds the small random velocity variations; same seed, same part")] = None,
+    feel: FeelArg = "natural",
 ) -> dict:
     """Writes a chord part (pads, piano or guitar comping, stabs, arpeggios) into a
     MIDI item from chord symbols or Roman numerals with a key, in the voicing and
@@ -517,7 +544,9 @@ def add_chord_progression(
     harmony parts; write_bassline and write_melody write the bass and lead over the
     same chords, and add_midi_notes takes exact notes you've written yourself.
     suggest_progressions or a genre profile can supply the chords. Returns each
-    chord's Roman numeral and the notes chosen."""
+    chord's Roman numeral and the notes chosen. It's played with a feel (chords
+    rolled slightly low to high, the top voice singing, accents on the beat; held
+    pads stay smooth) unless feel is 'none'."""
     k = _key(key)
     events, k = _events(chords, k, chord_length, start)
     voicings = composer.voice_chords([e.chord for e in events], voicing, octave, key=k)
@@ -527,6 +556,8 @@ def add_chord_progression(
         for e in events:
             notes.append({"pitch": theory.bass_note(e.chord.to_chord(), bass_octave), "start": e.start,
                           "length": e.length * 0.98, "velocity": velocity, "channel": 1})
+    role = "pad" if rhythm == "sustain" else "arp" if rhythm.startswith(("arpeggio", "alberti", "pulse")) else "chords"
+    notes = _perform(notes, role, feel, seed)
     result = _write(item_id, notes, replace)
     result["key"] = k.name
     result["chords"] = [{"chord": e.chord.symbol, "numeral": e.numeral or harmony.numeral_for(e.chord, k).numeral,
@@ -549,14 +580,18 @@ def write_bassline(
     start: Annotated[float, Field(ge=0, description="Where the bassline starts, in QN from the item start")] = 0.0,
     replace: Annotated[bool, Field(description="Delete the item's existing notes first")] = False,
     seed: Annotated[int | None, Field(description="Varies the line in styles with choices (walking, syncopated...); same seed, same line")] = None,
+    feel: FeelArg = "natural",
 ) -> dict:
     """Composes a bassline into a MIDI item that follows a chord progression in a
     chosen style (walking, 808, one-drop, octaves, tumbao...), in the project's meter.
     Use it to have creaper write the bass from chords; add_midi_notes takes a bass
-    line you've written note by note. Returns the key, the style and the first notes."""
+    line you've written note by note. It's played with a feel (in the pocket, leaning
+    on the downbeats) unless feel is 'none'. Returns the key, the style and the first
+    notes."""
     k = _key(key)
     events, k = _events(chords, k, chord_length, start)
     notes = composer.bassline(events, style, k, octave, meter=_project_meter(), velocity=velocity, seed=seed)
+    notes = _perform(notes, "bass", feel, seed)
     result = _write(item_id, notes, replace)
     result.update({"key": k.name, "style": style, "first_bar": _note_names([n["pitch"] for n in notes[:8]])})
     return result
@@ -578,20 +613,61 @@ def write_melody(
     start: Annotated[float, Field(ge=0, description="Where the melody starts, in QN from the item start")] = 0.0,
     replace: Annotated[bool, Field(description="Delete the item's existing notes first")] = False,
     seed: Annotated[int | None, Field(description="Same seed, same melody; change it for another idea")] = None,
+    feel: FeelArg = "natural",
 ) -> dict:
     """Composes a melody into a MIDI item over a chord progression: a rhythmic motif
     developed in phrases, chord tones on strong beats, stepwise lines with leaps
     recovered, a high point, a half-close at the end of the first phrase and the
     tonic at the end. Use it to have creaper invent a lead or topline; add_midi_notes
     writes a melody you've worked out note by note, and place_motif reuses a saved
-    theme. Try several seeds. Returns the notes and the non-chord tones used."""
+    theme. Try several seeds. It's played with a feel (phrases louder toward their
+    peak, strong beats leaning) unless feel is 'none'. Returns the notes and the
+    non-chord tones used."""
     k = _key(key)
     events, k = _events(chords, k, chord_length, start)
     notes = composer.melody(events, k, density, theory.note_to_midi(low), theory.note_to_midi(high), scale,
                             _project_meter(), phrase_bars, seed, syncopation, velocity)
-    result = _write(item_id, notes, replace)
+    played = _perform(notes, "lead", feel, seed)
+    result = _write(item_id, played, replace)
     result.update({"key": k.name, "notes_written": len(notes), "melody": _note_names([n["pitch"] for n in notes][:32]),
                    "nonchord_tones": composer.nonchord_tones(notes, events)[:12]})
+    return result
+
+
+@tool()
+def apply_feel(
+    item_id: ItemId,
+    role: Annotated[Literal["drums", "bass", "chords", "pad", "lead", "arp"], Field(description=(
+        "What the part does: drums, bass, chords (comping/stabs: rolled, top voice sings), pad (held, kept "
+        "smooth), lead (melody or vocal line: phrased), arp (sequenced: steady)"))],
+    feel: FeelArg = "natural",
+    amount: Annotated[float, Field(ge=0, le=2, description="How much: 1 = the feel as defined, 0.5 = subtle, 2 = exaggerated")] = 1.0,
+    seed: Annotated[int | None, Field(description="Same seed, same performance")] = None,
+) -> dict:
+    """Plays an existing MIDI part like a musician would for its role: small timing
+    offsets (a laid-back snare, a bass in the pocket, chords rolled low to high) and
+    dynamics (beat accents, softer offbeats, phrases louder toward their peak). Use it
+    on parts written note by note with add_midi_notes or a pasted MIDI file, which
+    otherwise play dead on the grid; the composing tools already apply a feel. It adds
+    to whatever feel the part has, so apply it once (undo takes it off). Pitches and
+    the number of notes never change. Returns how much the timing and dynamics moved."""
+    data = call("get_midi_notes", item_id=item_id, limit=20000)
+    if data.get("truncated"):
+        raise ValueError("that item has more than 20,000 notes; split it first")
+    notes = data.get("notes", [])
+    if not notes:
+        raise ValueError("that item has no notes")
+    if feel == "none":
+        return {"item_id": item_id, "changed": 0, "note": "feel 'none' changes nothing"}
+    played = _perform(notes, role, feel, seed, amount)
+    result = _write(item_id, played, True)
+    moved = [abs(a["start"] - b["start"]) for a, b in zip(notes, played)]
+    bpm = float(call("get_project_overview").get("tempo_bpm") or 120)
+    vel = [n["velocity"] for n in played]
+    result.update({"role": role, "feel": feel, "notes": len(played),
+                   "timing_moved_ms": {"average": round(sum(moved) / len(moved) * 60000 / bpm, 1),
+                                       "most": round(max(moved) * 60000 / bpm, 1)},
+                   "velocity_range": [min(vel), max(vel)]})
     return result
 
 
@@ -603,6 +679,7 @@ def add_genre_groove(
     humanize: Annotated[float, Field(ge=0, le=1, description="Random velocity variation, 0-1")] = 0.15,
     start: Annotated[float, Field(ge=0, description="Start in QN from the item start")] = 0.0,
     replace: Annotated[bool, Field(description="Delete the item's existing notes first")] = False,
+    feel: Annotated[FeelName | None, Field(description="How it's played; default: the genre's own feel (performance_feel)")] = None,
 ) -> dict:
     """Programs a genre's stock drum groove (from its genre profile, with the genre's
     swing) on the track's drum instrument in one call: a quick, idiomatic starting
@@ -610,10 +687,12 @@ def add_genre_groove(
     calls. Returns the lanes and notes used, and how drums work in that genre."""
     g = genres.find(genre)
     groove = g.groove
+    played_as = feel or feel_mod_for(g)
     result = add_drum_pattern(item_id=item_id, pattern=dict(groove["pattern"]), step=groove.get("step", 0.25),
                               repeats=repeats, swing=groove.get("swing", g.swing), humanize=humanize, start=start,
-                              replace=replace)
+                              replace=replace, feel=played_as)
     result["genre"] = g.name
+    result["feel"] = played_as
     result["how_the_drums_work"] = g.drums
     return result
 
@@ -709,6 +788,7 @@ def sketch_song(
     density and scale, swing). Every part is ordinary MIDI to edit afterwards. It's
     one loop repeated: a starting point for a song, not the arrangement."""
     g = genres.find(genre)
+    played_as = feel_mod_for(g)
     k = _key(key) or (harmony.parse_key(g.keys[0]) if g.keys else harmony.parse_key(f"A {g.modes[0]}"))
     overview = call("get_project_overview")
     num, den = (int(x) for x in g.meter.split("/"))
@@ -757,28 +837,30 @@ def sketch_song(
             groove_qn = len(cells) * groove.get("step", 0.25)
             res = add_drum_pattern(item_id=item["id"], pattern=dict(groove["pattern"]), step=groove.get("step", 0.25),
                                    repeats=max(1, round(total / groove_qn)), swing=groove.get("swing", g.swing),
-                                   humanize=0.15)
+                                   humanize=0.15, feel=played_as)
             entry["lanes"] = res.get("lanes")
         elif part == "bass":
             notes = composer.bassline(events, g.bass_style if g.bass_style != "none" else "root", k, 2, meter, seed=seed)
-            entry["notes"] = _write(item["id"], notes, False).get("note_count")
+            entry["notes"] = _write(item["id"], _perform(notes, "bass", played_as, seed), False).get("note_count")
             entry["style"] = g.bass_style
         elif part == "chords":
             voicings = composer.voice_chords([e.chord for e in events], g.voicing, 4, key=k)
-            notes = composer.comp(events, voicings, g.comping if g.comping != "none" else "sustain", meter=meter, seed=seed)
-            entry["notes"] = _write(item["id"], notes, False).get("note_count")
+            comping = g.comping if g.comping != "none" else "sustain"
+            notes = composer.comp(events, voicings, comping, meter=meter, seed=seed)
+            role = "pad" if comping == "sustain" else "arp" if comping.startswith(("arpeggio", "alberti", "pulse")) else "chords"
+            entry["notes"] = _write(item["id"], _perform(notes, role, played_as, seed), False).get("note_count")
             entry["voicing"], entry["comping"] = g.voicing, g.comping
         elif part == "melody":
             notes = composer.melody(events, k, g.melody_density, 62, 81, g.melody_scale, meter, 4, seed,
                                     0.5 if g.swing > 54 else 0.3)
-            entry["notes"] = _write(item["id"], notes, False).get("note_count")
+            entry["notes"] = _write(item["id"], _perform(notes, "lead", played_as, seed), False).get("note_count")
             entry["scale"] = g.melody_scale or k.scale.name
         made[part] = entry
     result = {
         "genre": g.name, "key": k.name, "progression": progression,
         "chords": [e.chord.symbol for e in events[: max(1, len(chords))]],
         "tempo": tempo_set or {"tempo_bpm": overview.get("tempo_bpm"), "note": "kept the project's tempo"},
-        "bars": bars, "parts": made,
+        "bars": bars, "parts": made, "feel": played_as,
         "next": ("Pick sounds for each part (load_sound, or program the synths), adjust the groove, and build the "
                  "arrangement from the genre's form: " + ", ".join(f"{s} {b}" for s, b in g.form)),
     }

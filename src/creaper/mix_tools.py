@@ -16,7 +16,7 @@ from typing import Annotated
 
 from pydantic import Field
 
-from . import analysis, genres
+from . import analysis, genres, plugin_profiles
 from .server import DESTRUCTIVE, Bar, analyze_audio, call, confirm_with_user, setup_sidechain, tool
 
 # Loudness of each role while it plays (max short-term LUFS), relative to the drums.
@@ -260,6 +260,71 @@ def _clear_robot_vocals(actions: list[dict], start_bar: float | None, end_bar: f
     return out
 
 
+DRUM_ROLES = ("kick", "drums", "snare", "perc")
+DRUM_GLUE_DB = 2.0           # what the drum bus compressor takes off the hits
+DELAY_DB = {"vocal": -20, "lead": -18}   # send levels to the shared delay
+
+
+def _glue_drums(channels: list[dict], start_bar: float | None, end_bar: float | None) -> dict | None:
+    """Puts the drums through one compressor so they hit as a kit: a new 'Drum Bus'
+    (or the folder they already share), ReaComp at 4:1 with a 10 ms attack that lets
+    the hits through, calibrated by measurement to take about 2 dB off them."""
+    from .server import _calibrate_compressor
+
+    drums = [c for c in channels if c.get("role") in DRUM_ROLES and c.get("level") is not None
+             and not c["name"].endswith(" Duck")]
+    if len(drums) < 2:
+        return None
+    tracks = {t.get("guid"): t for t in call("get_project_overview")["tracks"]}
+    parents = {tracks.get(c["ref"], {}).get("parent") for c in drums}
+    if len(parents) == 1 and None not in parents:
+        target = parents.pop()  # they already play through one folder: glue it there
+        how = "on the drums' folder track"
+    elif parents == {None}:
+        bus = call("create_bus", name="Drum Bus", tracks=[c["ref"] for c in drums])
+        target = bus["bus"]["guid"]
+        how = "on a new Drum Bus the drums now play through"
+    else:
+        return {"skipped": "the drums are spread over different folders, so they weren't put on one bus"}
+    existing = call("get_track_details", track=target).get("fx", [])
+    if any("comp" in f["name"].lower() for f in existing):
+        return {"skipped": "the drums' folder already has a compressor"}
+    comp = call("add_fx", track=target, name="ReaComp")
+    profile = plugin_profiles.find_profile(comp["name"])
+    changes = [dict(c) for c in profile.setup] if profile else []
+    changes += [{"parameter": "Ratio", "display_value": 4}, {"parameter": "Attack", "display_value": 10},
+                {"parameter": "Release", "display_value": 80}]
+    call("set_fx_parameters", track=target, fx=comp["index"], changes=changes)
+    result = {"where": how, "compressor": comp["name"]}
+    if profile and profile.drive:
+        result["calibration"] = _calibrate_compressor(target, comp["index"], profile, DRUM_GLUE_DB, start_bar, end_bar)
+    return result
+
+
+def _delay_return(bpm: float) -> dict:
+    """A shared delay return (an existing one, or ReaDelay): a dotted-8th echo, darkened
+    and thinned so it sits behind what feeds it. One space for leads and vocals, like
+    the shared reverb, is part of what makes a mix sound like one record."""
+    for t in call("get_project_overview")["tracks"]:
+        if re.search(r"\b(delay|echo)\b", t["name"], re.I) and not t.get("item_count"):
+            return {"track": t["guid"], "name": t["name"], "reused": True}
+    made = call("create_track", name="Delay")
+    guid = made["track"].get("guid") or "Delay"
+    call("add_fx", track=guid, name="ReaDelay")
+    dotted_eighth_ms = round(0.75 * 60000 / bpm, 1)
+    set_result = call("set_fx_parameters", track=guid, fx=1, changes=[
+        {"parameter": "Wet", "display_value": 0}, {"parameter": "Dry", "display_value": -150},
+        {"parameter": "Length (time)", "display_value": dotted_eighth_ms},
+        {"parameter": "Length (musical)", "display_value": 0},
+        {"parameter": "Feedback", "display_value": -9},
+        {"parameter": "Lowpass", "display_value": 5000}, {"parameter": "Hipass", "display_value": 300}])
+    failed = [c for c in set_result.get("results", []) if isinstance(c, dict) and c.get("error")]
+    out = {"track": guid, "name": "Delay", "time_ms": dotted_eighth_ms, "reused": False}
+    if failed:
+        out["not_set"] = [c.get("parameter") for c in failed]
+    return out
+
+
 def _reverb_return() -> str:
     overview = call("get_project_overview")
     for t in overview["tracks"]:
@@ -281,13 +346,18 @@ def auto_mix(
     end_bar: Annotated[float | None, Field(description="Measure this range (default: the whole song)")] = None,
     reverb: Annotated[bool, Field(description="Feed a reverb return (an existing one, or a new ReaVerbate)")] = True,
     sidechain: Annotated[bool, Field(description="Duck bass (and pads) under the kick in dance styles")] = True,
+    glue: Annotated[bool, Field(description=(
+        "Glue the mix together: the drums through one calibrated bus compressor, and leads and vocals into a "
+        "shared tempo-synced delay"))] = True,
     dry_run: Annotated[bool, Field(description="Only report what it would do")] = False,
 ) -> dict:
     """A whole first mix in one call: measures every track (one render pass), works out
     each one's role, then sets levels for the genre, high-passes everything that isn't
     bass and cuts low-mid mud, compresses vocals/bass/leads that need it, pans the wide
     parts, sends to a reverb return, ducks bass under the kick (dance styles), and sets
-    -6 dBFS of headroom for mastering, then measures robot vocals' clarity in the mix and,
+    -6 dBFS of headroom for mastering, glues the mix (the drums through one calibrated bus
+    compressor; leads and vocals into a shared tempo-synced delay), then measures robot
+    vocals' clarity in the mix and,
     if other parts cover the words, raises the vocal and ducks the parts covering it.
     Saves a copy of the project first when it has a file. Leaves tracks the user already set up (EQ, compression, panning) alone on those
     points. Then check it: show_spectrogram, check_vocal_clarity, compare_mix_to_style."""
@@ -374,6 +444,25 @@ def auto_mix(
             call("set_send", source=track, destination=verb, volume_db=a["reverb_send_db"])
         elif a["name"] in already_sending:
             a["reverb_send_kept"] = True  # the user's (or an earlier pass's) send level stays
+    delay = None
+    if glue:
+        # What makes separate tracks sound like one record: the drums compressed together
+        # as a kit, and the leads and vocals sharing one echo (as they share the reverb).
+        try:
+            drum_glue = _glue_drums(channels, start_bar, end_bar)
+            if drum_glue:
+                report["drum_glue"] = drum_glue
+        except Exception as e:  # noqa: BLE001
+            report.setdefault("warnings", []).append(f"drum bus: {e}")
+        senders = [a for a in plan["channels"] if a["role"] in DELAY_DB and not a.get("skipped")]
+        if senders:
+            try:
+                delay = _delay_return(float(call("get_project_overview").get("tempo_bpm") or 120))
+                for a in senders:
+                    call("set_send", source=a["ref"], destination=delay["track"], volume_db=DELAY_DB[a["role"]])
+                report["delay_return"] = {**delay, "fed_by": [a["name"] for a in senders]}
+            except Exception as e:  # noqa: BLE001
+                report.setdefault("warnings", []).append(f"delay return: {e}")
     if sidechain:
         for d in plan["sidechains"]:
             try:
@@ -389,9 +478,9 @@ def auto_mix(
         for c in (c for c in channels if c.get("level") is not None):
             now = call("get_track_details", track=c["ref"])["volume_db"]
             call("set_track_properties", track=c["ref"], volume_db=round(now + shift, 1))
-        if verb:
-            now = call("get_track_details", track=verb)["volume_db"]
-            call("set_track_properties", track=verb, volume_db=round(now + shift, 1))
+        for ret in [r for r in (verb, delay and delay["track"]) if r]:
+            now = call("get_track_details", track=ret)["volume_db"]
+            call("set_track_properties", track=ret, volume_db=round(now + shift, 1))
         report["headroom_shift_db"] = shift
         master = analyze_audio(track="master", start_bar=start_bar, end_bar=end_bar)
     vocal_fixes = _clear_robot_vocals(plan["channels"], start_bar, end_bar)

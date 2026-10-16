@@ -17,6 +17,7 @@ from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
 
 from . import analysis, composer, harmony, plugin_profiles, styles, theory
+from . import feel as perform  # `feel` is also a tool argument
 from .bridge import Bridge, BridgeError
 from .knowledge import Knowledge
 from .drums import BUILTIN_DRUM_MAPS, DrumMaps, builtin_entries
@@ -135,6 +136,14 @@ Arranging:
   (a noise synth with automation, or find_samples for risers and reverse cymbals), a
   crash on the downbeat. Long sections need slow movement: write_automation ramps on
   filter cutoff, sends or levels across builds and breakdowns.
+- Every part is performed, not just placed: notes all on the grid at one velocity are
+  the clearest sign of a machine-made track. write_bassline, add_chord_progression,
+  write_melody, add_genre_groove and sketch_song play their parts with a feel by
+  default; use the genre profile's performance_feel (tight for programmed electronic
+  music, which still gets accents; laid back, pushed or expressive where the style
+  is). Parts you write note by note with add_midi_notes, drum patterns you program
+  (add_drum_pattern feel=...), and imported MIDI get apply_feel once with their role.
+  Use feel 'none' only when the user wants the grid.
 - A big moment (a solo, a drop, a final chorus; "make it slap", "make it crazy",
   "huge") comes from the arrangement, not from level and harshness: a riser and a
   crash into it, a fill, a drop-out before it, a wider or doubled part, a richer
@@ -725,6 +734,9 @@ def add_drum_pattern(
     start: Annotated[float, Field(ge=0, description="Start in QN from the item start")] = 0.0,
     channel: Annotated[int, Field(ge=1, le=16, description="MIDI channel; GM drums use 10")] = 10,
     replace: Annotated[bool, Field(description="Delete the item's existing notes first")] = False,
+    feel: Annotated[Literal["none", "tight", "natural", "laid back", "pushed", "expressive"], Field(description=(
+        "Play it like a drummer: the kick tight, the snare/clap laid back or pushed, hats accented on the beat "
+        "and softer off it; none (default) keeps the steps exactly as written"))] = "none",
 ) -> dict:
     """Programs a drum pattern you write, step-sequencer style, on whatever drum
     instrument the track has. Use it for your own beats, fills and variations; for a
@@ -745,6 +757,11 @@ def add_drum_pattern(
 
     notes = theory.drum_pattern_notes(pattern, step=step, repeats=repeats, swing=swing, start=start,
                                       channel=channel, humanize=humanize, resolve=resolve)
+    if feel != "none":
+        overview = call("get_project_overview")
+        jobs = {lane["pitch"]: job for name, lane in lanes.items() if (job := perform.drum_job(name))}
+        notes = perform.apply(notes, "drums", feel, bpm=float(overview.get("tempo_bpm") or 120),
+                              beats_per_bar=composer._bar_len(overview.get("time_signature") or "4/4"), drum_jobs=jobs)
     result = call("add_midi_notes", item_id=item_id, notes=notes, replace=replace)
     result["instrument"] = instrument
     result["lanes"] = lanes
