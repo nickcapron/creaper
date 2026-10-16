@@ -8,7 +8,7 @@ exactly; fills, crashes and drop-outs go on the drum track's MIDI."""
 from __future__ import annotations
 
 import re
-import time
+import uuid
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -62,8 +62,8 @@ def plan(sections: list[dict], intensity: str) -> list[dict]:
         else:
             direction = "level"
             elements = ["crash", "fill"] if intensity != "subtle" else ["crash"]
-        out.append({"bar": nxt["bar"], "into": nxt["name"], "from": prev["name"], "direction": direction,
-                    "elements": elements})
+        out.append({"bar": nxt["bar"], "into": nxt["name"], "from": prev["name"], "from_bar": prev["bar"],
+                    "direction": direction, "elements": elements})
     return out
 
 
@@ -77,8 +77,22 @@ def _fx_folder() -> Path:
     return folder
 
 
+def sections_from_regions(regions: list[dict]) -> list[dict]:
+    """The song's sections from its regions: a region inside another (a 'vocals in' or a
+    sound-effect region) isn't a section, and two regions starting on one bar are one
+    change (the longer one names it), so no change gets two contradictory transitions."""
+    spans = [(r["name"], r["start"]["bar"], r.get("end", {}).get("bar", r["start"]["bar"])) for r in regions]
+    outer = [s for s in spans if not any(o is not s and o[1] <= s[1] and s[2] <= o[2] and (o[2] - o[1]) > (s[2] - s[1])
+                                         for o in spans)]
+    by_bar: dict[float, tuple] = {}
+    for name, start, end in outer:
+        if start not in by_bar or end - start > by_bar[start][2] - by_bar[start][1]:
+            by_bar[start] = (name, start, end)
+    return [{"name": n, "bar": b} for n, b, _ in sorted(by_bar.values(), key=lambda s: s[1])]
+
+
 def _write(audio, folder: Path, name: str) -> str:
-    path = folder / f"{name}_{time.strftime('%H%M%S')}_{abs(hash((name, time.time()))) % 10000:04d}.wav"
+    path = folder / f"{name}_{uuid.uuid4().hex[:10]}.wav"
     sf.write(str(path), audio, ear_candy.FS, subtype="PCM_24")
     return str(path)
 
@@ -96,13 +110,15 @@ def _item_at(items: list[dict], qn: float) -> dict | None:
     return next((i for i in items if i["start"]["qn"] - 1e-6 <= qn < i["end"]["qn"] - 1e-6), None)
 
 
-def _lane_pitch(item_id: str, lane: str) -> int:
-    """The note a drum lane plays on this item's instrument: its own note names, a saved
-    drum map, then General MIDI (as add_drum_pattern does)."""
+def _lane(item_id: str, lane: str) -> tuple[int, int]:
+    """The note and MIDI channel a drum lane plays on this item's instrument: its own
+    note names, a saved drum map (which may put each drum on its own channel), then
+    General MIDI, as add_drum_pattern does."""
     context = call("get_instrument_notes", item_id=item_id, channel=10)
     names = {n["pitch"]: n["name"] for n in context.get("note_names", [])}
     saved = drum_maps.find(context.get("instrument"))
-    return theory.resolve_drum_lane(lane, saved[1] if saved else None, names).pitch
+    found = theory.resolve_drum_lane(lane, saved[1] if saved else None, names)
+    return found.pitch, found.channel or 10
 
 
 def _find_drum_track(tracks: list[dict]) -> dict | None:
@@ -127,23 +143,27 @@ def add_transitions(
     a bigger section a riser (or reverse swell) building to it, an impact and a crash on
     its downbeat, a drum fill, and the kick dropping out just before a drop or chorus;
     into a quieter one a downlifter. Section energy comes from the names (intro, verse,
-    pre-chorus, chorus/drop, breakdown, outro), so name the regions. The sounds are
-    synthesised by creaper (original, no samples) on a 'Transitions' track; fills,
-    crashes and drop-outs go into the drum track's MIDI. Run it once the arrangement
-    is laid out; undo removes it. Returns what was added at each change."""
+    pre-chorus, chorus/drop, breakdown, outro), so name the regions; regions inside
+    another region aren't sections. The sounds are synthesised by creaper (original, no
+    samples) on a 'Transitions' track; fills (replacing the groove under them), crashes
+    and drop-outs go into the drum track's MIDI. Run it once the arrangement is laid
+    out; a second run skips changes that already have transitions. Each change is
+    several undo steps: to take it all off, delete the Transitions items and undo the
+    drum edits. Returns what was added at each change."""
     overview = call("get_project_overview")
     if sections is None:
-        marks = overview.get("regions") or overview.get("markers") or []
-        sections = [{"name": m["name"], "bar": m["start"]["bar"] if "start" in m else m["position"]["bar"]}
-                    for m in marks]
+        if overview.get("regions"):
+            sections = sections_from_regions(overview["regions"])
+        else:
+            sections = [{"name": m["name"], "bar": m["position"]["bar"]} for m in overview.get("markers") or []]
     sections = sorted(({"name": str(s["name"]), "bar": float(s["bar"])} for s in sections), key=lambda s: s["bar"])
     if len(sections) < 2:
         raise ValueError("there are no section changes to mark: name the sections with regions (add_marker with "
                          "end_bar), or pass sections=[{'name': 'Chorus', 'bar': 17}, ...]")
     changes = plan(sections, intensity)
-    if elements:
+    if elements:  # only these of what each change was planned to get (no riser into an outro)
         for c in changes:
-            c["elements"] = [e for e in c["elements"] if e in elements] or list(elements)
+            c["elements"] = [e for e in c["elements"] if e in elements]
     tracks = overview["tracks"]
     drums = None
     if drum_track is not None:
@@ -160,14 +180,20 @@ def add_transitions(
     bar_qn = _bar_qn(overview.get("time_signature"))
     report, notes = [], []
     drum_items = _drum_items(drum_ref) if drum_ref else []
+    placed = [i["start"]["bar"] for i in call("get_track_details", track=fx_ref).get("items", [])]
     for c in changes:
         done: list[str] = []
         at_qn = call("bar_to_qn", bar=c["bar"])["qn"]
-        bars = RISER_BARS[intensity]
+        # Never reach back into the section before the one this change leaves.
+        bars = max(1, min(RISER_BARS[intensity], int(c["bar"] - c.get("from_bar", 1)) or 1))
+        if any(c["bar"] - bars - 0.01 <= b <= c["bar"] + 0.01 for b in placed):
+            report.append({"bar": c["bar"], "into": c["into"], "direction": c["direction"], "added": [],
+                           "skipped": "this change already has transitions (an earlier run)"})
+            continue
         for e in c["elements"]:
             if e in ("riser", "reverse", "downlifter", "impact"):
                 if e == "riser":
-                    start_bar = max(1.0, c["bar"] - bars)
+                    start_bar = max(1.0, c["bar"] - bars, c.get("from_bar", 1.0))
                     seconds = _seconds(at_qn - (c["bar"] - start_bar) * bar_qn, at_qn)
                     audio = ear_candy.riser(seconds, seed=int(c["bar"]))
                 elif e == "reverse":
@@ -187,9 +213,10 @@ def add_transitions(
                 if e == "crash":
                     item = _item_at(drum_items, at_qn)
                     if item:
+                        pitch, channel = _lane(item["id"], "crash")
                         call("add_midi_notes", item_id=item["id"], notes=[{
-                            "pitch": _lane_pitch(item["id"], "crash"), "start": at_qn - item["start"]["qn"],
-                            "length": 1.0, "velocity": 112, "channel": 10}])
+                            "pitch": pitch, "start": at_qn - item["start"]["qn"],
+                            "length": 1.0, "velocity": 112, "channel": channel}])
                         done.append(e)
                 elif e == "fill":
                     pattern = FILLS[intensity]
@@ -198,15 +225,21 @@ def add_transitions(
                     item = _item_at(drum_items, fill_start)
                     if item:
                         from .server import add_drum_pattern
-                        add_drum_pattern(item_id=item["id"], pattern=dict(pattern), step=0.25,
-                                         start=max(0.0, fill_start - item["start"]["qn"]), feel="natural")
+                        rel = max(0.0, fill_start - item["start"]["qn"])
+                        # The fill replaces the groove under it (the backbeat snare, and for
+                        # a tom fill the hats), or the two play at once and flam.
+                        clear = list(pattern) + (["closed hat", "open hat"] if intensity == "epic" else [])
+                        for lane in clear:
+                            call("delete_midi_notes", item_id=item["id"], start=rel, end=at_qn - item["start"]["qn"],
+                                 pitch=_lane(item["id"], lane)[0])
+                        add_drum_pattern(item_id=item["id"], pattern=dict(pattern), step=0.25, start=rel, feel="natural")
                         done.append(e)
                 elif e == "dropout":
                     gap_start = at_qn - (bar_qn if intensity == "epic" else 2.0)
                     item = _item_at(drum_items, gap_start)
                     if item:
                         call("delete_midi_notes", item_id=item["id"], start=gap_start - item["start"]["qn"],
-                             end=at_qn - item["start"]["qn"], pitch=_lane_pitch(item["id"], "kick"))
+                             end=at_qn - item["start"]["qn"], pitch=_lane(item["id"], "kick")[0])
                         done.append(e)
         if any(e in ("crash", "fill", "dropout") for e in c["elements"]) and not drum_items:
             notes.append("no drum track was found (name it Drums, or pass drum_track), so fills, crashes and "

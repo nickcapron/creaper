@@ -766,7 +766,7 @@ def add_drum_pattern(
         overview = call("get_project_overview")
         jobs = {lane["pitch"]: job for name, lane in lanes.items() if (job := perform.drum_job(name))}
         notes = perform.apply(notes, "drums", feel, bpm=float(overview.get("tempo_bpm") or 120),
-                              beats_per_bar=composer._bar_len(overview.get("time_signature") or "4/4"), drum_jobs=jobs)
+                              meter=overview.get("time_signature") or "4/4", drum_jobs=jobs)
     result = call("add_midi_notes", item_id=item_id, notes=notes, replace=replace)
     result["instrument"] = instrument
     result["lanes"] = lanes

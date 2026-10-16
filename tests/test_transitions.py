@@ -63,7 +63,7 @@ def test_add_transitions_places_sounds_and_drum_touches(tmp_path, monkeypatch):
         if command == "qn_to_times":
             return [q * 0.5 for q in args["qns"]]
         if command == "get_track_details":
-            return {"items": [item]}
+            return {"items": [] if args.get("track") == "{FX}" else [item]}
         if command == "get_instrument_notes":
             return {"instrument": None, "note_names": []}
         return {}
@@ -77,6 +77,26 @@ def test_add_transitions_places_sounds_and_drum_touches(tmp_path, monkeypatch):
     assert set(change["added"]) == {"riser", "impact", "crash", "fill", "dropout"}
     inserts = [a for c, a in calls if c == "insert_audio_file"]
     assert {a["start_bar"] for a in inserts} == {7, 9}            # a 2-bar riser into bar 9, the impact on it
-    drop = next(a for c, a in calls if c == "delete_midi_notes")
-    assert drop["start"] == 30.0 and drop["end"] == 32.0 and drop["pitch"] == 36   # the kick out for 2 beats
+    deletes = [a for c, a in calls if c == "delete_midi_notes"]
+    drop = next(a for a in deletes if a["pitch"] == 36)
+    assert drop["start"] == 30.0 and drop["end"] == 32.0                   # the kick out for 2 beats
+    cleared = next(a for a in deletes if a["pitch"] == 38)
+    assert cleared["start"] == 30.0 and cleared["end"] == 32.0             # the fill replaces the snare under it
     assert len(list(tmp_path.glob("*.wav"))) == 2
+
+
+def test_regions_inside_others_and_on_the_same_bar_are_one_section():
+    # Regions "Chorus" and "vocals in" both on bar 9 gave a riser and a downlifter on one downbeat.
+    regions = [{"name": "Intro", "start": {"bar": 1}, "end": {"bar": 9}},
+               {"name": "Chorus", "start": {"bar": 9}, "end": {"bar": 17}},
+               {"name": "vocals in", "start": {"bar": 9}, "end": {"bar": 11}},
+               {"name": "shot_01", "start": {"bar": 12}, "end": {"bar": 13}},
+               {"name": "Verse", "start": {"bar": 17}, "end": {"bar": 25}}]
+    assert at.sections_from_regions(regions) == [{"name": "Intro", "bar": 1}, {"name": "Chorus", "bar": 9},
+                                                 {"name": "Verse", "bar": 17}]
+
+
+def test_a_riser_never_reaches_into_an_earlier_section():
+    plan = at.plan([{"name": "Verse", "bar": 1}, {"name": "Build", "bar": 9}, {"name": "Drop", "bar": 11}], "epic")
+    into_drop = next(c for c in plan if c["bar"] == 11)
+    assert into_drop["from_bar"] == 9   # a 4-bar epic riser is cut to the 2-bar build

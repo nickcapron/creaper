@@ -128,8 +128,8 @@ def _perform(notes: list[dict], role: str, feel_name: str, seed: int | None = No
     except Exception:  # noqa: BLE001 - a busy REAPER: play at a typical tempo
         overview = {}
     bpm = float(overview.get("tempo_bpm") or 120)
-    bar = composer._bar_len(overview.get("time_signature") or "4/4")
-    return feel.apply(notes, role, feel_name, bpm=bpm, beats_per_bar=bar, seed=seed, amount=amount)
+    return feel.apply(notes, role, feel_name, bpm=bpm, meter=overview.get("time_signature") or "4/4", seed=seed,
+                      amount=amount)
 
 
 def feel_mod_for(g) -> str:

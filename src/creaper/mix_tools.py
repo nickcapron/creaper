@@ -266,30 +266,59 @@ DELAY_DB = {"vocal": -20, "lead": -18}   # send levels to the shared delay
 
 
 def _glue_drums(channels: list[dict], start_bar: float | None, end_bar: float | None) -> dict | None:
-    """Puts the drums through one compressor so they hit as a kit: a new 'Drum Bus'
-    (or the folder they already share), ReaComp at 4:1 with a 10 ms attack that lets
-    the hits through, calibrated by measurement to take about 2 dB off them."""
+    """Puts the drums through one compressor so they hit as a kit, calibrated by
+    measurement to take about 2 dB off the hits (ReaComp at 4:1 with a 10 ms attack
+    that lets them through). Where it goes:
+    - a bus the drums already all send to (an earlier run's 'Drum Bus', or the user's);
+    - else the folder they share, if that folder holds only drums;
+    - else, for a single drum track (a whole kit), that track, after its instrument;
+    - else a new 'Drum Bus' the drums play through.
+    Run after the headroom move: the bus is fed after the drum faders, so moving them
+    afterwards would undo the calibration."""
     from .server import _calibrate_compressor
 
     drums = [c for c in channels if c.get("role") in DRUM_ROLES and c.get("level") is not None
              and not c["name"].endswith(" Duck")]
-    if len(drums) < 2:
+    if not drums:
         return None
-    tracks = {t.get("guid"): t for t in call("get_project_overview")["tracks"]}
-    parents = {tracks.get(c["ref"], {}).get("parent") for c in drums}
-    if len(parents) == 1 and None not in parents:
-        target = parents.pop()  # they already play through one folder: glue it there
-        how = "on the drums' folder track"
-    elif parents == {None}:
-        bus = call("create_bus", name="Drum Bus", tracks=[c["ref"] for c in drums])
-        target = bus["bus"]["guid"]
-        how = "on a new Drum Bus the drums now play through"
+    overview = call("get_project_overview")
+    tracks = {t.get("guid"): t for t in overview["tracks"]}
+    by_name = {t["name"]: t for t in overview["tracks"]}
+    routing = {t["name"]: t for t in call("get_routing")["tracks"]}
+    # A bus every drum already sends to (not a sidechain input): use it, never add another.
+    def is_return(name: str) -> bool:  # the reverb/delay returns the drums send to aren't buses
+        fx = " ".join(by_name.get(name, {}).get("fx", [])).lower()
+        return bool(re.search(r"verb|delay|echo|return", name, re.I) or re.search(r"verb|delay|echo", fx))
+
+    dests = [{s["to"] for s in routing.get(c["name"], {}).get("sends") or []
+              if not s.get("note") and not is_return(s["to"])} for c in drums]
+    shared_bus = set.intersection(*dests) if dests else set()
+    position = None
+    if shared_bus:
+        bus = by_name.get(sorted(shared_bus)[0])
+        target, how = (bus.get("guid") or bus["number"]), f"on '{bus['name']}', the bus the drums already feed"
+    elif len(drums) == 1:
+        target, how = drums[0]["ref"], f"on '{drums[0]['name']}' itself, after its instrument (a whole kit on one track)"
+        fx = call("get_track_details", track=target).get("fx", [])
+        position = max((f["index"] for f in fx if f.get("instrument")), default=0) + 1
     else:
-        return {"skipped": "the drums are spread over different folders, so they weren't put on one bus"}
+        parents = {tracks.get(c["ref"], {}).get("parent") for c in drums}
+        if len(parents) == 1 and None not in parents:
+            folder = parents.pop()
+            members = [t for t in overview["tracks"] if t.get("parent") == folder]
+            drum_refs = {c["ref"] for c in drums}
+            if any(t.get("guid") not in drum_refs and t.get("item_count") for t in members):
+                return {"skipped": "the drums' folder also holds other parts, so it wasn't compressed as a drum bus"}
+            target, how = folder, "on the drums' folder track"
+        elif parents == {None}:
+            bus = call("create_bus", name="Drum Bus", tracks=[c["ref"] for c in drums])
+            target, how = bus["bus"]["guid"], "on a new Drum Bus the drums now play through"
+        else:
+            return {"skipped": "the drums are spread over different folders, so they weren't put on one bus"}
     existing = call("get_track_details", track=target).get("fx", [])
-    if any("comp" in f["name"].lower() for f in existing):
-        return {"skipped": "the drums' folder already has a compressor"}
-    comp = call("add_fx", track=target, name="ReaComp")
+    if any("comp" in f["name"].lower() or "glue" in f["name"].lower() for f in existing):
+        return {"skipped": f"there's already a compressor where the drum glue would go ({how[3:]})"}
+    comp = call("add_fx", track=target, name="ReaComp", **({"position": position} if position else {}))
     profile = plugin_profiles.find_profile(comp["name"])
     changes = [dict(c) for c in profile.setup] if profile else []
     changes += [{"parameter": "Ratio", "display_value": 4}, {"parameter": "Attack", "display_value": 10},
@@ -306,7 +335,8 @@ def _delay_return(bpm: float) -> dict:
     and thinned so it sits behind what feeds it. One space for leads and vocals, like
     the shared reverb, is part of what makes a mix sound like one record."""
     for t in call("get_project_overview")["tracks"]:
-        if re.search(r"\b(delay|echo)\b", t["name"], re.I) and not t.get("item_count"):
+        has_delay = any(re.search(r"delay|echo", f, re.I) for f in t.get("fx", []))
+        if re.search(r"\b(delay|echo)\b", t["name"], re.I) and not t.get("item_count") and has_delay:
             return {"track": t["guid"], "name": t["name"], "reused": True}
     made = call("create_track", name="Delay")
     guid = made["track"].get("guid") or "Delay"
@@ -446,20 +476,18 @@ def auto_mix(
             a["reverb_send_kept"] = True  # the user's (or an earlier pass's) send level stays
     delay = None
     if glue:
-        # What makes separate tracks sound like one record: the drums compressed together
-        # as a kit, and the leads and vocals sharing one echo (as they share the reverb).
-        try:
-            drum_glue = _glue_drums(channels, start_bar, end_bar)
-            if drum_glue:
-                report["drum_glue"] = drum_glue
-        except Exception as e:  # noqa: BLE001
-            report.setdefault("warnings", []).append(f"drum bus: {e}")
-        senders = [a for a in plan["channels"] if a["role"] in DELAY_DB and not a.get("skipped")]
+        # Leads and vocals share one echo, as they share the reverb. Busy sequenced parts
+        # (arps, plucks, sequences) stay dry: a dotted-8th echo turns them to mush.
+        senders = [a for a in plan["channels"] if a["role"] in DELAY_DB and not a.get("skipped")
+                   and not re.search(r"arp|pluck|seq", a["name"], re.I)]
         if senders:
             try:
                 delay = _delay_return(float(call("get_project_overview").get("tempo_bpm") or 120))
+                sending = {name for name, r in ((t["name"], t) for t in call("get_routing")["tracks"])
+                           for snd in r.get("sends") or [] if snd["to"] == delay["name"]}
                 for a in senders:
-                    call("set_send", source=a["ref"], destination=delay["track"], volume_db=DELAY_DB[a["role"]])
+                    if a["name"] not in sending:  # a level set earlier (by the user or a run) stays
+                        call("set_send", source=a["ref"], destination=delay["track"], volume_db=DELAY_DB[a["role"]])
                 report["delay_return"] = {**delay, "fed_by": [a["name"] for a in senders]}
             except Exception as e:  # noqa: BLE001
                 report.setdefault("warnings", []).append(f"delay return: {e}")
@@ -478,11 +506,20 @@ def auto_mix(
         for c in (c for c in channels if c.get("level") is not None):
             now = call("get_track_details", track=c["ref"])["volume_db"]
             call("set_track_properties", track=c["ref"], volume_db=round(now + shift, 1))
-        for ret in [r for r in (verb, delay and delay["track"]) if r]:
-            now = call("get_track_details", track=ret)["volume_db"]
-            call("set_track_properties", track=ret, volume_db=round(now + shift, 1))
+        # The reverb and delay returns stay put: their sends follow the track faders
+        # (post-fader), so moving the returns too shifted the effects twice.
         report["headroom_shift_db"] = shift
         master = analyze_audio(track="master", start_bar=start_bar, end_bar=end_bar)
+    if glue:
+        # The drums compressed together as a kit. After the headroom move: the drum bus
+        # is fed after the drum faders, so moving them later would undo the calibration.
+        try:
+            drum_glue = _glue_drums(channels, start_bar, end_bar)
+            if drum_glue:
+                report["drum_glue"] = drum_glue
+                master = analyze_audio(track="master", start_bar=start_bar, end_bar=end_bar)
+        except Exception as e:  # noqa: BLE001
+            report.setdefault("warnings", []).append(f"drum bus: {e}")
     vocal_fixes = _clear_robot_vocals(plan["channels"], start_bar, end_bar)
     if vocal_fixes:
         report["vocal_clarity"] = vocal_fixes

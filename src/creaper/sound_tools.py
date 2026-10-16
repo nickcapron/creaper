@@ -93,7 +93,7 @@ def score(measured: dict, wanted: dict[str, tuple[float, float]]) -> tuple[float
     for key, (lo, hi) in wanted.items():
         v = measured.get(key)
         if v is None:
-            if key == "decay_s" and lo > 0.3:
+            if key == "decay_s" and lo >= 0.3:
                 continue  # it simply doesn't fall away while held: fine for a slow decay target
             total += 0.5
             continue
@@ -102,8 +102,11 @@ def score(measured: dict, wanted: dict[str, tuple[float, float]]) -> tuple[float
         if key == "sustain_db":
             d = (lo - v if v < lo else v - hi) / 6
         else:
+            # Times are measured in 5 ms steps (attack 0 means "under 5 ms"), so compare
+            # from half a step: a 0 vs 60 ms attack mustn't outweigh everything else.
+            floor = 2.5 if key == "attack_ms" else 1e-3
             edge = lo if v < lo else hi
-            d = abs(math.log(max(v, 1e-3) / max(edge, 1e-3)))
+            d = abs(math.log(max(v, floor) / max(edge, floor)))
         total += d
         why.append(f"{key.replace('_', ' ')} {v:g} (wanted {lo:g}-{hi:g})")
     return round(total, 3), why
@@ -113,6 +116,13 @@ def _apply(track, name: str, state: dict) -> None:
     """Loads a captured or saved plugin state onto the track: into the same plugin if
     it's there, otherwise swapping the track's instrument for it."""
     call("apply_fx_state", timeout=60.0, track=track, replace_instrument=True, sound_name=name, state=state)
+
+
+def _spread(names: list[str], n: int) -> list[str]:
+    """n names spread evenly through a list (a plugin's presets run by category)."""
+    if len(names) <= n:
+        return names
+    return [names[round(i * (len(names) - 1) / (n - 1))] for i in range(n)] if n > 1 else names[:1]
 
 
 def _instrument_index(track) -> int:
@@ -126,7 +136,7 @@ def audition_sounds(
     character: Annotated[list[Character] | None, Field(description="How it should sound: bright, dark, punchy, soft, plucky, sustained")] = None,
     candidates: Annotated[Literal["presets", "library", "both"], Field(description=(
         "Where to look: the instrument's presets REAPER can see, the user's saved sounds, or both"))] = "both",
-    search: Annotated[str | None, Field(description="Words in preset or sound names to narrow it, e.g. 'bass', 'warm pad'; default: the role")] = None,
+    search: Annotated[str | None, Field(description="Words in preset or sound names to narrow it, e.g. 'bass', 'warm pad'; default: candidates spread evenly through all of them")] = None,
     limit: Annotated[int, Field(ge=2, le=20, description="Most sounds to audition (each takes a few seconds)")] = 8,
     keep_best: Annotated[bool, Field(description="Leave the best sound loaded; False puts the original back")] = True,
 ) -> dict:
@@ -141,20 +151,29 @@ def audition_sounds(
     fx = next((f for f in track_info.get("fx", []) if f.get("instrument")), None)
     if fx is None:
         raise ValueError("that track has no instrument to audition sounds on")
-    words = search or role
-    pool: list[dict] = []
+    # By listening, not by name: without search words, candidates are spread evenly
+    # through everything (a role word in preset names misses most of them: "keys" finds
+    # no Grand Piano, Rhodes or Clav).
+    words = search
+    presets: list[str] = []
+    sounds: list[str] = []
     preset_note = None
     if candidates in ("presets", "both"):
-        listed = call("list_fx_presets", timeout=120.0, track=track, fx=fx["index"], search=words, limit=limit)
-        pool += [{"kind": "preset", "name": p["name"] if isinstance(p, dict) else str(p)}
-                 for p in listed.get("presets", [])]
+        listed = call("list_fx_presets", timeout=120.0, track=track, fx=fx["index"], search=words,
+                      limit=limit if words else 500)
+        presets = [p["name"] if isinstance(p, dict) else str(p) for p in listed.get("presets", [])]
         preset_note = listed.get("note")
     if candidates in ("library", "both"):
-        pool += [{"kind": "sound", "name": e["name"]}
-                 for e in sound_library.search(words, None, None, "instrument")[:limit]]
-    pool = pool[:limit]
+        sounds = [e["name"] for e in sound_library.search(words, None, None, "instrument")]
+    if presets and sounds:  # both: half each, so presets don't crowd out the user's own sounds
+        take_sounds = min(len(sounds), max(limit // 2, limit - len(presets)))
+        pool = ([{"kind": "preset", "name": n} for n in _spread(presets, limit - take_sounds)]
+                + [{"kind": "sound", "name": n} for n in _spread(sounds, take_sounds)])
+    else:
+        pool = ([{"kind": "preset", "name": n} for n in _spread(presets, limit)]
+                + [{"kind": "sound", "name": n} for n in _spread(sounds, limit)])
     if not pool:
-        raise ValueError(f"no sounds to audition for '{words}'"
+        raise ValueError(f"no sounds to audition{f' for {words!r}' if words else ''}"
                          + (f" ({preset_note})" if preset_note else "")
                          + "; save some with save_sound, try other search words, or program one with set_fx_parameters")
     from .music_tools import _listen
@@ -163,11 +182,19 @@ def audition_sounds(
     spec = ROLES[role]
     wanted = targets(role, character)
     ranked = []
+    # Audition the patch, not the track's effects: a reverb made every candidate sound
+    # sustained, a compressor flattened their attacks. Bypassed now, re-enabled after.
+    bypassed = [f["name"] for f in track_info.get("fx", [])
+                if f["index"] > fx["index"] and not f.get("instrument") and "(bypassed)" not in f["name"]]
+    for name in bypassed:
+        call("update_fx", track=track, fx=name, enabled=False)
     try:
         for c in pool:
             try:
                 if c["kind"] == "preset":
-                    call("update_fx", track=track, fx=fx["index"], preset=c["name"])
+                    loaded = call("update_fx", track=track, fx=fx["index"], preset=c["name"])
+                    if loaded.get("warning"):  # it didn't load: measuring now would credit the last sound
+                        raise ValueError(loaded["warning"])
                 else:
                     _, entry = sound_library.find(c["name"])
                     _apply(track, entry["name"], sound_library.state(entry))
@@ -190,6 +217,12 @@ def audition_sounds(
         elif keep_best and best:
             _, entry = sound_library.find(best["name"])
             _apply(track, entry["name"], sound_library.state(entry))
+        for name in bypassed:
+            try:
+                call("update_fx", track=track, fx=name, enabled=True)
+            except Exception:  # noqa: BLE001 - keep restoring the rest
+                pass
     return {"role": role, "character": character or [], "wanted": {k: list(v) for k, v in wanted.items()},
+            **({"effects_bypassed_while_listening": bypassed} if bypassed else {}),
             "loaded": best["name"] if (keep_best and best) else "the original sound",
             "ranking": [{k: r[k] for k in ("kind", "name", "score", "why", "measured") if k in r} for r in ranked]}

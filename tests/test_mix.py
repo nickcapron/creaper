@@ -136,7 +136,7 @@ def test_mastering_reports_the_master_as_it_ends_up(monkeypatch):
     assert result["reached"] is True
 
 
-def _glue_fake(monkeypatch, tracks):
+def _glue_fake(monkeypatch, tracks, routing=None):
     from creaper import mix_tools, server
     calls = []
 
@@ -144,12 +144,14 @@ def _glue_fake(monkeypatch, tracks):
         calls.append((command, args))
         if command == "get_project_overview":
             return {"tracks": tracks, "tempo_bpm": 120}
+        if command == "get_routing":
+            return {"tracks": routing or [{"name": t["name"], "sends": []} for t in tracks]}
         if command == "create_bus":
             return {"bus": {"guid": "{BUS}", "number": 9}}
         if command == "get_track_details":
-            return {"fx": []}
+            return {"fx": [{"index": 1, "name": "VSTi: ReaSynDr", "instrument": True}]}
         if command == "add_fx":
-            return {"name": "VST: ReaComp (Cockos)", "index": 1}
+            return {"name": "VST: ReaComp (Cockos)", "index": 2}
         if command == "create_track":
             return {"track": {"guid": "{DELAY}", "number": 10}}
         if command == "set_fx_parameters":
@@ -161,35 +163,75 @@ def _glue_fake(monkeypatch, tracks):
     return mix_tools, calls
 
 
+KICK = {"name": "Kick", "ref": "{K}", "role": "kick", "level": -10}
+SNARE = {"name": "Snare", "ref": "{S}", "role": "snare", "level": -12}
+
+
 def test_drums_are_glued_on_a_new_bus(monkeypatch):
     tracks = [{"guid": "{K}", "name": "Kick"}, {"guid": "{S}", "name": "Snare"}, {"guid": "{B}", "name": "Bass"}]
     mix_tools, calls = _glue_fake(monkeypatch, tracks)
-    chans = [{"name": "Kick", "ref": "{K}", "role": "kick", "level": -10}, {"name": "Snare", "ref": "{S}", "role": "snare", "level": -12},
-             {"name": "Bass", "ref": "{B}", "role": "bass", "level": -12}]
-    result = mix_tools._glue_drums(chans, None, None)
+    result = mix_tools._glue_drums([KICK, SNARE, {"name": "Bass", "ref": "{B}", "role": "bass", "level": -12}], None, None)
     bus = next(a for c, a in calls if c == "create_bus")
     assert bus["tracks"] == ["{K}", "{S}"] and "Drum Bus" in result["where"]
     settings = next(a for c, a in calls if c == "set_fx_parameters")["changes"]
     assert {"parameter": "Attack", "display_value": 10} in settings and result["calibration"]
 
 
+def test_a_bus_the_drums_already_feed_is_reused_not_doubled(monkeypatch):
+    # A second auto_mix run made a second Drum Bus: the drums played through both (+6 dB).
+    tracks = [{"guid": "{K}", "name": "Kick"}, {"guid": "{S}", "name": "Snare"},
+              {"guid": "{BUS}", "number": 9, "name": "Drum Bus", "fx": []},
+              {"guid": "{R}", "number": 8, "name": "Reverb", "fx": ["VST: ReaVerbate (Cockos)"]}]
+    routing = [{"name": "Kick", "sends": [{"to": "Drum Bus"}]},
+               {"name": "Snare", "sends": [{"to": "Drum Bus"}, {"to": "Reverb"}]}]
+    mix_tools, calls = _glue_fake(monkeypatch, tracks, routing)
+    result = mix_tools._glue_drums([KICK, SNARE], None, None)
+    assert not any(c == "create_bus" for c, _ in calls) and "Drum Bus" in result["where"]
+    assert next(a for c, a in calls if c == "add_fx")["track"] == "{BUS}"
+
+
+def test_the_reverb_return_is_never_taken_for_a_drum_bus(monkeypatch):
+    tracks = [{"guid": "{K}", "name": "Kick"}, {"guid": "{S}", "name": "Snare"},
+              {"guid": "{R}", "number": 8, "name": "Reverb", "fx": ["VST: ReaVerbate (Cockos)"]}]
+    routing = [{"name": "Kick", "sends": [{"to": "Reverb"}]}, {"name": "Snare", "sends": [{"to": "Reverb"}]}]
+    mix_tools, calls = _glue_fake(monkeypatch, tracks, routing)
+    mix_tools._glue_drums([KICK, SNARE], None, None)
+    assert any(c == "create_bus" for c, _ in calls)
+
+
 def test_drums_in_one_folder_are_glued_on_the_folder(monkeypatch):
     tracks = [{"guid": "{K}", "name": "Kick", "parent": 3}, {"guid": "{S}", "name": "Snare", "parent": 3}]
     mix_tools, calls = _glue_fake(monkeypatch, tracks)
-    chans = [{"name": "Kick", "ref": "{K}", "role": "kick", "level": -10}, {"name": "Snare", "ref": "{S}", "role": "snare", "level": -12}]
-    result = mix_tools._glue_drums(chans, None, None)
+    result = mix_tools._glue_drums([KICK, SNARE], None, None)
     assert not any(c == "create_bus" for c, _ in calls)
     assert next(a for c, a in calls if c == "add_fx")["track"] == 3 and "folder" in result["where"]
 
 
-def test_one_drum_track_gets_no_bus(monkeypatch):
-    mix_tools, calls = _glue_fake(monkeypatch, [])
-    assert mix_tools._glue_drums([{"name": "Kick", "ref": "{K}", "role": "kick", "level": -10}], None, None) is None
+def test_a_folder_that_also_holds_the_bass_isnt_compressed_as_drums(monkeypatch):
+    tracks = [{"guid": "{K}", "name": "Kick", "parent": 3}, {"guid": "{S}", "name": "Snare", "parent": 3},
+              {"guid": "{B}", "name": "Bass", "parent": 3, "item_count": 1}]
+    mix_tools, calls = _glue_fake(monkeypatch, tracks)
+    assert "skipped" in mix_tools._glue_drums([KICK, SNARE], None, None)
+    assert not any(c == "add_fx" for c, _ in calls)
+
+
+def test_a_whole_kit_on_one_track_is_glued_after_its_instrument(monkeypatch):
+    # creaper's own songs have one Drums track: they used to get no drum glue at all.
+    mix_tools, calls = _glue_fake(monkeypatch, [{"guid": "{D}", "name": "Drums"}])
+    result = mix_tools._glue_drums([{"name": "Drums", "ref": "{D}", "role": "drums", "level": -10}], None, None)
+    added = next(a for c, a in calls if c == "add_fx")
+    assert added["track"] == "{D}" and added["position"] == 2 and "itself" in result["where"]
 
 
 def test_the_delay_return_is_a_dotted_eighth_and_reused_when_there(monkeypatch):
     mix_tools, calls = _glue_fake(monkeypatch, [])
     made = mix_tools._delay_return(120)
     assert made["time_ms"] == 375.0 and not made["reused"]   # a dotted 8th at 120 BPM
-    mix_tools, calls = _glue_fake(monkeypatch, [{"guid": "{D}", "name": "Vocal Delay", "item_count": 0}])
+    mix_tools, calls = _glue_fake(monkeypatch, [{"guid": "{D}", "name": "Vocal Delay", "item_count": 0,
+                                                 "fx": ["VST: ReaDelay (Cockos)"]}])
     assert mix_tools._delay_return(120) == {"track": "{D}", "name": "Vocal Delay", "reused": True}
+
+
+def test_an_empty_track_named_echo_without_a_delay_isnt_reused(monkeypatch):
+    mix_tools, calls = _glue_fake(monkeypatch, [{"guid": "{E}", "name": "Echo", "item_count": 0, "fx": []}])
+    assert mix_tools._delay_return(120)["reused"] is False

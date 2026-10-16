@@ -89,3 +89,56 @@ def test_genres_get_a_feel_from_their_profile(text, family, name, want):
 def test_every_genre_profile_has_a_feel():
     from creaper import genres
     assert all(feel.feel_for_genre(g.feel, g.family, g.swing, g.name) in feel.FEELS for g in genres.GENRES)
+
+
+@pytest.mark.parametrize("meter,pos,want", [
+    ("7/8", 3.5, 2),     # the downbeat of bar 2 in 7/8 (was an "offbeat")
+    ("6/8", 1.5, 1),     # the second dotted-quarter pulse
+    ("6/8", 1.0, 0),     # an 8th inside the pulse
+    ("12/8", 4.5, 1),
+    ("4/4", 2 / 3, 0),   # the swung "and" of a triplet
+    ("4/4", 0.25, -1),
+])
+def test_beats_follow_the_meter(meter, pos, want):
+    assert feel._beat_strength(pos, meter, 0.06) == want
+
+
+def test_slightly_off_grid_notes_count_as_on_it():
+    # Already-performed or imported parts: every note sat a few ms off, and all got the
+    # weakest accent.
+    hats = [{"pitch": 42, "start": i * 0.5 + 0.004, "length": 0.25, "velocity": 100, "channel": 10} for i in range(16)]
+    played = feel.apply(hats, "drums", "natural", seed=1)
+    on = [p["velocity"] for i, p in enumerate(played) if i % 2 == 0]
+    off = [p["velocity"] for i, p in enumerate(played) if i % 2 == 1]
+    assert sum(on) / len(on) > sum(off) / len(off) + 8
+
+
+def test_layered_drums_move_together():
+    # A clap on the snare got its own offset: a flam.
+    notes = [{"pitch": p, "start": b, "length": 0.25, "velocity": 100, "channel": 10} for b in (1, 3) for p in (38, 39)]
+    played = feel.apply(notes, "drums", "laid back", bpm=90, seed=3)
+    for b in (1, 3):
+        starts = {round(p["start"], 6) for p in played if abs(p["start"] - b) < 0.2}
+        assert len(starts) == 1
+
+
+def test_the_offbeat_open_hat_is_the_accent():
+    notes = [{"pitch": 46, "start": b + 0.5, "length": 0.25, "velocity": 90, "channel": 10} for b in range(4)]
+    played = feel.apply(notes, "drums", "tight", seed=1)
+    assert sum(p["velocity"] for p in played) / 4 > 90
+
+
+def test_a_loop_keeps_its_length():
+    # A chord pushed a few ms late used to ring past the item's end, and REAPER grew the
+    # 4-bar item to 5 bars.
+    notes = [{"pitch": p, "start": s, "length": 2.0, "velocity": 80, "channel": 1}
+             for s in (12.0, 14.0) for p in (60, 64, 67)]
+    for seed in range(50):
+        played = feel.apply(notes, "chords", "expressive", seed=seed)
+        assert max(n["start"] + n["length"] for n in played) <= 16.0 + 1e-9
+
+
+def test_metal_is_pushed_and_minimalism_is_tight():
+    assert feel.feel_for_genre("Steady, unchanging pulse of 8ths; no rubato", "classical", 50, "minimalism") == "tight"
+    assert feel.feel_for_genre("fast double-time blast beats", "metal and punk", 50, "grindcore") == "pushed"
+    assert feel.feel_for_genre("galloping 16ths at 138", "electronic dance", 50, "uplifting trance") == "tight"

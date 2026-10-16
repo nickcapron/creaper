@@ -12,6 +12,15 @@ from scipy import signal
 FS = 44100
 
 
+def _end_fade(audio: np.ndarray, fs: int, ms: float = 3.0) -> np.ndarray:
+    """A few ms of fade where a sound stops at full level on the downbeat, so it can't
+    click even with REAPER's default item fades turned off."""
+    k = min(len(audio), max(1, int(fs * ms / 1000)))
+    audio = audio.copy()
+    audio[-k:] *= np.linspace(1, 0, k)[:, None]
+    return audio
+
+
 def _normalise(audio: np.ndarray, peak_db: float) -> np.ndarray:
     peak = float(np.max(np.abs(audio))) or 1.0
     return audio * (10 ** (peak_db / 20) / peak)
@@ -53,7 +62,7 @@ def riser(seconds: float, fs: int = FS, peak_db: float = -6.0, seed: int = 1, to
         phase = 2 * np.pi * np.cumsum(freq) / fs
         sweep = (np.sin(phase) + 0.3 * np.sin(2 * phase)) * (t ** 3) * 0.35
         audio += np.stack([sweep, sweep], axis=1) * np.max(np.abs(audio))
-    return _normalise(audio, peak_db)
+    return _end_fade(_normalise(audio, peak_db), fs)
 
 
 def downlifter(seconds: float, fs: int = FS, peak_db: float = -8.0, seed: int = 2) -> np.ndarray:
@@ -71,7 +80,7 @@ def reverse_swell(seconds: float, fs: int = FS, peak_db: float = -8.0, seed: int
     wash *= decay[:, None]
     hp = signal.butter(2, 2500, btype="highpass", fs=fs, output="sos")
     wash = signal.sosfilt(hp, wash, axis=0)
-    return _normalise(wash[::-1].copy(), peak_db)
+    return _end_fade(_normalise(wash[::-1].copy(), peak_db), fs)
 
 
 def impact(seconds: float = 2.5, fs: int = FS, peak_db: float = -3.0, seed: int = 4) -> np.ndarray:
