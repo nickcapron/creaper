@@ -1,0 +1,195 @@
+"""Choosing sounds by audition: instead of picking a preset by its name, creaper loads
+each candidate, plays it the way the part will be played (low notes for a bass, held
+notes for a pad), measures what comes out and keeps the one that best fits the role
+and the character asked for. The same way a producer flicks through patches, but
+measured, because Claude can't hear."""
+
+from __future__ import annotations
+
+import math
+import statistics
+from typing import Annotated, Literal
+
+from pydantic import Field
+
+from .server import TrackRef, call, sound_library, tool
+
+Role = Literal["bass", "sub", "lead", "pad", "keys", "pluck", "bell", "arp", "strings", "brass"]
+Character = Literal["bright", "dark", "punchy", "soft", "plucky", "sustained"]
+
+# How each role is auditioned (notes, seconds held) and what it should measure:
+# attack_ms, richness (brightness relative to the note: centroid / fundamental),
+# sustain_db (held level against the peak), decay_s (how fast it falls while held).
+# Richness ranges are wide and calibrated on real synth patches (Arturia leads and basses
+# measured 1.1-1.8): it separates a sub from a buzzy bass or a bell from a pad.
+# "bright"/"dark" are judged against the other candidates instead (see audition_sounds).
+ROLES: dict[str, dict] = {
+    "bass": {"notes": [28, 36, 43], "seconds": 1.2, "attack_ms": (0, 25), "richness": (1.0, 4), "sustain_db": (-14, 0)},
+    "sub": {"notes": [28, 33, 40], "seconds": 1.2, "attack_ms": (0, 30), "richness": (0.8, 1.6), "sustain_db": (-10, 0)},
+    "lead": {"notes": [60, 67, 72], "seconds": 1.2, "attack_ms": (0, 25), "richness": (1.0, 6), "sustain_db": (-14, 0)},
+    "pad": {"notes": [48, 55, 60], "seconds": 3.0, "attack_ms": (60, 1500), "richness": (0.8, 5), "sustain_db": (-10, 0)},
+    "keys": {"notes": [48, 60, 67], "seconds": 2.0, "attack_ms": (0, 20), "richness": (1.0, 6), "decay_s": (0.3, 6)},
+    "pluck": {"notes": [55, 62, 69], "seconds": 1.0, "attack_ms": (0, 15), "decay_s": (0.05, 0.6), "sustain_db": (-80, -15)},
+    "bell": {"notes": [67, 72, 79], "seconds": 2.0, "attack_ms": (0, 15), "richness": (1.5, 12), "decay_s": (0.6, 8)},
+    "arp": {"notes": [55, 62, 69], "seconds": 0.5, "attack_ms": (0, 15), "decay_s": (0.05, 1.2)},
+    "strings": {"notes": [55, 62, 67], "seconds": 3.0, "attack_ms": (40, 700), "richness": (1.0, 5), "sustain_db": (-10, 0)},
+    "brass": {"notes": [55, 62, 67], "seconds": 1.5, "attack_ms": (15, 150), "richness": (1.2, 6), "sustain_db": (-12, 0)},
+}
+
+
+def targets(role: str, character: list[str] | None = None) -> dict[str, tuple[float, float]]:
+    """The measurement ranges a role should hit, moved by the character asked for."""
+    t = {k: v for k, v in ROLES[role].items() if k not in ("notes", "seconds")}
+    for c in character or []:
+        if c == "punchy":
+            t["attack_ms"] = (0, min(10, t.get("attack_ms", (0, 10))[1]))
+        elif c == "soft":
+            lo, hi = t.get("attack_ms", (0, 50))
+            t["attack_ms"] = (max(lo, 25), max(hi, 300))
+        elif c == "plucky":
+            t["decay_s"], t["sustain_db"] = (0.05, 0.5), (-80, -15)
+        elif c == "sustained":
+            t["sustain_db"] = (-8, 0)
+            t.pop("decay_s", None)
+    return t
+
+
+def summarise(results: list[dict]) -> dict:
+    """One sound's measurements across the auditioned notes (medians)."""
+    sounding = [r for r in results if not r.get("silent")]
+    out: dict = {"silent_notes": len(results) - len(sounding)}
+    for key in ("attack_ms", "richness", "sustain_db", "decay_s", "release_s", "peak_db"):
+        values = [r[key] for r in sounding if r.get(key) is not None]
+        if values:
+            out[key] = round(float(statistics.median(values)), 2)
+    return out
+
+
+def relative_brightness(ranked: list[dict], character: list[str] | None) -> None:
+    """'bright' or 'dark' compared with the other candidates: the brightest (or darkest)
+    of what's there scores best, as a producer flicking through patches would judge it."""
+    want = next((c for c in character or [] if c in ("bright", "dark")), None)
+    rich = [r["measured"]["richness"] for r in ranked if r.get("measured", {}).get("richness")]
+    if not want or len(rich) < 2:
+        return
+    top, bottom = max(rich), min(rich)
+    for r in ranked:
+        v = r.get("measured", {}).get("richness")
+        if not v:
+            continue
+        miss = math.log(top / v) if want == "bright" else math.log(v / bottom)
+        if miss > 0.05:
+            r["score"] = round(r["score"] + miss * 2, 3)
+            r["why"] = r["why"] + [f"{'less bright' if want == 'bright' else 'brighter'} than the best of these"]
+
+
+def score(measured: dict, wanted: dict[str, tuple[float, float]]) -> tuple[float, list[str]]:
+    """Distance from the wanted ranges (0 = fits everything) and the reasons it's off.
+    Times and brightness count by ratio (twice too slow is as far as half as slow);
+    levels in dB by 6 dB steps. A sound with silent notes can't win."""
+    if measured.get("silent_notes"):
+        return 100.0 + measured["silent_notes"], [f"{measured['silent_notes']} test notes made no sound"]
+    total, why = 0.0, []
+    for key, (lo, hi) in wanted.items():
+        v = measured.get(key)
+        if v is None:
+            if key == "decay_s" and lo > 0.3:
+                continue  # it simply doesn't fall away while held: fine for a slow decay target
+            total += 0.5
+            continue
+        if lo <= v <= hi:
+            continue
+        if key == "sustain_db":
+            d = (lo - v if v < lo else v - hi) / 6
+        else:
+            edge = lo if v < lo else hi
+            d = abs(math.log(max(v, 1e-3) / max(edge, 1e-3)))
+        total += d
+        why.append(f"{key.replace('_', ' ')} {v:g} (wanted {lo:g}-{hi:g})")
+    return round(total, 3), why
+
+
+def _apply(track, name: str, state: dict) -> None:
+    """Loads a captured or saved plugin state onto the track: into the same plugin if
+    it's there, otherwise swapping the track's instrument for it."""
+    call("apply_fx_state", timeout=60.0, track=track, replace_instrument=True, sound_name=name, state=state)
+
+
+def _instrument_index(track) -> int:
+    return next(f["index"] for f in call("get_track_details", track=track).get("fx", []) if f.get("instrument"))
+
+
+@tool()
+def audition_sounds(
+    track: TrackRef,
+    role: Annotated[Role, Field(description="What the sound has to do in the song: bass, sub, lead, pad, keys, pluck, bell, arp, strings, brass")],
+    character: Annotated[list[Character] | None, Field(description="How it should sound: bright, dark, punchy, soft, plucky, sustained")] = None,
+    candidates: Annotated[Literal["presets", "library", "both"], Field(description=(
+        "Where to look: the instrument's presets REAPER can see, the user's saved sounds, or both"))] = "both",
+    search: Annotated[str | None, Field(description="Words in preset or sound names to narrow it, e.g. 'bass', 'warm pad'; default: the role")] = None,
+    limit: Annotated[int, Field(ge=2, le=20, description="Most sounds to audition (each takes a few seconds)")] = 8,
+    keep_best: Annotated[bool, Field(description="Leave the best sound loaded; False puts the original back")] = True,
+) -> dict:
+    """Finds the right sound for a part by listening, not by name: loads each candidate
+    (the instrument's presets and/or the user's saved sounds), plays it the way the
+    part will be played (low notes for a bass, held notes for a pad), measures attack,
+    brightness, sustain and decay, scores it against what the role and character need,
+    and keeps the best (or puts the original back). Use it before programming a sound
+    from scratch. Plugins that keep presets in their own browser (Arturia) only offer
+    saved sounds here. Returns the ranking with the measurements behind it."""
+    track_info = call("get_track_details", track=track)
+    fx = next((f for f in track_info.get("fx", []) if f.get("instrument")), None)
+    if fx is None:
+        raise ValueError("that track has no instrument to audition sounds on")
+    words = search or role
+    pool: list[dict] = []
+    preset_note = None
+    if candidates in ("presets", "both"):
+        listed = call("list_fx_presets", timeout=120.0, track=track, fx=fx["index"], search=words, limit=limit)
+        pool += [{"kind": "preset", "name": p["name"] if isinstance(p, dict) else str(p)}
+                 for p in listed.get("presets", [])]
+        preset_note = listed.get("note")
+    if candidates in ("library", "both"):
+        pool += [{"kind": "sound", "name": e["name"]}
+                 for e in sound_library.search(words, None, None, "instrument")[:limit]]
+    pool = pool[:limit]
+    if not pool:
+        raise ValueError(f"no sounds to audition for '{words}'"
+                         + (f" ({preset_note})" if preset_note else "")
+                         + "; save some with save_sound, try other search words, or program one with set_fx_parameters")
+    from .music_tools import _listen
+
+    original = call("capture_fx_state", timeout=60.0, track=track, fx=fx["index"])
+    spec = ROLES[role]
+    wanted = targets(role, character)
+    ranked = []
+    try:
+        for c in pool:
+            try:
+                if c["kind"] == "preset":
+                    call("update_fx", track=track, fx=fx["index"], preset=c["name"])
+                else:
+                    _, entry = sound_library.find(c["name"])
+                    _apply(track, entry["name"], sound_library.state(entry))
+                results, _ = _listen(track, spec["notes"], 1, spec["seconds"], 1.0, 100)
+            except Exception as e:  # noqa: BLE001 - one bad candidate shouldn't stop the audition
+                ranked.append({**c, "score": 999.0, "why": [f"couldn't audition it: {e}"]})
+                continue
+            measured = summarise(results)
+            s, why = score(measured, wanted)
+            ranked.append({**c, "score": s, "measured": measured, "why": why})
+    finally:
+        relative_brightness(ranked, character)
+        ranked.sort(key=lambda r: r["score"])
+        best = ranked[0] if ranked and ranked[0]["score"] < 100 else None
+        # Back to the original plugin and sound first (a saved sound may have swapped
+        # the instrument), then the winner on top of it.
+        _apply(track, "original sound", original)
+        if keep_best and best and best["kind"] == "preset":
+            call("update_fx", track=track, fx=_instrument_index(track), preset=best["name"])
+        elif keep_best and best:
+            _, entry = sound_library.find(best["name"])
+            _apply(track, entry["name"], sound_library.state(entry))
+    return {"role": role, "character": character or [], "wanted": {k: list(v) for k, v in wanted.items()},
+            "loaded": best["name"] if (keep_best and best) else "the original sound",
+            "ranking": [{k: r[k] for k in ("kind", "name", "score", "why", "measured") if k in r} for r in ranked]}

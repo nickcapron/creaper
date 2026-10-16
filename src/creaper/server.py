@@ -75,9 +75,12 @@ Plugins (VST, VST3, CLAP, AU, JS):
      for those, an acoustic piano model only for a real piano. Tone controls can't
      turn one into another. If nothing close is installed, say what you're using
      instead; never call a sound something it isn't.
-  1. list_sounds: if the user's library has a fitting sound, load_sound it.
-  2. Otherwise start from a factory preset close to the target when list_fx_presets
-     can see them, or design it yourself. Don't just suggest presets: you can program any
+  1. Choose by listening, not by name: audition_sounds (with the part's role and the
+     character wanted: bright, dark, punchy, soft, plucky, sustained) loads the
+     instrument's presets and the user's saved sounds one by one, measures each the
+     way the part will be played, and keeps the best fit.
+  2. If nothing fits (or the plugin keeps its presets in its own browser), design it
+     yourself. Don't just suggest presets: you can program any
      synth through its parameters (Arturia, ReaSynth and most VSTs expose their
      controls). Find them with get_fx_parameters, searching by section ("osc",
      "wave", "filter", "cutoff", "reson", "env", "attack", "release", "lfo", "chorus",
@@ -1976,6 +1979,7 @@ from . import mix_tools  # noqa: E402,F401  (auto_mix)
 from . import motif_tools  # noqa: E402,F401  (motifs reused across songs)
 from . import sfx_tools  # noqa: E402,F401  (sound effects: one file per region)
 from . import arrange_tools  # noqa: E402,F401  (transitions and ear candy)
+from . import sound_tools  # noqa: E402,F401  (choosing sounds by audition)
 
 
 def run() -> None:
