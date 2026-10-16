@@ -24,8 +24,10 @@ Character = Literal["bright", "dark", "punchy", "soft", "plucky", "sustained"]
 # measured 1.1-1.8): it separates a sub from a buzzy bass or a bell from a pad.
 # "bright"/"dark" are judged against the other candidates instead (see audition_sounds).
 ROLES: dict[str, dict] = {
-    "bass": {"notes": [28, 36, 43], "seconds": 1.2, "attack_ms": (0, 25), "richness": (1.0, 4), "sustain_db": (-14, 0)},
-    "sub": {"notes": [28, 33, 40], "seconds": 1.2, "attack_ms": (0, 30), "richness": (0.8, 1.6), "sustain_db": (-10, 0)},
+    "bass": {"notes": [28, 36, 43], "seconds": 1.2, "attack_ms": (0, 25), "richness": (1.0, 4), "sustain_db": (-14, 0),
+             "low_share": (0.35, 1.0)},
+    "sub": {"notes": [28, 33, 40], "seconds": 1.2, "attack_ms": (0, 30), "richness": (0.8, 1.6), "sustain_db": (-10, 0),
+            "low_share": (0.6, 1.0)},
     "lead": {"notes": [60, 67, 72], "seconds": 1.2, "attack_ms": (0, 25), "richness": (1.0, 6), "sustain_db": (-14, 0)},
     "pad": {"notes": [48, 55, 60], "seconds": 3.0, "attack_ms": (60, 1500), "richness": (0.8, 5), "sustain_db": (-10, 0)},
     "keys": {"notes": [48, 60, 67], "seconds": 2.0, "attack_ms": (0, 20), "richness": (1.0, 6), "decay_s": (0.3, 6)},
@@ -62,6 +64,9 @@ def summarise(results: list[dict]) -> dict:
         values = [r[key] for r in sounding if r.get(key) is not None]
         if values:
             out[key] = round(float(statistics.median(values)), 2)
+    lows = [r["bands"]["sub"] + r["bands"]["low"] for r in sounding if r.get("bands")]
+    if lows:  # weight under 250 Hz: a bass that's all upper harmonics sounds thin in a mix
+        out["low_share"] = round(float(statistics.median(lows)), 2)
     return out
 
 
@@ -101,6 +106,8 @@ def score(measured: dict, wanted: dict[str, tuple[float, float]]) -> tuple[float
             continue
         if key == "sustain_db":
             d = (lo - v if v < lo else v - hi) / 6
+        elif key == "low_share":
+            d = (lo - v if v < lo else v - hi) / 0.15
         else:
             # Times are measured in 5 ms steps (attack 0 means "under 5 ms"), so compare
             # from half a step: a 0 vs 60 ms attack mustn't outweigh everything else.
@@ -139,6 +146,8 @@ def audition_sounds(
     search: Annotated[str | None, Field(description="Words in preset or sound names to narrow it, e.g. 'bass', 'warm pad'; default: candidates spread evenly through all of them")] = None,
     limit: Annotated[int, Field(ge=2, le=20, description="Most sounds to audition (each takes a few seconds)")] = 8,
     keep_best: Annotated[bool, Field(description="Leave the best sound loaded; False puts the original back")] = True,
+    match_level: Annotated[bool, Field(description=(
+        "Move the track fader so the chosen sound plays as loud as the original did (the mix balance stays)"))] = True,
 ) -> dict:
     """Finds the right sound for a part by listening, not by name: loads each candidate
     (the instrument's presets and/or the user's saved sounds), plays it the way the
@@ -146,7 +155,9 @@ def audition_sounds(
     brightness, sustain and decay, scores it against what the role and character need,
     and keeps the best (or puts the original back). Use it before programming a sound
     from scratch. Plugins that keep presets in their own browser (Arturia) only offer
-    saved sounds here. Returns the ranking with the measurements behind it."""
+    saved sounds here. The track fader is moved so the chosen sound plays as loud as
+    the original did (match_level). Returns the ranking with the measurements behind
+    it."""
     track_info = call("get_track_details", track=track)
     fx = next((f for f in track_info.get("fx", []) if f.get("instrument")), None)
     if fx is None:
@@ -188,7 +199,11 @@ def audition_sounds(
                 if f["index"] > fx["index"] and not f.get("instrument") and "(bypassed)" not in f["name"]]
     for name in bypassed:
         call("update_fx", track=track, fx=name, enabled=False)
+    base_level = None
     try:
+        if match_level and keep_best:
+            base = summarise(_listen(track, spec["notes"], 1, spec["seconds"], 1.0, 100)[0])
+            base_level = base.get("peak_db")
         for c in pool:
             try:
                 if c["kind"] == "preset":
@@ -222,7 +237,16 @@ def audition_sounds(
                 call("update_fx", track=track, fx=name, enabled=True)
             except Exception:  # noqa: BLE001 - keep restoring the rest
                 pass
+    matched = None
+    if keep_best and best and base_level is not None and best.get("measured", {}).get("peak_db") is not None:
+        # Patches differ by 10 dB or more in output: keep the track as loud as before.
+        gain = max(-12.0, min(12.0, base_level - best["measured"]["peak_db"]))
+        if abs(gain) >= 1.0:
+            now = call("get_track_details", track=track).get("volume_db") or 0.0
+            call("set_track_properties", track=track, volume_db=round(min(12.0, now + gain), 1))
+            matched = round(gain, 1)
     return {"role": role, "character": character or [], "wanted": {k: list(v) for k, v in wanted.items()},
             **({"effects_bypassed_while_listening": bypassed} if bypassed else {}),
+            **({"fader_moved_db_to_match_level": matched} if matched is not None else {}),
             "loaded": best["name"] if (keep_best and best) else "the original sound",
             "ranking": [{k: r[k] for k in ("kind", "name", "score", "why", "measured") if k in r} for r in ranked]}

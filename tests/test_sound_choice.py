@@ -46,7 +46,7 @@ def test_audition_keeps_the_best_preset_and_restores_the_rest(monkeypatch):
         return {}
 
     def fake_listen(track, pitches, channel, seconds, gap, velocity):
-        m = measured[loaded["preset"]]
+        m = measured.get(loaded["preset"], {"attack_ms": 300, "richness": 3, "sustain_db": -2})  # the original
         return [dict(m) for _ in pitches], {"instrument": "VSTi: Synth"}
 
     from creaper import music_tools
@@ -134,3 +134,45 @@ def test_track_effects_are_bypassed_while_listening_and_restored(monkeypatch):
     toggles = [(a["fx"], a["enabled"]) for c, a in calls if c == "update_fx" and "enabled" in a]
     assert toggles == [("VST: ReaVerbate (Cockos)", False), ("VST: ReaVerbate (Cockos)", True)]
     assert result["effects_bypassed_while_listening"] == ["VST: ReaVerbate (Cockos)"]
+
+
+
+def test_a_thin_bass_loses_to_one_with_low_end_weight():
+    wanted = st.targets("bass")
+    weighty = {"silent_notes": 0, "attack_ms": 5, "richness": 2, "sustain_db": -3, "low_share": 0.7}
+    thin = {"silent_notes": 0, "attack_ms": 5, "richness": 2, "sustain_db": -3, "low_share": 0.1}
+    assert st.score(weighty, wanted)[0] == 0 and st.score(thin, wanted)[0] > 1
+
+
+def test_low_share_comes_from_the_measured_bands():
+    results = [{"bands": {"sub": 0.3, "low": 0.3}, "attack_ms": 5}, {"bands": {"sub": 0.1, "low": 0.3}, "attack_ms": 5}]
+    assert st.summarise(results)["low_share"] == 0.5
+
+
+def test_the_winner_is_level_matched_to_the_original(monkeypatch):
+    calls = []
+    levels = {None: -12.0, "Loud Pad": -2.0}
+    loaded = {"preset": None}
+
+    def fake_call(command, **args):
+        calls.append((command, args))
+        if command == "get_track_details":
+            return {"fx": [{"index": 1, "name": "VSTi: Synth", "instrument": True}], "volume_db": -3.0}
+        if command == "list_fx_presets":
+            return {"presets": [{"index": 1, "name": "Loud Pad"}]}
+        if command == "capture_fx_state":
+            return {"plugin": "VSTi: Synth", "chunk": "orig", "instrument": True}
+        if command == "update_fx" and "preset" in args:
+            loaded["preset"] = args["preset"]
+        if command == "apply_fx_state":
+            loaded["preset"] = None
+        return {}
+
+    from creaper import music_tools
+    monkeypatch.setattr(st, "call", fake_call)
+    monkeypatch.setattr(st.sound_library, "search", lambda *a, **k: [])
+    monkeypatch.setattr(music_tools, "_listen", lambda track, pitches, *a: (
+        [{"attack_ms": 300, "richness": 2, "sustain_db": -2, "peak_db": levels[loaded["preset"]]} for _ in pitches], {}))
+    result = st.audition_sounds(track=1, role="pad", candidates="presets")
+    assert result["fader_moved_db_to_match_level"] == -10.0
+    assert ("set_track_properties", {"track": 1, "volume_db": -13.0}) in calls

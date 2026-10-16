@@ -72,31 +72,47 @@ def downlifter(seconds: float, fs: int = FS, peak_db: float = -8.0, seed: int = 
 
 
 def reverse_swell(seconds: float, fs: int = FS, peak_db: float = -8.0, seed: int = 3) -> np.ndarray:
-    """A bright, cymbal-like wash played backwards: it swells out of nothing and stops
-    on the downbeat (the classic reverse-cymbal suck-in)."""
+    """A cymbal played backwards: it swells out of nothing and stops on the downbeat
+    (the classic reverse-cymbal suck-in). A cymbal's wash sits in 3-10 kHz with a few
+    clangorous, inharmonic partials; a plain high-passed noise (the first version,
+    centred near 13 kHz) read as hiss."""
     n = max(1, int(seconds * fs))
-    wash = _shaped_noise(seconds, None, 0.0, fs, seed, bright_tilt=3.0)
-    decay = np.exp(-np.linspace(0, 1, n) * 5.5)
-    wash *= decay[:, None]
-    hp = signal.butter(2, 2500, btype="highpass", fs=fs, output="sos")
-    wash = signal.sosfilt(hp, wash, axis=0)
-    return _end_fade(_normalise(wash[::-1].copy(), peak_db), fs)
+    t = np.arange(n) / fs
+    rng = np.random.default_rng(seed)
+    frames = max(2, n // 512)
+    wash = _shaped_noise(seconds, np.full(frames, 5500.0), 0.75, fs, seed)
+    lp = signal.butter(2, 12000, btype="lowpass", fs=fs, output="sos")
+    wash = signal.sosfilt(lp, wash, axis=0)
+    partials = np.zeros((n, 2))
+    for f, level in ((3150, 0.5), (4730, 0.35), (6290, 0.3), (8870, 0.2), (10450, 0.12)):
+        for ch in range(2):  # slightly detuned per side: a wide, shimmering image
+            detune = f * (1 + rng.uniform(-0.004, 0.004))
+            partials[:, ch] += level * np.sin(2 * np.pi * detune * t + rng.uniform(0, 2 * np.pi))
+    partials *= np.max(np.abs(wash)) * 0.6
+    decay = np.exp(-np.linspace(0, 1, n) * 4.5)
+    hit = (wash + partials) * decay[:, None]
+    return _end_fade(_normalise(hit[::-1].copy(), peak_db), fs)
 
 
-def impact(seconds: float = 2.5, fs: int = FS, peak_db: float = -3.0, seed: int = 4) -> np.ndarray:
-    """A downbeat hit: a sub drop (70 Hz falling to 35 Hz), a short noise crack and a
-    darker tail that dies away like a big room."""
+def impact(seconds: float = 2.0, fs: int = FS, peak_db: float = -6.0, seed: int = 4, sub: bool = True) -> np.ndarray:
+    """A downbeat hit: a short sub drop (70 Hz falling to 35 Hz over about 0.8 s), a
+    noise crack and a darker tail that dies away like a big room. The sub is kept short
+    (and can be left out, sub=False) so it doesn't pile onto the kick and bass on the
+    same downbeat; -6 dBFS leaves the mix room."""
     n = max(1, int(seconds * fs))
     t = np.arange(n) / fs
     freq = 35 + 35 * np.exp(-t * 6)
-    sub = np.sin(2 * np.pi * np.cumsum(freq) / fs) * np.exp(-t * 2.2)
+    low = np.sin(2 * np.pi * np.cumsum(freq) / fs) * np.exp(-t * 5.5) if sub else np.zeros(n)
     crack = _shaped_noise(seconds, None, 0.0, fs, seed, bright_tilt=-1.5)
     crack *= np.exp(-t * 28)[:, None]
     tail = _shaped_noise(seconds, None, 0.0, fs, seed + 1, bright_tilt=-4.0)
     tail *= (np.exp(-t * 2.8) * 0.35)[:, None]
     lp = signal.butter(2, 3000, btype="lowpass", fs=fs, output="sos")
     tail = signal.sosfilt(lp, tail, axis=0)
-    audio = np.stack([sub, sub], axis=1) * 1.0 + crack * 0.6 + tail
+    audio = np.stack([low, low], axis=1) + crack * 0.6 + tail
+    if not sub:
+        hp = signal.butter(2, 120, btype="highpass", fs=fs, output="sos")
+        audio = signal.sosfilt(hp, audio, axis=0)
     fade = np.ones(n)
     k = min(n, int(0.05 * fs))
     fade[-k:] = np.linspace(1, 0, k)  # no click if the tail is still sounding at the end

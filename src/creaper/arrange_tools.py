@@ -39,26 +39,45 @@ def energy(name: str) -> int:
 
 
 def plan(sections: list[dict], intensity: str) -> list[dict]:
-    """What each section change gets. sections: [{'name', 'bar'}] in order. A change into
-    more energy builds (riser/reverse, impact, crash, fill, and a kick drop-out before a
-    drop or chorus); into less energy falls (downlifter); level changes get a crash and
-    a small fill."""
+    """What each section change gets, scaled by how big a change it is. sections:
+    [{'name', 'bar'}] in order.
+    - A big lift (two energy levels, or into the peak: a chorus or drop) builds: a riser,
+      a crash and a fill, an impact into the peak, and the kick dropping out before it.
+      Repeated peaks alternate (riser and drop-out the first time, reverse swell and
+      impact the next) so the song doesn't play the same trick every 16 bars.
+    - A small lift (intro to verse) gets a reverse swell, a crash and (except subtle) a fill.
+    - A fall gets a crash, and a downlifter when it's a big one (chorus to breakdown).
+    - A change between equal sections gets a crash (and a small fill)."""
     out = []
+    peaks = 0
     for prev, nxt in zip(sections, sections[1:]):
         if nxt["bar"] <= 1:
             continue
         before, after = energy(prev["name"]), energy(nxt["name"])
-        if after > before:
+        jump = after - before
+        into_peak = after == 4
+        if jump > 0:
             direction = "up"
-            elements = {"subtle": ["reverse", "crash", "fill"],
-                        "build": ["riser", "impact", "crash", "fill"],
-                        "epic": ["riser", "reverse", "impact", "crash", "fill"]}[intensity]
-            if after == 4 and intensity != "subtle":
-                elements = elements + ["dropout"]
-        elif after < before:
+            big = jump >= 2 or into_peak
+            if into_peak:
+                peaks += 1
+            alternate = into_peak and peaks % 2 == 0  # every other peak: a different build-up
+            if intensity == "subtle":
+                elements = ["reverse", "crash"] + (["fill"] if big else [])
+            elif not big:
+                elements = ["reverse", "crash", "fill"]
+            elif intensity == "build":
+                elements = (["reverse", "impact", "crash", "fill"] if alternate else
+                            ["riser", "impact", "crash", "fill"] + (["dropout"] if into_peak else []))
+            else:  # epic
+                elements = ["riser", "reverse", "impact", "crash", "fill"] + (["dropout"] if into_peak and not alternate else [])
+            if not into_peak:
+                elements = [e for e in elements if e != "impact"]  # impacts are for the peaks
+        elif jump < 0:
             direction = "down"
-            elements = {"subtle": ["crash"], "build": ["downlifter", "crash"],
-                        "epic": ["impact", "downlifter", "crash"]}[intensity]
+            big = jump <= -2
+            elements = {"subtle": ["crash"], "build": (["downlifter", "crash"] if big else ["crash"]),
+                        "epic": (["impact", "downlifter", "crash"] if big else ["downlifter", "crash"])}[intensity]
         else:
             direction = "level"
             elements = ["crash", "fill"] if intensity != "subtle" else ["crash"]
@@ -205,7 +224,9 @@ def add_transitions(
                     audio = ear_candy.downlifter(_seconds(at_qn, at_qn + 2 * bar_qn), seed=int(c["bar"]) + 3)
                 else:
                     start_bar = c["bar"]
-                    audio = ear_candy.impact(seed=int(c["bar"]) + 11)
+                    # The sub only for epic: at build intensity the kick and bass already land
+                    # on this downbeat, and a sub drop on top piles up the low end.
+                    audio = ear_candy.impact(seed=int(c["bar"]) + 11, sub=intensity == "epic")
                 path = _write(audio, folder, e)
                 call("insert_audio_file", timeout=120.0, path=path, track=fx_ref, start_bar=start_bar)
                 done.append(e)

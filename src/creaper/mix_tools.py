@@ -261,13 +261,14 @@ def _clear_robot_vocals(actions: list[dict], start_bar: float | None, end_bar: f
 
 
 DRUM_ROLES = ("kick", "drums", "snare", "perc")
-DRUM_GLUE_DB = 2.0           # what the drum bus compressor takes off the hits
+DRUM_GLUE_DB = 1.5           # loud-vs-average drop on the drum bus (its 10 ms attack lets hits through, so this
+                             # understates the real gain reduction; more fights the anti-crush floor)
 DELAY_DB = {"vocal": -20, "lead": -18}   # send levels to the shared delay
 
 
 def _glue_drums(channels: list[dict], start_bar: float | None, end_bar: float | None) -> dict | None:
     """Puts the drums through one compressor so they hit as a kit, calibrated by
-    measurement to take about 2 dB off the hits (ReaComp at 4:1 with a 10 ms attack
+    measurement to take about 1.5 dB off the hits (ReaComp at 4:1 with a 10 ms attack
     that lets them through). Where it goes:
     - a bus the drums already all send to (an earlier run's 'Drum Bus', or the user's);
     - else the folder they share, if that folder holds only drums;
@@ -355,9 +356,52 @@ def _delay_return(bpm: float) -> dict:
     return out
 
 
+ROOM_DB = {"snare": -14, "perc": -18, "drums": -16, "kick": -24}   # drum sends to the short room
+MIX_GLUE_DB = 1.0        # what the mix-bus compressor takes off (gentle: glue, not squash)
+
+
+def _drum_room() -> dict:
+    """A short, dark room for the drums (an existing 'Drum Room', or ReaVerbate set
+    small): a kit sounds like one kit when it shares a space, and a small room keeps
+    the drums tight where the long reverb would wash them out."""
+    for t in call("get_project_overview")["tracks"]:
+        if t["name"].lower() == "drum room" and not t.get("item_count"):
+            return {"track": t.get("guid") or t["number"], "name": t["name"], "reused": True}
+    made = call("create_track", name="Drum Room")["track"]
+    ref = made.get("guid") or made["number"]
+    call("add_fx", track=ref, name="ReaVerbate")
+    call("set_fx_parameters", track=ref, fx=1, changes=[
+        {"parameter": "Wet", "display_value": 0}, {"parameter": "Dry", "display_value": -150},
+        {"parameter": "Room size", "value": 0.18}, {"parameter": "Dampening", "value": 0.65}])
+    return {"track": ref, "name": "Drum Room", "reused": False}
+
+
+def _mix_bus_glue(start_bar: float | None, end_bar: float | None) -> dict | None:
+    """Gentle glue on the whole mix: ReaComp on the master (before any limiter) at its
+    glue settings (2:1, slow attack), calibrated to take about 1 dB off. master_to_target
+    reuses and recalibrates it when mastering."""
+    from .server import _calibrate_compressor
+
+    fx = call("get_track_details", track="master").get("fx", [])
+    if any("comp" in f["name"].lower() or "glue" in f["name"].lower() or "bus force" in f["name"].lower() for f in fx):
+        return {"skipped": "the master already has a compressor"}
+    limiter = next((f["index"] for f in fx if re.search(r"limit", f["name"], re.I)), None)
+    comp = call("add_fx", track="master", name="ReaComp", **({"position": limiter} if limiter else {}))
+    profile = plugin_profiles.find_profile(comp["name"])
+    changes = [dict(c) for c in profile.setup + profile.glue] if profile else []
+    if changes:
+        call("set_fx_parameters", track="master", fx=comp["index"], changes=changes)
+    result = {"compressor": comp["name"]}
+    if profile and profile.drive:
+        result["calibration"] = _calibrate_compressor("master", comp["index"], profile, MIX_GLUE_DB, start_bar, end_bar)
+    return result
+
+
 def _reverb_return() -> str:
     overview = call("get_project_overview")
     for t in overview["tracks"]:
+        if t["name"].lower() == "drum room":
+            continue  # the drums' short room isn't the main reverb
         if re.search(r"verb", t["name"], re.I) or any("verb" in f.lower() for f in t.get("fx", [])):
             if not t.get("item_count"):
                 return t["name"]
@@ -377,8 +421,8 @@ def auto_mix(
     reverb: Annotated[bool, Field(description="Feed a reverb return (an existing one, or a new ReaVerbate)")] = True,
     sidechain: Annotated[bool, Field(description="Duck bass (and pads) under the kick in dance styles")] = True,
     glue: Annotated[bool, Field(description=(
-        "Glue the mix together: the drums through one calibrated bus compressor, and leads and vocals into a "
-        "shared tempo-synced delay"))] = True,
+        "Glue the mix together: the drums through one calibrated bus compressor and a shared short room, leads "
+        "and vocals into a shared tempo-synced delay, and gentle compression on the whole mix"))] = True,
     dry_run: Annotated[bool, Field(description="Only report what it would do")] = False,
 ) -> dict:
     """A whole first mix in one call: measures every track (one render pass), works out
@@ -386,7 +430,8 @@ def auto_mix(
     bass and cuts low-mid mud, compresses vocals/bass/leads that need it, pans the wide
     parts, sends to a reverb return, ducks bass under the kick (dance styles), and sets
     -6 dBFS of headroom for mastering, glues the mix (the drums through one calibrated bus
-    compressor; leads and vocals into a shared tempo-synced delay), then measures robot
+    compressor and a short shared room; leads and vocals into a shared tempo-synced delay;
+    about 1 dB of gentle compression on the whole mix), then measures robot
     vocals' clarity in the mix and,
     if other parts cover the words, raises the vocal and ducks the parts covering it.
     Saves a copy of the project first when it has a file. Leaves tracks the user already set up (EQ, compression, panning) alone on those
@@ -437,7 +482,14 @@ def auto_mix(
         report["backup"] = backup
     else:
         report["backup"] = "the project isn't saved, so there's no copy: Ctrl+Z steps back through the changes"
-    verb = _reverb_return() if reverb and any("reverb_send_db" in a for a in plan["channels"]) else None
+    # With glue, the drums go to their own short room instead of the long reverb.
+    room = None
+    if glue and reverb and any(a["role"] in DRUM_ROLES and not a.get("skipped") for a in plan["channels"]):
+        room = _drum_room()
+    verb = _reverb_return() if reverb and any("reverb_send_db" in a and not (room and a["role"] in DRUM_ROLES)
+                                              for a in plan["channels"]) else None
+    room_sending = ({src for src, r in ((t["name"], t) for t in call("get_routing")["tracks"])
+                     for snd in r.get("sends") or [] if snd["to"] == room["name"]} if room else set())
     already_sending = {src for src, r in ((t["name"], t) for t in call("get_routing")["tracks"])
                        for snd in r.get("sends") or [] if verb and snd["to"] == verb}
     by_ref = {c["ref"]: c for c in channels}
@@ -470,7 +522,10 @@ def auto_mix(
                 {"parameter": "Ratio", "display_value": k["ratio"]},
                 {"parameter": "Attack", "display_value": k["attack_ms"]},
                 {"parameter": "Release", "display_value": k["release_ms"]}])
-        if verb and "reverb_send_db" in a and a["name"] not in already_sending:
+        if room and a["role"] in DRUM_ROLES:
+            if a["name"] not in room_sending:  # a level set earlier stays
+                call("set_send", source=track, destination=room["track"], volume_db=ROOM_DB[a["role"]])
+        elif verb and "reverb_send_db" in a and a["name"] not in already_sending:
             call("set_send", source=track, destination=verb, volume_db=a["reverb_send_db"])
         elif a["name"] in already_sending:
             a["reverb_send_kept"] = True  # the user's (or an earlier pass's) send level stays
@@ -520,6 +575,15 @@ def auto_mix(
                 master = analyze_audio(track="master", start_bar=start_bar, end_bar=end_bar)
         except Exception as e:  # noqa: BLE001
             report.setdefault("warnings", []).append(f"drum bus: {e}")
+        try:
+            mix_glue = _mix_bus_glue(start_bar, end_bar)
+            if mix_glue:
+                report["mix_bus_glue"] = mix_glue
+                master = analyze_audio(track="master", start_bar=start_bar, end_bar=end_bar)
+        except Exception as e:  # noqa: BLE001
+            report.setdefault("warnings", []).append(f"mix bus glue: {e}")
+    if room:
+        report["drum_room"] = room
     vocal_fixes = _clear_robot_vocals(plan["channels"], start_bar, end_bar)
     if vocal_fixes:
         report["vocal_clarity"] = vocal_fixes

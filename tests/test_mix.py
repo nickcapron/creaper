@@ -235,3 +235,45 @@ def test_the_delay_return_is_a_dotted_eighth_and_reused_when_there(monkeypatch):
 def test_an_empty_track_named_echo_without_a_delay_isnt_reused(monkeypatch):
     mix_tools, calls = _glue_fake(monkeypatch, [{"guid": "{E}", "name": "Echo", "item_count": 0, "fx": []}])
     assert mix_tools._delay_return(120)["reused"] is False
+
+
+def test_the_drums_get_their_own_short_room(monkeypatch):
+    mix_tools, calls = _glue_fake(monkeypatch, [])
+    room = mix_tools._drum_room()
+    settings = next(a for c, a in calls if c == "set_fx_parameters")["changes"]
+    assert room["name"] == "Drum Room" and not room["reused"]
+    assert {"parameter": "Room size", "value": 0.18} in settings
+    mix_tools, calls = _glue_fake(monkeypatch, [{"guid": "{R}", "name": "Drum Room", "item_count": 0}])
+    assert mix_tools._drum_room() == {"track": "{R}", "name": "Drum Room", "reused": True}
+
+
+def test_the_main_reverb_is_never_the_drum_room(monkeypatch):
+    mix_tools, calls = _glue_fake(monkeypatch, [{"guid": "{R}", "name": "Drum Room", "item_count": 0,
+                                                 "fx": ["VST: ReaVerbate (Cockos)"]}])
+    assert mix_tools._reverb_return() == "Reverb" and any(c == "create_track" for c, _ in calls)
+
+
+def test_mix_bus_glue_goes_before_the_limiter(monkeypatch):
+    from creaper import mix_tools, server
+    calls = []
+
+    def fake_call(command, **args):
+        calls.append((command, args))
+        if command == "get_track_details":
+            return {"fx": [{"index": 1, "name": "VST: ReaEQ (Cockos)"}, {"index": 2, "name": "VST: ReaLimit (Cockos)"}]}
+        if command == "add_fx":
+            return {"name": "VST: ReaComp (Cockos)", "index": 2}
+        return {}
+
+    monkeypatch.setattr(mix_tools, "call", fake_call)
+    monkeypatch.setattr(server, "_calibrate_compressor", lambda *a, **k: {"loud_part_reduction_db": 1.0})
+    result = mix_tools._mix_bus_glue(None, None)
+    added = next(a for c, a in calls if c == "add_fx")
+    assert added["track"] == "master" and added["position"] == 2 and result["calibration"]
+
+
+def test_no_mix_bus_glue_when_the_master_already_compresses(monkeypatch):
+    from creaper import mix_tools
+    monkeypatch.setattr(mix_tools, "call", lambda command, **a: {"fx": [{"index": 1, "name": "VST3: Bus FORCE (Arturia)"}]}
+                        if command == "get_track_details" else {})
+    assert "skipped" in mix_tools._mix_bus_glue(None, None)
