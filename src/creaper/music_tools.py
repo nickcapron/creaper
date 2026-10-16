@@ -1077,7 +1077,9 @@ def audition_instrument(
     """Listens to the track's current sound: plays notes across the range offline (in a
     temporary item that's removed afterwards) and reports its playable range, whether
     it follows pitch (and any transposition), attack, sustain, release, brightness and
-    character (bright/dark, plucky/sustained, pad-like, noisy), each note's tuning, and
+    character (bright/dark, plucky/sustained, pad-like, noisy), each note's tuning (and
+    a warning when the patch is tuned to another key: the same few semitones off on every
+    note), and
     a warning when held notes play a pattern of their own (a built-in arpeggiator,
     sequencer or gate, which would re-play every written part). Use it to check a patch
     you designed, or any preset before writing parts on it."""
@@ -1114,6 +1116,12 @@ def audition_instrument(
         out["warning"] = (f"held notes ({', '.join(patterned)}) play a pattern of their own: the patch has a built-in "
                           "arpeggiator, sequencer or gate. Turn it off in the plugin (get_fx_parameters search "
                           "'arp', 'seq', 'gate') or choose another sound; written parts would be re-played by it")
+    shifted = listen.transposition(results)
+    if shifted:
+        out["transposed_warning"] = (f"it sounds {shifted:+d} semitones from every note played: the patch is tuned to "
+                                     "another key, so each part would play in the wrong key. Set its tune or transpose "
+                                     "control back (get_fx_parameters search 'tune', 'transpose', 'coarse') or choose "
+                                     "another sound")
     cents = [r["cents_off"] for r in results if r.get("cents_off") is not None]
     if len(cents) >= 2 and max(cents) - min(cents) > 15:
         out["tuning_warning"] = (f"its notes are {max(cents) - min(cents):.0f} cents apart in tuning: out of tune "

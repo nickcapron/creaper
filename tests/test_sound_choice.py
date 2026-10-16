@@ -284,3 +284,23 @@ def test_a_deep_note_isnt_mistaken_for_retriggers():
     deep = 0.3 * np.minimum(1, t / 0.5) * (np.sin(2 * np.pi * 41.2 * t) + 0.5 * np.sin(4 * np.pi * 41.2 * t))
     f = listen.features(deep, 48000, note_off=1.0, expected_hz=41.2)
     assert f["retriggers"] == 0 and not listen.plays_pattern(f)
+
+
+
+def test_a_patch_tuned_to_another_key_is_caught():
+    from creaper import listen
+    up3 = [listen.features(_note([440 * 2 ** ((p + 3) / 12)]), 48000, note_off=1.0, expected_hz=440 * 2 ** (p / 12))
+           for p in (-12, 0, 7)]
+    assert [r["semitones_off"] for r in up3] == [3, 3, 3]
+    assert listen.transposition(up3) == 3
+    in_tune = [listen.features(_note([440 * 2 ** (p / 12)]), 48000, note_off=1.0, expected_hz=440 * 2 ** (p / 12))
+               for p in (-12, 0, 7)]
+    assert listen.transposition(in_tune) is None
+    # One misread note isn't a transposed patch.
+    assert listen.transposition([{"semitones_off": 0}, {"semitones_off": 5}, {"semitones_off": 0}]) is None
+    wanted = st.targets("lead")
+    base = {"silent_notes": 0, "attack_ms": 5, "richness": 2, "sustain_db": -3}
+    shifted = st.summarise(up3)
+    assert shifted["transposed_semitones"] == 3
+    bad, why = st.score({**base, **shifted}, wanted)
+    assert bad >= 5 and any("another key" in w for w in why)

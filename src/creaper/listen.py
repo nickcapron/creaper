@@ -160,6 +160,16 @@ def chord_motion(x: np.ndarray, fs: float, note_off: float, lowest_hz: float) ->
             "retriggers": _retriggers(seg, fs, lowest_hz * 0.19)}
 
 
+def transposition(results: list[dict]) -> int | None:
+    """The semitones (not octaves) a patch sounds away from the notes played, when at
+    least two thirds of the notes (and two or more) agree on the same non-zero offset."""
+    offsets = [r["semitones_off"] for r in results if r.get("semitones_off") is not None and not r.get("silent")]
+    if len(offsets) < 2:
+        return None
+    common = max(set(offsets), key=offsets.count)
+    return common if common and offsets.count(common) >= max(2, 2 * len(offsets) / 3) else None
+
+
 def plays_pattern(f: dict) -> bool:
     """A held note or chord that moves by itself (see held_motion, chord_motion)."""
     return (f.get("retriggers", 0) >= PATTERN_RETRIGGERS or f.get("off_pitch_share", 0) >= PATTERN_OFF_PITCH
@@ -285,6 +295,11 @@ def features(x: np.ndarray, fs: float, note_off: float | None = None, expected_h
             out.update(held_motion(x, fs, on_s + settle, note_off, expected_hz))
         on = int((on_s + settle) * fs)
         tuned, tuned_clarity = _pitch(x[on: on + int(0.25 * fs)], fs, fmin=25.0)
+        if tuned and tuned_clarity > 0.85:
+            # Whole semitones away from the played note (octaves folded): a patch tuned to
+            # another key plays every part in the wrong key. One note can be a misreading;
+            # transposition() looks for agreement across notes.
+            out["semitones_off"] = int(round(cents_from(tuned, expected_hz) / 100))
         # More than a semitone off is another note (a transposed patch, which sounds_as
         # and octave_offset report) or the tracker locking onto the wrong harmonics.
         if tuned and tuned_clarity > 0.5 and abs(cents_from(tuned, expected_hz)) <= MAX_DETUNE_CENTS:

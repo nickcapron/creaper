@@ -76,6 +76,11 @@ def summarise(results: list[dict]) -> dict:
             out[key] = round(float(statistics.median(values)), 2)
     from .listen import plays_pattern
 
+    from .listen import transposition
+
+    shifted = transposition(sounding)
+    if shifted:
+        out["transposed_semitones"] = shifted
     patterned = sum(1 for r in sounding if plays_pattern(r) or r.get("chord_moves"))
     if patterned:  # a built-in arpeggiator, sequencer or gate plays over the part's own notes
         out["plays_own_pattern"] = patterned
@@ -119,6 +124,11 @@ def score(measured: dict, wanted: dict[str, tuple[float, float]], detuned: bool 
     if measured.get("silent_notes"):
         return 100.0 + measured["silent_notes"], [f"{measured['silent_notes']} test notes made no sound"]
     total, why = 0.0, []
+    if measured.get("transposed_semitones"):
+        # Every part would play in another key.
+        total += 5.0
+        why.append(f"sounds {measured['transposed_semitones']:+d} semitones from the notes played (the patch is "
+                   "tuned to another key): fix its tune/transpose control or pick another sound")
     if measured.get("plays_own_pattern"):
         # The part's notes would be re-played as the patch's own arpeggio or sequence.
         total += 5.0
