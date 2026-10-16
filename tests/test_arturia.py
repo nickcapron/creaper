@@ -1,0 +1,118 @@
+"""find_arturia_presets, against a tiny database shaped like Arturia's db.db3."""
+
+import sqlite3
+
+import pytest
+
+from creaper import server  # noqa: F401  (import order: server first)
+from creaper import arturia
+
+SCHEMA = """
+CREATE TABLE Instruments (key_id INTEGER PRIMARY KEY, name TEXT NOT NULL);
+CREATE TABLE Types_V2 (key_id INTEGER PRIMARY KEY, name TEXT UNIQUE NOT NULL);
+CREATE TABLE Subtypes_V2 (key_id INTEGER PRIMARY KEY, name TEXT NOT NULL, type_key INTEGER NOT NULL);
+CREATE TABLE Packs (key_id INTEGER PRIMARY KEY, name TEXT NOT NULL, factory INTEGER DEFAULT 0);
+CREATE TABLE Characteristics_Types (key_id INTEGER PRIMARY KEY, name TEXT);
+CREATE TABLE Characteristics (key_id INTEGER PRIMARY KEY, name TEXT UNIQUE NOT NULL, type_key INTEGER);
+CREATE TABLE Preset_Id (key_id INTEGER PRIMARY KEY, name TEXT NOT NULL, type_v2 INTEGER NOT NULL DEFAULT 0,
+    subtype_v2 INTEGER NOT NULL DEFAULT 0, instrument_key INTEGER NOT NULL, rating REAL NOT NULL DEFAULT 0,
+    pack INTEGER NOT NULL, comment TEXT NOT NULL DEFAULT '', file_path TEXT UNIQUE NOT NULL,
+    featured_idx INTEGER DEFAULT 10000, hide_in_browser INTEGER DEFAULT 0);
+CREATE TABLE Preset_Characteristics (key_id INTEGER PRIMARY KEY, preset_key INTEGER, characteristic_key INTEGER);
+"""
+
+
+@pytest.fixture
+def db(tmp_path, monkeypatch):
+    path = tmp_path / "db.db3"
+    c = sqlite3.connect(path)
+    c.executescript(SCHEMA)
+    c.executemany("INSERT INTO Instruments VALUES (?, ?)", [(1, "Jup-8"), (2, "Pigments"), (3, "Bus FORCE")])
+    c.executemany("INSERT INTO Types_V2 VALUES (?, ?)", [(1, "Bass"), (8, "Pad"), (17, "Dynamics")])
+    c.executemany("INSERT INTO Subtypes_V2 VALUES (?, ?, ?)", [(1, "Sub Bass", 1), (2, "Evolving Pad", 8)])
+    c.execute("INSERT INTO Packs VALUES (1, 'Factory', 1)")
+    c.executemany("INSERT INTO Characteristics VALUES (?, ?, ?)",
+                  [(1, "Analog", 1), (2, "Synthwave", 2), (3, "Dark", 3), (4, "Warm", 3), (5, "Hip Hop/Trap", 2)])
+    root = "C:/ProgramData/Arturia/Presets"
+    presets = [  # key, name, type, subtype, instrument, file, featured, hidden, chars
+        (1, "Doomsday Sub", 1, 1, 1, f"{root}/Jup-8 V4/Factory/Factory/Doomsday Sub", 10000, 0, [1, 3, 5]),
+        (2, "Night Drive", 8, 2, 1, f"{root}/Jup-8 V4/Factory/Factory/Night Drive", 3, 0, [1, 2, 4]),
+        (3, "Glass Pad", 8, 2, 2, f"{root}/Pigments/Factory/Factory/Glass Pad", 10000, 0, [2, 4]),
+        (4, "Hidden Bass", 1, 1, 1, f"{root}/Jup-8 V4/Factory/Factory/Hidden Bass", 10000, 1, [3]),
+        (5, "Glue Master", 17, 0, 3, f"{root}/Bus FORCE/Factory/Factory/Glue Master", 10000, 0, []),
+        (6, "Warm Pad", 8, 2, 1, f"{root}/Jup-8 V4/Factory/Factory/Warm Pad", 1, 0, [4]),
+    ]
+    k = 0
+    for key, name, t, s, inst, fp, featured, hidden, chars in presets:
+        c.execute("INSERT INTO Preset_Id (key_id, name, type_v2, subtype_v2, instrument_key, pack, file_path, "
+                  "featured_idx, hide_in_browser, comment) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, '')",
+                  (key, name, t, s, inst, fp, featured, hidden))
+        for ch in chars:
+            k += 1
+            c.execute("INSERT INTO Preset_Characteristics VALUES (?, ?, ?)", (k, key, ch))
+    c.commit()
+    c.close()
+    monkeypatch.setenv("CREAPER_ARTURIA_DB", str(path))
+    return path
+
+
+def names(found):
+    return [p["name"] for p in found]
+
+
+def test_filters_by_type_subtype_and_every_characteristic(db):
+    conn = arturia.connect()
+    assert names(arturia.find(conn, type="bass")) == ["Doomsday Sub"]            # hidden presets left out
+    assert names(arturia.find(conn, subtype="evolving")) == ["Warm Pad", "Night Drive", "Glass Pad"]  # featured first
+    assert names(arturia.find(conn, type="pad", characteristics=["warm", "analog"])) == ["Night Drive"]
+    assert names(arturia.find(conn, genre="synthwave")) == ["Night Drive", "Glass Pad"]
+    assert names(arturia.find(conn, genre="hip hop")) == ["Doomsday Sub"]
+    assert names(arturia.find(conn, characteristics=["synthwave"])) == []         # a genre isn't a characteristic
+    assert "Glue Master" not in names(arturia.find(conn))                        # effect presets left out
+    assert names(arturia.find(conn, type="dynamics")) == ["Glue Master"]
+
+
+def test_results_name_the_plugin_and_browser_path(db):
+    found = arturia.find(arturia.connect(), search="doomsday")
+    assert found[0]["plugin"] == "Jup-8 V4"
+    assert found[0]["browser_path"] == "Jup-8 V4 > Factory > Doomsday Sub"
+    assert found[0]["characteristics"] == ["Analog", "Hip Hop/Trap", "Dark"]
+
+
+def test_installed_filter_and_plugin_names(db):
+    conn = arturia.connect()
+    installed = {arturia.normalize_plugin("VST3i: Jup-8 V4 (Arturia)")}
+    assert installed == {"jup-8 v4"}
+    assert names(arturia.find(conn, type="pad", installed=installed)) == ["Warm Pad", "Night Drive"]
+    assert arturia.plugin_folder(r"C:\ProgramData\Arturia\Presets\CMI V\Factory\DRUMS2\MILBDRUM") == "CMI V"
+
+
+def test_vocabulary(db):
+    words = arturia.vocabulary(arturia.connect())
+    assert words["types"] == ["Bass", "Pad"]
+    assert words["genres"] == ["Hip Hop/Trap", "Synthwave"] and words["styles"] == ["Dark", "Warm"]
+
+
+def test_missing_database(tmp_path, monkeypatch):
+    monkeypatch.setenv("CREAPER_ARTURIA_DB", str(tmp_path / "nope.db3"))
+    with pytest.raises(ValueError, match="CREAPER_ARTURIA_DB"):
+        arturia.connect()
+
+
+def test_the_copy_follows_the_original(db):
+    assert names(arturia.find(arturia.connect(), search="new one")) == []
+    c = sqlite3.connect(db)
+    c.execute("INSERT INTO Preset_Id (key_id, name, type_v2, subtype_v2, instrument_key, pack, file_path) "
+              "VALUES (9, 'New One', 1, 1, 1, 1, 'C:/ProgramData/Arturia/Presets/Jup-8 V4/Factory/Factory/New One')")
+    c.commit()
+    c.close()
+    assert names(arturia.find(arturia.connect(), search="new one")) == ["New One"]
+
+
+def test_tool(db, monkeypatch):
+    from creaper import sound_tools
+    monkeypatch.setattr(sound_tools, "call", lambda cmd, **kw: {"plugins": [{"name": "Jup-8 V4 (Arturia)"}]})
+    out = sound_tools.find_arturia_presets(type="pad", genre="synthwave")
+    assert names(out["presets"]) == ["Night Drive"] and "browser_path" in out["how_to_use"]
+    none = sound_tools.find_arturia_presets(type="pad", characteristics=["metallic"])
+    assert none["count"] == 0 and "Synthwave" in none["known_words"]["genres"]

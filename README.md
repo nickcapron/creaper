@@ -48,7 +48,7 @@ own Claude account; no API key needed.
 | **Edit clips** | Move, trim, split, duplicate, fade, re-pitch, time-stretch and delete audio or MIDI items; import audio files |
 | **Vocals** | Uses the best source on your machine: chops real vocal samples into rhythmic, in-key chops; hands a melody and lyrics to singing synths (Synthesizer V, ACE Studio, VOCALOID, OpenUtau) as MIDI with the words on the notes; or sings lyrics itself as a talk box or vocoder from your computer's own voices |
 | **Record** | Audio interface inputs and MIDI devices; arm, monitor and set the record mode (input, resample the track's output, MIDI overdub/replace); record a bar range that stops by itself; pick, compare or explode takes. Claude warns you before REAPER asks which new files to keep, and waits while you answer |
-| **Save & deliver** | Save, save as, and snapshot copies; export the mix (or a region or bar range) to WAV/FLAC/MP3/OGG (Vorbis quality of your choice) with loudness and true peak checked and no clipping; stems for every track, lined up; a check that the ending suits its use (no fade or silence for tracks a game or playlist crossfades, a real ending for a finale, a tight stinger) |
+| **Save & deliver** | Save, save as, and snapshot copies; export the mix (or a region or bar range) to WAV/FLAC/MP3/OGG (Vorbis quality of your choice) with loudness and true peak checked and no clipping; stems for every track, lined up; a check that the ending suits its use (no fade or silence for tracks a game or playlist crossfades, a real ending for a finale, a tight stinger). Exports and mastering refuse a mix that clips, never changes level or is piercing, and say why (you can still ask for it anyway) |
 | **Themes across songs** | Save a motif (a game's or album's signature theme) and place it in any later song, in that song's key and mode, slower, faster or in another octave |
 | **Arrange** | Tempo changes, ramps and time-signature changes over the song; markers and regions (add, rename, move, resize, recolor, delete); time selection, loop points and repeat; track templates; freeze and unfreeze heavy tracks |
 | **Samples & loops** | Search your sample folders by name, role, tempo and key, with each result checked by ear; place loops stretched to the project tempo and moved into key; build drum kits from any samples in REAPER's sampler |
@@ -56,8 +56,8 @@ own Claude account; no API key needed.
 | **Mix** | A whole first mix in one call (auto_mix): every track measured and given a role, then levels for the genre, high-pass and mud cuts, compression, panning, reverb, sidechain, headroom, and robot vocals kept clear of the parts covering them. Plus add, remove, bypass FX; volume, pan, mute, solo, color; sends; side-chain ducking (calibrated to a depth), submix buses, parallel compression, a starting vocal chain, mastering to a loudness target |
 | **Genres** | 265 genre profiles, from house and drill to bebop, flamenco, amapiano and Baroque: how each is composed, played, arranged and mixed, and a check of your mix against one |
 | **Remember** | Notes Claude keeps between sessions: your taste, plugin quirks, mix lessons |
-| **Check by measuring** | Claude can't hear, so it measures what a listener would notice: how understandable a vocal's words are, alone and in the mix (STOI); whether each part is in tune; and a spectrogram picture of the song it can look at |
-| **Analyze** | Render the mix or one track and measure integrated/short-term loudness (LUFS), loudness range, true peak, clipping, crest factor, stereo correlation (including the low end), and frequency balance by band and octave, with a loudness timeline in bars |
+| **Check by measuring** | Claude can't hear, so it measures what a listener would notice: whether the song develops or just loops (bars that copy other bars, sections that copy earlier ones, the energy arc across sections, the length against the genre's form); whether a part plays like a performance or a machine (timing, accents, swing, fills); each track's level in every section against its role, and each drum's level on a one-track kit; how understandable a vocal's words are, alone and in the mix (STOI); whether each part is in tune; and a spectrogram picture of the song it can look at |
+| **Analyze** | Render the mix or one track and measure integrated/short-term loudness (LUFS), loudness range, true peak, clipping, crest factor, stereo correlation (including the low end), frequency balance by band and octave, harshness, sibilance and mud over time and narrow resonances, with a loudness timeline in bars |
 | **Control** | Play a range of bars, stop, move the cursor, undo, run any REAPER action |
 
 In Claude Desktop and Claude Code, creaper also adds five commands: **Compose in a genre**,
@@ -111,6 +111,11 @@ creaper uses whatever is installed: VST, VST3, CLAP, AU and JS, instruments and 
 - **Presets.** Factory programs and presets saved in REAPER can be listed and loaded.
   Plugins that keep presets in their own browser (Arturia, for example) are detected,
   and Claude offers to open the plugin window instead.
+- **Arturia's library, searchable.** With Arturia instruments installed,
+  `find_arturia_presets` searches their factory presets (read-only, from Arturia's own
+  preset database) by type (Bass, Pad, Lead...), subtype (Sub Bass, Evolving Pad...),
+  character (warm, dark, wide...) and genre tags, for the plugins you have. Claude then
+  tells you which preset to pick in the plugin's browser.
 - **Your own sound library.** Pick a sound in any plugin's own browser and tell Claude
   "save this as Dark Pad". creaper captures the plugin's complete state with tags and a
   description, and Claude can recall it on any track, in any project ("use a warm pad
@@ -155,7 +160,8 @@ The one-call jobs were checked against real renders, not just set up:
   make-up gain can't fake). Then the limiter and master level are adjusted until the
   integrated loudness is within 0.5 LU of the target, the true peak is checked against
   the ceiling (tightened if needed), and it warns when peaks and loudness are less
-  than 7 dB apart (squashed). Tested with Arturia's Bus FORCE, Comp VCA-65, FET-76 and
+  than 7 dB apart (squashed). Before changing anything it checks the mix, and refuses a
+  mix that clips, plays every section at one level, or is piercing for its genre. Tested with Arturia's Bus FORCE, Comp VCA-65, FET-76 and
   TUBE-STA and REAPER's ReaComp.
 - **Plugin profiles** describe how specific plugins work, e.g. Bus FORCE's parallel
   dry/compressor/saturation paths (its compressor path is muted by default), or that
@@ -302,7 +308,9 @@ search for **ReaImGui**, install it and restart REAPER.
 
 The panel shows what Claude is doing as it works (each tool it runs) and how much of
 your plan's 5-hour limit you've used. **Stop** interrupts a turn, and **New chat**
-starts over. Conversations continue across REAPER restarts.
+starts over. Conversations continue across REAPER restarts. Start a message with
+`/compose`, `/mix`, `/master` or `/critique` (e.g. `/compose deep house in F minor`,
+`/master -14`) to run the same step-by-step jobs Claude Desktop offers as commands.
 
 Claude doesn't ask before routine edits in the panel (they're all undoable), but it
 shows **Allow / Deny** before anything riskier: running an arbitrary REAPER action
@@ -418,7 +426,9 @@ python -m venv .venv
 - `src/creaper/export_tools.py`: saving the project, exporting the mix and stems
 - `src/creaper/record_tools.py`: recording and takes, time selection, markers, track templates, freezing
 - `src/creaper/vocal_tools.py`, `speech.py`, `talkbox.py`: vocals (chops, singing-synth MIDI, text-to-speech, talk box and vocoder)
-- `src/creaper/perception.py`, `ear_tools.py`: measuring what a listener would notice (clarity, tuning, spectrograms)
+- `src/creaper/perception.py`, `ear_tools.py`: measuring what a listener would notice (clarity, tuning, spectrograms, structure, groove, per-section balance)
+- `src/creaper/structure.py`: bar fingerprints, repetition and the energy arc (`measure_structure`)
+- `src/creaper/arturia.py`: read-only search of Arturia's preset database
 - `src/creaper/mix_tools.py`: auto_mix
 - `src/creaper/motif_tools.py`: motifs reused across songs
 - `src/creaper/installer.py`, `install.ps1`: `creaper setup` and the one-command Windows installer

@@ -104,3 +104,53 @@ def test_envelope_range_shrinks_under_compression_and_ignores_level():
     c = analysis.envelope_range(np.stack([tone, tone], axis=1) * 0.25, FS)  # 12 dB quieter, same spread
     assert c == pytest.approx(a, abs=1e-6)
     assert analysis.envelope_range(np.zeros((FS, 2)), FS) is None
+
+# ------------------------------------------------------------ tone over time
+
+def noise(seconds, amplitude=0.1, seed=0):
+    return amplitude * np.random.default_rng(seed).standard_normal(int(seconds * FS))
+
+
+def test_tone_over_time_finds_harsh_and_muddy_energy():
+    harsh = analysis.tone_over_time(sine(3000, 5, 0.5) + noise(5, 0.01), FS)
+    muddy = analysis.tone_over_time(sine(300, 5, 0.5) + noise(5, 0.01), FS)
+    assert harsh["windows"] == 5
+    assert harsh["harsh_2_5k_pct_median"] > 90 and harsh["mud_200_500_pct_median"] < 5
+    assert muddy["mud_200_500_pct_median"] > 90 and muddy["harsh_2_5k_pct_p95"] < 5
+
+
+def test_tone_over_time_ignores_the_quiet_part():
+    # A loud low section, then a whisper of 3 kHz 40 dB down: only the loud part counts.
+    mono = np.concatenate([sine(300, 5, 0.5), sine(3000, 5, 0.005)])
+    tone = analysis.tone_over_time(mono, FS)
+    assert tone["windows"] == 5
+    assert tone["harsh_2_5k_pct_p95"] < 1
+
+
+def test_tone_over_time_spots_squashing():
+    lively = analysis.tone_over_time(np.tile(np.concatenate([np.ones(48), np.zeros(4752)]) * 0.9, 50) + noise(5, 0.01), FS)
+    squashed = analysis.tone_over_time(np.clip(noise(5, 1.0), -0.5, 0.5), FS)
+    assert lively["crest_db_p10"] > 15
+    assert squashed["crest_db_p10"] < 6
+
+
+def test_resonances_find_a_peak_that_stays_and_name_its_note():
+    mono = noise(20, 0.1) + sine(440, 20, 0.05)
+    found = analysis.resonances(mono, FS)
+    assert found and found[0]["hz"] == pytest.approx(440, abs=6)
+    assert found[0]["note"] == "A4" and found[0]["share_of_song"] == 1.0
+
+
+def test_resonances_skip_notes_that_move_with_the_chords():
+    # A different note every two seconds: each is a peak in its own window only.
+    mono = noise(20, 0.1) + np.concatenate([sine(f, 2, 0.05) for f in (220, 262, 330, 392, 440, 494, 523, 587, 659, 698)])
+    assert analysis.resonances(mono, FS) == []
+    assert analysis.resonances(noise(20, 0.1), FS) == []
+
+
+def test_analyze_file_reports_tone_over_time(tmp_path):
+    path = tmp_path / "tone.wav"
+    sf.write(path, np.stack([sine(3000, 4, 0.3)] * 2, axis=1), FS)
+    result = analysis.analyze_file(path)
+    assert result["tone_over_time"]["harsh_2_5k_pct_p95"] > 90
+    assert "resonances" in result["tone_over_time"]

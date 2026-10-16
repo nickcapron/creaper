@@ -67,7 +67,12 @@ def record(
 ) -> dict:
     """Starts recording on every armed track, from a bar (default: the edit cursor),
     optionally stopping by itself at a bar. Without an end it records until stopped
-    (transport stop). The performer hears the count-in and metronome as set in REAPER."""
+    (transport stop). The performer hears the count-in and metronome as set in REAPER.
+    It asks the user first. When recording stops, REAPER usually asks the user which new
+    files to save or delete and can't do anything else until they answer (the result's
+    note says when to expect it): tell the user before it appears; recording_status
+    waits for them. Hardware synths: record their audio outputs from interface inputs
+    (as audio), and play or record their MIDI through a MIDI device (list_inputs)."""
     if bars and start_bar:
         end_bar = start_bar + bars
     elif bars:

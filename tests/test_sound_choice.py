@@ -1,3 +1,5 @@
+import pytest
+
 from creaper import server  # noqa: F401  (loads the tool modules first)
 from creaper import sound_tools as st
 
@@ -176,3 +178,39 @@ def test_the_winner_is_level_matched_to_the_original(monkeypatch):
     result = st.audition_sounds(track=1, role="pad", candidates="presets")
     assert result["fader_moved_db_to_match_level"] == -10.0
     assert ("set_track_properties", {"track": 1, "volume_db": -13.0}) in calls
+
+
+# ------------------------------------------------------------------- tuning
+
+def _note(freqs, seconds=1.2, fs=48000):
+    """A harmonic tone gliding through `freqs` (Hz) over its length."""
+    import numpy as np
+    n = int(seconds * fs)
+    f = np.interp(np.arange(n), np.linspace(0, n - 1, len(freqs)), freqs)
+    phase = 2 * np.pi * np.cumsum(f) / fs
+    return 0.3 * (np.sin(phase) + 0.5 * np.sin(2 * phase) + 0.25 * np.sin(3 * phase))
+
+
+def test_features_measure_cents_off_and_drift():
+    from creaper import listen
+    in_tune = listen.features(_note([440]), 48000, note_off=1.0, expected_hz=440)
+    sharp = listen.features(_note([452]), 48000, note_off=1.0, expected_hz=440)
+    sagging = listen.features(_note([440, 440, 428]), 48000, note_off=1.0, expected_hz=440)
+    assert abs(in_tune["cents_off"]) < 3 and abs(in_tune.get("drift_cents", 0)) < 3
+    assert sharp["cents_off"] == pytest.approx(46.6, abs=3)
+    assert sagging["drift_cents"] < -15
+    # An octave up isn't out of tune.
+    assert abs(listen.features(_note([880]), 48000, note_off=1.0, expected_hz=440)["cents_off"]) < 3
+
+
+def test_out_of_tune_patches_score_worse_unless_detuned_is_wanted():
+    wanted = st.targets("pad")
+    base = {"silent_notes": 0, "attack_ms": 200, "richness": 2, "sustain_db": -3}
+    in_tune = st.summarise([{"cents_off": 2.0}, {"cents_off": -3.0}, {"cents_off": 1.0}])
+    off = st.summarise([{"cents_off": 2.0}, {"cents_off": -28.0}, {"cents_off": 1.0, "drift_cents": -40.0}])
+    assert in_tune["tuning_spread_cents"] == 5.0 and off["tuning_spread_cents"] == 30.0 and off["drift_cents"] == 40.0
+    good, _ = st.score({**base, **in_tune}, wanted)
+    bad, why = st.score({**base, **off}, wanted)
+    assert bad > good + 1 and any("out of tune" in w for w in why)
+    allowed, why = st.score({**base, **off}, wanted, detuned=True)
+    assert allowed == good and not any("out of tune" in w for w in why)

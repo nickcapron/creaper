@@ -62,6 +62,13 @@ def _pitch(x: np.ndarray, fs: float, fmin: float = 35.0, fmax: float = 2500.0) -
     return f0, clarity
 
 
+def cents_from(hz: float, reference_hz: float) -> float:
+    """How far hz is from reference_hz in cents, folded to the nearest octave (-600..600):
+    a patch an octave up isn't out of tune."""
+    c = 1200 * math.log2(hz / reference_hz)
+    return (c + 600) % 1200 - 600
+
+
 def harmonic_fit(x: np.ndarray, fs: float, expected_hz: float) -> tuple[int, float, float]:
     """Which octave of the played note the sound's harmonics line up with.
 
@@ -168,6 +175,19 @@ def features(x: np.ndarray, fs: float, note_off: float | None = None, expected_h
         out["harmonicity"] = round(score, 2)
         out["octave_offset"] = k
         out["richness"] = round(out["centroid_hz"] / f0, 1)  # brightness relative to the fundamental
+        # Tuning, timed from where the sound starts (not its loudest moment, which a
+        # steady tone can reach at its very end): the note just after its attack, and
+        # for a held note its last quarter second before the note-off (a sagging or
+        # wobbly patch, a pitch envelope pulling it off).
+        on = start * hop
+        tuned, tuned_clarity = _pitch(x[on + int(0.05 * fs): on + int(0.30 * fs)], fs, fmin=25.0)
+        if tuned and tuned_clarity > 0.5:
+            out["cents_off"] = round(cents_from(tuned, expected_hz), 1)
+            if note_off is not None and note_off >= 0.6:
+                end = min(len(x), int(note_off * fs))
+                late, late_clarity = _pitch(x[max(on + int(0.30 * fs), end - int(0.25 * fs)): end], fs, fmin=25.0)
+                if late and late_clarity > 0.5:
+                    out["drift_cents"] = round(cents_from(late, tuned), 1)
     # Pitch glide: kicks and toms drop fast at the start; bass and synth notes hold.
     early, c1 = _pitch(x[a: a + int(0.07 * fs)], fs, fmin=30.0)
     late, c2 = _pitch(x[a + int(0.09 * fs): a + int(0.22 * fs)], fs, fmin=30.0)

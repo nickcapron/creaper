@@ -304,3 +304,24 @@ def test_default_voice_is_remembered_and_used(tmp_path, monkeypatch):
     assert speech.choose_voice("male") == "Piper Joe"        # asking for a voice still wins
     installed.pop()                                          # uninstalled: back to the best one
     assert speech.choose_voice(None) == "Piper Joe"
+
+
+def test_syllable_counts():
+    from creaper.vocal_tools import syllables
+    assert [syllables(w) for w in ("one", "more", "time", "tonight", "little", "around", "world", "free")] == \
+        [1, 1, 1, 2, 2, 2, 1, 1]
+
+
+def test_dense_lyrics_are_refused():
+    eighths = [n(i * 0.5, length=0.5) for i in range(16)]
+    with pytest.raises(ValueError, match=r"8 syllables in the 4 beats from beat 1 .*one per beat"):
+        assign_lyrics(" ".join(["la"] * 16), eighths)
+    # The same notes with words held over them are fine: one syllable per beat.
+    held = " ".join(["la _"] * 8)
+    assert len(assign_lyrics(held, eighths)) == 8
+    # Long words crammed on single notes count every syllable.
+    quarters = [n(i) for i in range(4)]
+    with pytest.raises(ValueError, match="too many words"):
+        assign_lyrics("tonight forever tonight forever", quarters)
+    assert len(assign_lyrics("one more time now", quarters)) == 4
+    assert len(assign_lyrics(" ".join(["la"] * 16), eighths, max_per_beat=None)) == 16

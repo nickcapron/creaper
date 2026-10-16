@@ -98,6 +98,115 @@ def highpass_for(role: str, spectrum: dict | None) -> int | None:
     return int(round(hz)) if hz >= 40 else None
 
 
+# A part this far over its role's level (LU, against the drums in the same section) is
+# overpowering; this far under, buried.
+OVER_LU, UNDER_LU = 4.0, 8.0
+
+
+def section_balance(levels: dict[str, dict[str, float | None]], roles: dict[str, str]) -> list[str]:
+    """Parts out of place in each section. levels: {section: {track: LUFS while it
+    plays}}; roles: {track: role}. Each part is judged against ROLE_LEVELS from the
+    drums in that section (a section without drums: from the parts' median)."""
+    out = []
+    for section, tracks in levels.items():
+        playing = {t: v for t, v in tracks.items() if v is not None}
+        if len(playing) < 2:
+            continue
+        drums = [v for t, v in playing.items() if roles.get(t) in ("kick", "drums")]
+        anchor = max(drums) if drums else float(sorted(v - ROLE_LEVELS.get(roles.get(t, "other"), -7)
+                                                       for t, v in playing.items())[len(playing) // 2])
+        for t, v in playing.items():
+            role = roles.get(t, "other")
+            if drums and role in ("kick", "drums") and v == anchor:
+                continue
+            off = v - (anchor + ROLE_LEVELS.get(role, -7))
+            where = (f"{-ROLE_LEVELS.get(role, -7):g} LU under the drums" if drums else "with the rest")
+            if off > OVER_LU:
+                out.append(f"{section}: {t} is {off:.1f} LU over its place (a {role} part sits about {where})")
+            elif off < -UNDER_LU:
+                out.append(f"{section}: {t} is {-off:.1f} LU under its place (a {role} part sits about {where}): buried")
+    return out
+
+
+# Level of each drum's hits (RMS over its first 60 ms) against the kick's, in dB. Rough
+# rules of thumb for a modern mix; lanes are matched by name.
+DRUM_LANE_DB = [
+    (r"kick|\bbd\b|bass drum", 0), (r"snare|clap|rim|stick", -2), (r"tom", -4),
+    (r"crash|ride|cymbal|china|splash", -8), (r"conga|bongo|perc|cowbell|wood|clave|timbale", -8),
+    (r"hat|\bhh\b", -10), (r"shaker|tamb|cabasa|maraca", -12),
+]
+HIT_WINDOW_S = 0.06
+COLLISION_S = 0.03
+
+
+def lane_target(lane: str) -> float | None:
+    return next((db for pattern, db in DRUM_LANE_DB if re.search(pattern, lane.lower())), None)
+
+
+SILENT_LANE_DB = 60.0  # a lane this far under the loudest one plays nothing on that kit
+
+
+def hit_levels(mono, fs: float, hits: dict[str, list[float]]) -> tuple[dict[str, float], dict[str, list[str]]]:
+    """Median level (dB RMS over HIT_WINDOW_S) of each lane's hits. hits: {lane: onset
+    seconds in the audio}. Hits with another lane within COLLISION_S are left out (a
+    kick under a hat would count as the hat). Returns the levels of the lanes that sound,
+    and which lanes are 'silent' (the kit has nothing on that note) or measured only
+    'with_others' (every hit lands with another drum, so the level is theirs together)."""
+    import bisect
+
+    import numpy as np
+
+    def measure(sounding: dict[str, list[float]]) -> tuple[dict[str, float], list[str]]:
+        every = sorted((t, lane) for lane, ts in sounding.items() for t in ts)
+        times = [t for t, _ in every]
+
+        def crowded(t: float, lane: str) -> bool:
+            lo, hi = bisect.bisect_left(times, t - COLLISION_S), bisect.bisect_right(times, t + COLLISION_S)
+            return any(o != lane for _, o in every[lo:hi])
+
+        measured, shared = {}, []
+        for lane, ts in sounding.items():
+            alone = [t for t in ts if not crowded(t, lane)]
+            if not alone:
+                shared.append(lane)
+            levels = []
+            for t in alone or ts:
+                a, b = int(t * fs), int((t + HIT_WINDOW_S) * fs)
+                seg = mono[max(0, a):min(len(mono), b)]
+                if seg.size:
+                    levels.append(10 * np.log10(float(np.mean(np.square(seg))) + 1e-20))
+            if levels:
+                measured[lane] = round(float(np.median(levels)), 1)
+        return measured, shared
+
+    measured, _ = measure(hits)
+    loudest = max(measured.values(), default=None)
+    silent = [lane for lane, v in measured.items() if loudest is None or v < loudest - SILENT_LANE_DB]
+    # Again without the lanes that make no sound: landing with one isn't landing with a drum.
+    out, shared = measure({lane: ts for lane, ts in hits.items() if lane not in silent})
+    return out, {"silent": silent, "with_others": [lane for lane in shared if lane in out]}
+
+
+def lane_balance(levels: dict[str, float], approximate: list[str] | None = None) -> list[str]:
+    """Drums in a one-track kit that are out of place against the kick. Without a kick
+    lane there's nothing to judge by: the levels are reported on their own. Lanes in
+    approximate (only ever heard with another drum) aren't judged."""
+    kick = max((v for lane, v in levels.items() if lane_target(lane) == 0), default=None)
+    if kick is None:
+        return []
+    out = []
+    for lane, v in levels.items():
+        target = lane_target(lane)
+        if target is None or target == 0 or lane in (approximate or ()):
+            continue
+        off = v - kick - target
+        if off > OVER_LU:
+            out.append(f"{lane} hits are {v - kick:+.1f} dB against the kick (usually about {target:g}): overpowering")
+        elif off < -UNDER_LU:
+            out.append(f"{lane} hits are {v - kick:+.1f} dB against the kick (usually about {target:g}): buried")
+    return out
+
+
 def plan_mix(channels: list[dict], style: dict | None = None) -> dict:
     """What to do to each channel. channels: name, role, level (max short-term LUFS),
     peak_db, crest_db, spectrum, pan, has_eq, has_comp. style: a genre profile's mix

@@ -12,10 +12,14 @@ from typing import Annotated, Literal
 
 from pydantic import Field
 
-from .server import TrackRef, call, sound_library, tool
+from .server import READ_ONLY, TrackRef, call, sound_library, tool
 
 Role = Literal["bass", "sub", "lead", "pad", "keys", "pluck", "bell", "arp", "strings", "brass"]
-Character = Literal["bright", "dark", "punchy", "soft", "plucky", "sustained"]
+Character = Literal["bright", "dark", "punchy", "soft", "plucky", "sustained", "detuned"]
+# A patch whose notes sit further apart than this, or drift this far while held, sounds
+# out of tune (a pizzicato patch spread like that was heard as out of tune), unless detuned is
+# the point.
+IN_TUNE_CENTS = 15.0
 
 # How each role is auditioned (notes, seconds held) and what it should measure:
 # attack_ms, richness (brightness relative to the note: centroid / fundamental),
@@ -64,6 +68,14 @@ def summarise(results: list[dict]) -> dict:
         values = [r[key] for r in sounding if r.get(key) is not None]
         if values:
             out[key] = round(float(statistics.median(values)), 2)
+    cents = [r["cents_off"] for r in sounding if r.get("cents_off") is not None]
+    if len(cents) >= 2:  # how far apart the notes are tuned (one in tune, one 20 cents flat)
+        out["tuning_spread_cents"] = round(max(cents) - min(cents), 1)
+    if cents:
+        out["tuning_off_cents"] = round(float(statistics.median(abs(c) for c in cents)), 1)
+    drifts = [abs(r["drift_cents"]) for r in sounding if r.get("drift_cents") is not None]
+    if drifts:
+        out["drift_cents"] = round(max(drifts), 1)
     lows = [r["bands"]["sub"] + r["bands"]["low"] for r in sounding if r.get("bands")]
     if lows:  # weight under 250 Hz: a bass that's all upper harmonics sounds thin in a mix
         out["low_share"] = round(float(statistics.median(lows)), 2)
@@ -88,13 +100,21 @@ def relative_brightness(ranked: list[dict], character: list[str] | None) -> None
             r["why"] = r["why"] + [f"{'less bright' if want == 'bright' else 'brighter'} than the best of these"]
 
 
-def score(measured: dict, wanted: dict[str, tuple[float, float]]) -> tuple[float, list[str]]:
+def score(measured: dict, wanted: dict[str, tuple[float, float]], detuned: bool = False) -> tuple[float, list[str]]:
     """Distance from the wanted ranges (0 = fits everything) and the reasons it's off.
     Times and brightness count by ratio (twice too slow is as far as half as slow);
-    levels in dB by 6 dB steps. A sound with silent notes can't win."""
+    levels in dB by 6 dB steps; tuning by IN_TUNE_CENTS steps past IN_TUNE_CENTS (not
+    when detuned is wanted). A sound with silent notes can't win."""
     if measured.get("silent_notes"):
         return 100.0 + measured["silent_notes"], [f"{measured['silent_notes']} test notes made no sound"]
     total, why = 0.0, []
+    if not detuned:
+        for key, label in (("tuning_spread_cents", "notes tuned"), ("tuning_off_cents", "off pitch by"),
+                           ("drift_cents", "drifts")):
+            v = measured.get(key)
+            if v is not None and v > IN_TUNE_CENTS:
+                total += (v - IN_TUNE_CENTS) / IN_TUNE_CENTS
+                why.append(f"out of tune: {label} {v:g} cents (wanted under {IN_TUNE_CENTS:g})")
     for key, (lo, hi) in wanted.items():
         v = measured.get(key)
         if v is None:
@@ -140,7 +160,9 @@ def _instrument_index(track) -> int:
 def audition_sounds(
     track: TrackRef,
     role: Annotated[Role, Field(description="What the sound has to do in the song: bass, sub, lead, pad, keys, pluck, bell, arp, strings, brass")],
-    character: Annotated[list[Character] | None, Field(description="How it should sound: bright, dark, punchy, soft, plucky, sustained")] = None,
+    character: Annotated[list[Character] | None, Field(description=(
+        "How it should sound: bright, dark, punchy, soft, plucky, sustained; detuned when a wobbly or detuned "
+        "sound is wanted (otherwise patches out of tune by more than 15 cents score worse)"))] = None,
     candidates: Annotated[Literal["presets", "library", "both"], Field(description=(
         "Where to look: the instrument's presets REAPER can see, the user's saved sounds, or both"))] = "both",
     search: Annotated[str | None, Field(description="Words in preset or sound names to narrow it, e.g. 'bass', 'warm pad'; default: candidates spread evenly through all of them")] = None,
@@ -152,7 +174,8 @@ def audition_sounds(
     """Finds the right sound for a part by listening, not by name: loads each candidate
     (the instrument's presets and/or the user's saved sounds), plays it the way the
     part will be played (low notes for a bass, held notes for a pad), measures attack,
-    brightness, sustain and decay, scores it against what the role and character need,
+    brightness, sustain, decay and tuning (notes out of tune with each other or drifting
+    while held), scores it against what the role and character need,
     and keeps the best (or puts the original back). Use it before programming a sound
     from scratch. Plugins that keep presets in their own browser (Arturia) only offer
     saved sounds here. The track fader is moved so the chosen sound plays as loud as
@@ -218,7 +241,7 @@ def audition_sounds(
                 ranked.append({**c, "score": 999.0, "why": [f"couldn't audition it: {e}"]})
                 continue
             measured = summarise(results)
-            s, why = score(measured, wanted)
+            s, why = score(measured, wanted, detuned="detuned" in (character or []))
             ranked.append({**c, "score": s, "measured": measured, "why": why})
     finally:
         relative_brightness(ranked, character)
@@ -250,3 +273,48 @@ def audition_sounds(
             **({"fader_moved_db_to_match_level": matched} if matched is not None else {}),
             "loaded": best["name"] if (keep_best and best) else "the original sound",
             "ranking": [{k: r[k] for k in ("kind", "name", "score", "why", "measured") if k in r} for r in ranked]}
+
+
+@tool(annotations=READ_ONLY)
+def find_arturia_presets(
+    type: Annotated[str | None, Field(description="Bass, Pad, Lead, Keys, Electric Piano, Piano, Organ, Strings, Brass & Winds, Sequence, Drums, Vocal, Sound Effects")] = None,
+    subtype: Annotated[str | None, Field(description="e.g. 'Sub Bass', 'Evolving Pad', 'Big Lead', 'Plucked Keys', 'Classic EP' (part of the name is enough)")] = None,
+    characteristics: Annotated[list[str] | None, Field(description="Sound words the preset must all have, e.g. ['warm', 'wide'], ['dark', 'punchy'], ['analog']")] = None,
+    genre: Annotated[str | None, Field(description="A genre tag, e.g. 'synthwave', 'house', 'hip hop', 'cinematic', 'techno'")] = None,
+    instrument: Annotated[str | None, Field(description="Only this Arturia instrument, e.g. 'Jup-8 V4', 'Mini V3', 'CMI'")] = None,
+    search: Annotated[str | None, Field(description="Words in the preset's name or description")] = None,
+    installed_only: Annotated[bool, Field(description="Only presets for Arturia plugins installed in REAPER")] = True,
+    limit: Annotated[int, Field(ge=1, le=100)] = 20,
+) -> dict:
+    """Finds sounds in Arturia's factory library (about 15,000 presets across the user's
+    Arturia instruments) by what they are, the way a producer browses: type and subtype
+    (Bass > Sub Bass), sound characteristics (warm, dark, wide, analog, punchy...) and
+    genre tags. Start here for any part before programming a synth from scratch: a
+    designed factory preset sounds finished where a patch built from a default rarely
+    does. Each result names its plugin and where it sits in the plugin's browser.
+    With no matches it returns the words the library knows. Read-only."""
+    from . import arturia
+
+    conn = arturia.connect()
+    try:
+        installed, note = None, None
+        if installed_only:
+            try:
+                listed = call("list_installed_fx", developer="Arturia", limit=1000).get("plugins", [])
+                installed = {arturia.normalize_plugin(p.get("name", "")) for p in listed}
+            except Exception as e:  # noqa: BLE001 - still useful without REAPER's plugin list
+                note = f"couldn't read the installed plugins ({e}), so presets for every Arturia instrument are listed"
+        found = arturia.find(conn, instrument, type, subtype, characteristics, genre, search, installed, limit)
+        out: dict = {"count": len(found), "presets": found}
+        if not found:
+            out["known_words"] = arturia.vocabulary(conn)
+            out["tip"] = "nothing matched every filter: drop one, or use the library's own words above"
+    finally:
+        conn.close()
+    if note:
+        out["note"] = note
+    out["how_to_use"] = ("creaper can't load these presets itself yet: add the plugin (create_track or add_fx with "
+                         "its name), open its window (update_fx show) and ask the user to pick the preset at "
+                         "browser_path, then audition_instrument to check it and save_sound it so audition_sounds "
+                         "can try it next time")
+    return out

@@ -140,6 +140,27 @@ def envelope_range(audio: np.ndarray, fs: float, window_s: float = 0.05) -> floa
     return float(np.percentile(level, 95) - np.percentile(level, 10))
 
 
+def clipped_runs(audio: np.ndarray, min_run: int = 3, near_full_scale: float = 0.99) -> int:
+    """Flat tops: runs of min_run or more samples in a row with the same value, at the
+    file's highest level, when that level is at full scale. A plugin or a fixed-point
+    stage that clipped leaves them; a clean peak doesn't, even a deep bass note that
+    spends several samples near its top (they still differ from sample to sample)."""
+    peak = float(np.max(np.abs(audio))) if audio.size else 0.0
+    if peak < near_full_scale:
+        return 0
+    runs = 0
+    for ch in range(audio.shape[1]):
+        x = audio[:, ch].astype(np.float64)
+        # Steps between neighbours that stay put, both at the top.
+        flat = (np.abs(np.diff(x)) < 1e-7) & (np.abs(x[:-1]) >= peak * 0.999)
+        if not flat.any():
+            continue
+        edges = np.diff(np.concatenate([[0], flat.astype(np.int8), [0]]))
+        lengths = np.flatnonzero(edges == -1) - np.flatnonzero(edges == 1)
+        runs += int(np.count_nonzero(lengths >= min_run - 1))
+    return runs
+
+
 def spectrum(mono: np.ndarray, fs: float) -> dict:
     nperseg = min(8192, mono.size)
     freqs, psd = signal.welch(mono, fs=fs, nperseg=nperseg)
@@ -166,6 +187,125 @@ def spectrum(mono: np.ndarray, fs: float) -> dict:
     audible = (freqs >= 20) & (freqs <= 20000)
     centroid = float((freqs[audible] * psd[audible]).sum() / psd[audible].sum())
     return {"bands": bands, "octave_bands_db": octaves, "spectral_centroid_hz": round(centroid)}
+
+
+# Tone over time, in seconds-long windows: how much of the sound sits where the ear is
+# most sensitive (2-5 kHz: "harsh", "piercing"), in sibilance and fizz (5-10 kHz) and in
+# the low mids (200-500 Hz: "muddy", "boxy"). Shares, so they don't depend on level.
+TONE_BANDS = {"harsh_2_5k": (2000, 5000), "sibilance_5_10k": (5000, 10000), "mud_200_500": (200, 500)}
+# Only windows within this of the loud part count: in a quiet intro or a fading tail
+# the little that is left (hiss, a hat) would otherwise read as harsh.
+TONE_GATE_DB = 20.0
+
+
+def tone_over_time(mono: np.ndarray, fs: float, window_s: float = 1.0) -> dict:
+    """Median and 95th percentile of each tone band's share of the energy (%) over
+    window_s windows of the loud part of the sound, and the 10th percentile of each
+    window's crest factor (dB; low = squashed even in its liveliest moments)."""
+    n = int(window_s * fs)
+    count = mono.size // n
+    if count < 1:
+        return {}
+    frames = mono[: count * n].astype(np.float64).reshape(count, n)
+    power = np.mean(np.square(frames), axis=1)
+    if not (power > 0).any():
+        return {}
+    loud = 10 * np.log10(np.percentile(power[power > 0], 95))
+    keep = power > 0
+    keep &= 10 * np.log10(np.where(keep, power, 1e-30)) > loud - TONE_GATE_DB
+    frames, power = frames[keep], power[keep]
+    nperseg = min(4096, n)
+    freqs, psd = signal.welch(frames, fs=fs, nperseg=nperseg, axis=1)
+    audible = (freqs >= 20) & (freqs <= 20000)
+    total = psd[:, audible].sum(axis=1) + 1e-30
+    out: dict = {"windows": int(frames.shape[0])}
+    for name, (lo, hi) in TONE_BANDS.items():
+        if lo >= fs / 2:
+            continue
+        share = 100 * psd[:, (freqs >= lo) & (freqs < hi)].sum(axis=1) / total
+        out[f"{name}_pct_median"] = _round(float(np.median(share)), 1)
+        out[f"{name}_pct_p95"] = _round(float(np.percentile(share, 95)), 1)
+    crest = 20 * np.log10(np.max(np.abs(frames), axis=1) / np.sqrt(power))
+    out["crest_db_p10"] = _round(float(np.percentile(crest, 10)), 1)
+    return out
+
+
+NOTE_NAMES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
+
+
+def _note_at(hz: float, within_cents: float = 30.0) -> str | None:
+    """The note name (C4 = middle C) a frequency sits on, if it's within_cents of one."""
+    midi = 69 + 12 * math.log2(hz / 440)
+    nearest = round(midi)
+    if abs(midi - nearest) * 100 > within_cents:
+        return None
+    return f"{NOTE_NAMES[nearest % 12]}{nearest // 12 - 1}"
+
+
+def _prominence(level: np.ndarray, freqs: np.ndarray, idx: np.ndarray) -> np.ndarray:
+    """How far each bin in idx stands above the spectrum around it (dB), smoothed in dB
+    over a third of an octave (f/2^(1/6) .. f*2^(1/6))."""
+    cumulative = np.concatenate([[0.0], np.cumsum(level)])
+    lo = np.searchsorted(freqs, freqs[idx] / 2 ** (1 / 6))
+    hi = np.searchsorted(freqs, freqs[idx] * 2 ** (1 / 6), side="right")
+    return level[idx] - (cumulative[hi] - cumulative[lo]) / np.maximum(1, hi - lo)
+
+
+def resonances(mono: np.ndarray, fs: float, min_db: float = 8.0, persistence: float = 0.75, window_s: float = 2.0,
+               limit: int = 4) -> list[dict]:
+    """Narrow peaks, 100 Hz-10 kHz, that stand more than min_db above the spectrum
+    around them in at least `persistence` of the loud windows: a ringing filter, a
+    resonance pushed too far, a boxy room. A held note is a peak too, but the notes move
+    with the chords and a resonance stays put, so peaks in only some windows are
+    left out. A drone or a tonic pedal still shows up, so a peak that sits on a note
+    says which (check it against the key before cutting it). Most persistent first."""
+    n = int(window_s * fs)
+    count = mono.size // n
+    nperseg = min(8192, n)
+    if count < 2 or nperseg < 1024:
+        return []
+    frames = mono[: count * n].astype(np.float64).reshape(count, n)
+    power = np.mean(np.square(frames), axis=1)
+    if not (power > 0).any():
+        return []
+    loud = 10 * np.log10(np.percentile(power[power > 0], 95))
+    frames = frames[10 * np.log10(power + 1e-30) > loud - TONE_GATE_DB]
+    if frames.shape[0] < 2:
+        return []
+    freqs, psd = signal.welch(frames, fs=fs, nperseg=nperseg, axis=1)
+    idx = np.flatnonzero((freqs >= 100) & (freqs <= min(10000, fs / 2)))
+    if idx.size < 3:
+        return []
+    # Each window's peaks, spread to the neighbouring bin either side: a resonance's peak
+    # wobbles by a bin from window to window.
+    hits = np.zeros(idx.size)
+    heights = [[] for _ in range(idx.size)]
+    for row in psd:
+        above = _prominence(10 * np.log10(row + 1e-30), freqs, idx)
+        peaks, props = signal.find_peaks(above, height=min_db)
+        mark = np.zeros(idx.size, dtype=bool)
+        for p, h in zip(peaks, props["peak_heights"]):
+            for q in (p - 1, p, p + 1):
+                if 0 <= q < idx.size:
+                    mark[q] = True
+                    heights[q].append(float(h))
+        hits += mark
+    share = hits / frames.shape[0]
+    found = sorted((i for i in range(idx.size) if share[i] >= persistence), key=lambda i: (-share[i], -np.median(heights[i])))
+    out: list[dict] = []
+    for i in found:
+        hz = float(freqs[idx[i]])
+        # One report per region: neighbouring bins of one peak aren't separate resonances.
+        if all(abs(math.log2(hz / o["hz"])) > 1 / 12 for o in out):
+            found_at = {"hz": int(round(hz)), "db_above_surroundings": _round(float(np.median(heights[i])), 1),
+                        "share_of_song": _round(float(share[i]), 2)}
+            note = _note_at(hz)
+            if note:
+                found_at["note"] = note
+            out.append(found_at)
+        if len(out) == limit:
+            break
+    return out
 
 
 def stereo(audio: np.ndarray, fs: float) -> dict:
@@ -213,6 +353,10 @@ def analyze_file(path: str | Path, timeline_points: int = 32) -> dict:
     loud = loudness(audio, fs)
     short_term = loud.pop("_short_term", None)
 
+    mono = audio.mean(axis=1, dtype=np.float64)
+    tone = tone_over_time(mono, fs)
+    if tone:
+        tone["resonances"] = resonances(mono, fs)
     result: dict = {
         "duration_seconds": round(duration, 2),
         "sample_rate": fs,
@@ -224,10 +368,12 @@ def analyze_file(path: str | Path, timeline_points: int = 32) -> dict:
             "crest_factor_db": _round(20 * math.log10(peak / rms)) if rms > 0 else None,
             "envelope_range_db": _round(envelope_range(audio, fs)),
             "samples_over_0dbfs": int(np.count_nonzero(np.abs(audio) > 1.0)),
+            "clipped_runs": clipped_runs(audio),
             "dc_offset_dbfs": _db(float(np.max(np.abs(audio.mean(axis=0, dtype=np.float64))))),
         },
         "stereo": stereo(audio, fs),
-        "spectrum": spectrum(audio.mean(axis=1, dtype=np.float64), fs),
+        "spectrum": spectrum(mono, fs),
+        "tone_over_time": tone,
     }
     if short_term is not None and short_term.size:
         # Short-term windows end every 100 ms starting at 3 s; sample a coarse timeline.

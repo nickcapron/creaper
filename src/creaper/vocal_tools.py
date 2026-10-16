@@ -32,10 +32,27 @@ def melody_line(notes: list[dict]) -> list[dict]:
     return line
 
 
-def assign_lyrics(lyrics: str, line: list[dict]) -> list[dict]:
+# Robot vocals are only understood when sparse: at most this many syllables per beat
+# in any stretch of DENSITY_WINDOW_QN.
+MAX_SYLLABLES_PER_BEAT = 1.0
+DENSITY_WINDOW_QN = 4.0
+
+
+def syllables(word: str) -> int:
+    """A rough syllable count from vowel groups ('tonight' 2, 'more' 1, 'little' 2)."""
+    w = re.sub(r"[^a-z]", "", word.lower())
+    groups = len(re.findall(r"[aeiouy]+", w))
+    if w.endswith("e") and not w.endswith(("le", "ee", "ye")) and groups > 1:
+        groups -= 1  # a silent final e
+    return max(1, groups)
+
+
+def assign_lyrics(lyrics: str, line: list[dict], max_per_beat: float | None = MAX_SYLLABLES_PER_BEAT) -> list[dict]:
     """Matches words to notes: one word per note; 'to-night' sings over two notes; a
     lone '_' (or '-') holds the previous word over one more note. Returns each word
-    with the text to speak and its span in QN from the item start."""
+    with the text to speak and its span in QN from the item start. Refuses lyrics
+    denser than max_per_beat syllables per beat over any DENSITY_WINDOW_QN (None: no
+    limit), because a robot voice turns fast words to mush."""
     tokens = lyrics.split()
     if not tokens:
         raise ValueError("give the lyrics to sing")
@@ -50,7 +67,8 @@ def assign_lyrics(lyrics: str, line: list[dict]) -> list[dict]:
         spoken = re.sub(r"[^\w']", "", "".join(parts))
         if not spoken:
             raise ValueError(f"'{token}' has nothing to sing")
-        words.append({"word": token, "text": spoken, "notes": max(1, len(parts))})
+        words.append({"word": token, "text": spoken, "notes": max(1, len(parts)),
+                      "syllables": max(len(parts), sum(syllables(p) for p in parts))})
     needed = sum(w["notes"] for w in words)
     if needed != len(line):
         raise ValueError(
@@ -63,8 +81,28 @@ def assign_lyrics(lyrics: str, line: list[dict]) -> list[dict]:
         end = last["start"] + last["length"]
         if i < len(line):
             end = min(end, line[i]["start"])  # never overlap the next word
-        out.append({"word": w["word"], "text": w["text"], "start": first["start"], "end": end})
+        out.append({"word": w["word"], "text": w["text"], "start": first["start"], "end": end,
+                    "syllables": w["syllables"]})
+    if max_per_beat is not None:
+        _check_density(out, max_per_beat)
+    for w in out:
+        del w["syllables"]
     return out
+
+
+def _check_density(words: list[dict], max_per_beat: float) -> None:
+    # Each word's syllables spread evenly over its span; then the busiest window.
+    onsets = sorted(w["start"] + i * (w["end"] - w["start"]) / w["syllables"]
+                    for w in words for i in range(w["syllables"]))
+    allowed = max_per_beat * DENSITY_WINDOW_QN
+    for i, t in enumerate(onsets):
+        count = sum(1 for u in onsets[i:] if u < t + DENSITY_WINDOW_QN - 1e-6)
+        if count > allowed:
+            beat = t + 1
+            raise ValueError(
+                f"too many words for a robot voice: {count} syllables in the {DENSITY_WINDOW_QN:g} beats from beat "
+                f"{beat:g} of the melody (at most {allowed:g}: one per beat). Fast words turn to mush; use fewer "
+                "words (a short hook, repeated), hold words over notes with '_', or write longer notes")
 
 
 @tool(annotations=READ_ONLY)
@@ -109,8 +147,15 @@ def add_robot_vocal(
     and a carrier synth that can play the melody's chords).
     Robot vocals are only understood when they're sparse: a short hook of a few words,
     repeated (think "one more time", "around the world"), at most one syllable per beat,
-    on quarter notes or longer. Dense, fast verses turn to mush. The result includes a
-    measured clarity score (alone and in the mix): act on it rather than guessing."""
+    on quarter notes or longer (denser lyrics are refused). Dense, fast verses turn to
+    mush. Keep the melody low: words are clearest below about E4 (measured clarity falls
+    about 0.1 per octave above). Harmonies only once the hook has been heard alone, as
+    every extra voice blurs the words: for a talk box, sing the same words on a harmony
+    copy of the melody (edit_midi_notes add_harmony with chords_item); for the vocoder,
+    add_harmony with chords_item on its Carrier track's item. It speaks with the user's
+    default voice (set_default_voice), else the best from list_speech_voices. The result
+    includes a measured clarity score (alone and in the mix): act on it rather than
+    guessing."""
     data = call("get_midi_notes", item_id=item_id)
     line = melody_line(data.get("notes", []))
     if not line:

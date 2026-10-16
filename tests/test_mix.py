@@ -131,7 +131,7 @@ def test_mastering_reports_the_master_as_it_ends_up(monkeypatch):
     monkeypatch.setattr(server, "call", fake_call)
     monkeypatch.setattr(server, "analyze_audio", lambda **a: {
         "loudness": {"integrated_lufs": next(readings)}, "levels": {"true_peak_dbtp": -1.5}})
-    result = server.master_to_target(target_lufs=-14.0, glue=False, passes=1)
+    result = server.master_to_target(target_lufs=-14.0, glue=False, passes=1, force=True)
     assert [p["integrated_lufs"] for p in result["passes"]] == [-20.0, -14.2]
     assert result["reached"] is True
 

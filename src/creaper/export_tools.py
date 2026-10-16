@@ -19,7 +19,7 @@ import soundfile as sf
 from pydantic import Field
 from scipy import signal
 
-from . import analysis
+from . import analysis, styles
 from .server import BridgeError, bridge, call, confirm_with_user, tool
 
 Format = Literal["wav", "flac", "mp3", "ogg"]
@@ -114,8 +114,8 @@ def _destination(folder: str | None, name: str, fmt: Format, info: dict, overwri
 
 def _deliver(src: str, dest: Path, fmt: Format, bit_depth: int, sample_rate: int | None,
              target_lufs: float | None, ceiling_db: float, avoid_clipping: bool = True,
-             extra_gain: float = 0.0, ogg_quality: float = OGG_QUALITY) -> dict:
-    measured = analysis.analyze_file(src)
+             extra_gain: float = 0.0, ogg_quality: float = OGG_QUALITY, measured: dict | None = None) -> dict:
+    measured = measured or analysis.analyze_file(src)
     loud = measured.get("loudness", {}).get("integrated_lufs")
     peak = measured.get("levels", {}).get("true_peak_dbtp")
     gain, notes = 0.0, []
@@ -202,9 +202,18 @@ def export_mix(
     avoid_clipping: Annotated[bool, Field(description="Turn the file down instead of clipping when the mix peaks too high")] = True,
     ogg_quality: Annotated[float, Field(ge=0, le=1, description="OGG Vorbis quality, 0 to 1 (0.6 is about 150-190 kbps)")] = OGG_QUALITY,
     overwrite: bool = False,
+    style: Annotated[str | None, Field(description="The song's genre, so harshness is judged by its tone (a dark style tolerates less edge)")] = None,
+    force: Annotated[bool, Field(description=(
+        "Export even when the checks fail (clipping, a flat loudness range, a piercing top end); "
+        "only after telling the user why it refused and getting a yes"))] = False,
 ) -> dict:
     """Exports the finished mix (the master, with its effects) to an audio file and
-    reports its loudness and true peak. Use master_to_target first for a release master."""
+    reports its loudness and true peak. Use master_to_target first for a release master.
+    It refuses, saying why, when the mix clips (flat-topped peaks), or when a whole song
+    (a minute or longer, exported whole) never changes level (loudness range under 2 LU,
+    ambient styles excepted) or is piercing (too much 2-5 kHz for its style's tone).
+    Stingers, hits and regions are only checked for clipping. Fix it first; pass
+    force=True only after telling the user why it refused and getting a yes."""
     info = _project_info()
     if region:
         regions = [m for m in call("get_project_overview").get("regions", []) if m.get("name", "").lower() == region.lower()]
@@ -214,14 +223,25 @@ def export_mix(
     else:
         span = {"start_bar": start_bar, "end_bar": end_bar}
     stem = name or (_stem_name(info) + (f" - {region}" if region else ""))
-    dest = _destination(folder, stem, format, info, overwrite)
+    profile = styles.find_style(style) if style else None
     render = call("render_audio", timeout=900.0, track="master", tail_seconds=tail_seconds, **span)
     _check_renders(render["files"])
     try:
+        measured = analysis.analyze_file(render["files"][0])
+        whole = not region and (start_bar or 1) <= 1 and end_bar is None
+        problems = [] if force else styles.gate_problems(measured, profile, whole_song=whole)
+        if problems:
+            raise ValueError("not exported: " + "; ".join(problems)
+                             + ". Fix it and export again, or pass force=True if the user wants it as it is.")
+        dest = _destination(folder, stem, format, info, overwrite)
         out = _deliver(render["files"][0], dest, format, bit_depth, sample_rate, target_lufs, ceiling_db, avoid_clipping,
-                       ogg_quality=ogg_quality)
+                       ogg_quality=ogg_quality, measured=measured)
     finally:
         _cleanup(render["files"])
+    if force:
+        skipped = styles.gate_problems(measured, profile, whole_song=whole)
+        if skipped:
+            out.setdefault("notes", []).append("exported with force=True despite: " + "; ".join(skipped))
     if render.get("warning"):
         out.setdefault("notes", []).append(render["warning"])
     return out

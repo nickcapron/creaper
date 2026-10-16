@@ -126,3 +126,36 @@ def test_knowledge_store(tmp_path):
     assert len(k.find()) == 1
     with pytest.raises(ValueError):
         k.add("x", "gossip")
+
+
+def test_tone_findings_judge_harshness_by_the_style_tone():
+    tone = {"harsh_2_5k_pct_p95": 13.6, "sibilance_5_10k_pct_p95": 3.0, "mud_200_500_pct_median": 12.0,
+            "crest_db_p10": 11.0, "resonances": [{"hz": 440, "note": "A4", "db_above_surroundings": 12.0}]}
+    dark = {f["area"].split(":")[0]: f for f in styles.tone_findings(tone, "dark")}
+    bright = {f["area"].split(":")[0]: f for f in styles.tone_findings(tone, "bright")}
+    assert dark["harshness"]["verdict"] == "high" and "3 kHz" in dark["harshness"]["advice"]
+    assert bright["harshness"]["verdict"] == "ok"
+    assert dark["mud"]["verdict"] == "ok" and dark["liveliest seconds' crest factor (dB, p10)"]["verdict"] == "ok"
+    assert dark["resonances (narrow peaks that stay put)"]["measured"] == ["440 Hz (A4) +12 dB"]
+    assert styles.harsh_limit("neutral", gate=True) > styles.harsh_limit("neutral")
+    squashed = styles.tone_findings({"crest_db_p10": 4.0}, "neutral")
+    assert squashed[0]["verdict"] == "low"
+
+
+def test_compare_fails_a_flat_song_unless_it_is_ambient():
+    flat = {"loudness": {"integrated_lufs": -9, "loudness_range_lu": 1.4}}
+    house = {f["area"]: f for f in styles.compare(flat, styles.find_style("house"))}
+    assert house["loudness range (LU)"]["verdict"] == "fail"
+    assert "same level" in house["loudness range (LU)"]["advice"]
+    ambient = styles.find_style("ambient")
+    assert styles.is_ambient(ambient)
+    calm = {f["area"]: f for f in styles.compare(flat, ambient)}
+    assert calm["loudness range (LU)"]["verdict"] != "fail"
+    loop = {f["area"]: f for f in styles.compare({**flat, "duration_seconds": 8.0}, styles.find_style("house"))}
+    assert loop["loudness range (LU)"]["verdict"] == "low"
+
+
+def test_compare_includes_tone_over_time():
+    measured = {"tone_over_time": {"harsh_2_5k_pct_p95": 30.0}}
+    areas = [f["area"] for f in styles.compare(measured, styles.find_style("house"))]
+    assert any(a.startswith("harshness") for a in areas)
