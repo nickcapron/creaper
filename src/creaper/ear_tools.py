@@ -13,7 +13,7 @@ from pydantic import Field
 
 from . import analysis, harmony, perception
 from .server import READ_ONLY, Bar, BridgeError, bridge, call, tool
-from .vocal_tools import melody_line
+from . import vocal_tools  # the module, not its names: it may still be loading (circular import)
 
 try:  # mcp 2.x
     from mcp.server.mcpserver import Image
@@ -153,7 +153,7 @@ def check_tuning(
         notes = []
         for it in midi_items:
             data = call("get_midi_notes", item_id=it["id"], limit=20000)
-            line = melody_line(data.get("notes", []))
+            line = vocal_tools.melody_line(data.get("notes", []))
             base = data["start"]["qn"]
             qns = [q for n in line for q in (base + n["start"], base + n["start"] + n["length"])]
             times = call("qn_to_times", qns=qns) if qns else []

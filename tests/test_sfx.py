@@ -69,7 +69,7 @@ def test_export_regions_writes_one_file_per_region(tmp_path, monkeypatch):
         assert cmd == "render_audio" and kw["start_seconds"] == 0.0 and kw["end_seconds"] == 6.0
         return {"files": [str(renders / "r.wav")]}
     monkeypatch.setattr(x, "call", fake_call)
-    monkeypatch.setattr(x, "_check_renders", lambda files: None)
+    monkeypatch.setattr(x.export_tools, "_check_renders", lambda files: None)
     r = x.export_regions(folder=str(out), stereo=["crowd_*"], loops=["crowd_bed*"])
     by = {f["file"]: f for f in r["files"]}
     one, _ = sf.read(str(out / "shot_01.wav"), always_2d=True)
@@ -89,3 +89,14 @@ def test_a_lingering_offset_and_a_minus_100_db_floor_still_trim():
     assert len(x.trim_tail(x.remove_dc(residue, FS))) < len(sound) + FS // 4
     hiss = np.concatenate([sound, 10 ** (-100 / 20) * np.random.default_rng(0).standard_normal((FS, 1))])
     assert len(x.trim_tail(hiss)) <= len(sound) + 50
+
+
+def test_regions_that_would_share_a_file_are_refused(tmp_path, monkeypatch):
+    # "shot/01" and "shot 01" both become "shot 01.wav": one silently overwrote the other.
+    import pytest
+
+    regions = [{"name": "shot/01", "start": {"seconds": 0.0}, "end": {"seconds": 0.5}},
+               {"name": "shot 01", "start": {"seconds": 1.0}, "end": {"seconds": 1.5}}]
+    monkeypatch.setattr(x, "call", lambda cmd, **kw: {"regions": regions})
+    with pytest.raises(ValueError, match="same file"):
+        x.export_regions(folder=str(tmp_path))

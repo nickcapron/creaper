@@ -326,7 +326,13 @@ def auto_mix(
     confirm_with_user("mix every track (levels, EQ, compression, panning, reverb, sidechain)")
     paths = call("project_paths")
     if paths.get("project"):
-        backup = str(Path(paths["project"]).with_name(Path(paths["project"]).stem + " (before auto_mix).rpp"))
+        project = Path(paths["project"])
+        backup = project.with_name(project.stem + " (before auto_mix).rpp")
+        n = 2
+        while backup.exists():  # a second run keeps the first run's "before" copy
+            backup = project.with_name(f"{project.stem} (before auto_mix {n}).rpp")
+            n += 1
+        backup = str(backup)
         call("save_project", mode="copy", path=backup)
         report["backup"] = backup
     else:

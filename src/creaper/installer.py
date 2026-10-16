@@ -48,7 +48,7 @@ def _get(url: str, timeout: float = 60.0) -> bytes:
 
 
 def install_reaimgui(resource_dir: Path, log=print) -> str:
-    """Downloads ReaImGui's plugin and its Lua API helper from the official release."""
+    """Downloads ReaImGui's plugin from its official release."""
     release = json.loads(_get(f"https://api.github.com/repos/{REAIMGUI_REPO}/releases/latest"))
     tag = release["tag_name"]
     name = reaimgui_asset()
@@ -63,11 +63,8 @@ def install_reaimgui(resource_dir: Path, log=print) -> str:
     part = plugins / (name + ".part")
     part.write_bytes(data)
     part.replace(plugins / name)
-    api_dir = resource_dir / "Scripts" / "ReaTeam Extensions" / "API"
-    api_dir.mkdir(parents=True, exist_ok=True)
-    shim = api_dir / "imgui.lua"
-    if not shim.exists():
-        shim.write_bytes(_get(f"https://raw.githubusercontent.com/{REAIMGUI_REPO}/{tag}/shims/imgui.lua"))
+    # The panel loads ReaImGui's Lua API from the plugin itself (ImGui_GetBuiltinPath),
+    # so ReaPack's separate imgui.lua shim isn't needed.
     log(f"Installed ReaImGui {tag} ({name})")
     return tag
 

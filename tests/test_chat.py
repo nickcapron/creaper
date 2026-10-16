@@ -204,3 +204,40 @@ def test_risky_tools_wait_for_the_panel(tmp_path, monkeypatch, allow):
 def test_no_confirmation_outside_the_panel(monkeypatch):
     monkeypatch.delenv(server.CONFIRM_FILE_ENV, raising=False)
     server.confirm_with_user("anything")  # Claude Desktop / Code ask on their own
+
+
+def test_a_turn_can_use_both_recoveries(tmp_path, monkeypatch):
+    # The tools retry and the fresh-conversation fallback each get their own try: they
+    # used to share one, so a turn that needed both ended in "Claude Code stopped".
+    runs = []
+
+    def fake_run(cmd, prompt, cwd, translator, cancel):
+        runs.append(cmd)
+        if len(runs) == 1:
+            translator.feed({"type": "system", "subtype": "init", "session_id": "s",
+                             "mcp_servers": [{"name": "creaper", "status": "failed"}]})
+            return 1, "", False
+        if len(runs) == 2:
+            return 1, "No conversation found with session ID s", False
+        translator.feed({"type": "result", "subtype": "success", "is_error": False, "result": "ok"})
+        return 0, "", False
+
+    monkeypatch.setattr(chat, "find_claude", lambda configured=None: "claude")
+    monkeypatch.setattr(chat, "run_claude", fake_run)
+    ok, _ = chat._turn({"prompt": "hi", "session_id": "0f0f0f0f-aaaa"}, tmp_path, None, lambda **e: None)
+    assert ok and len(runs) == 3 and "--resume" not in runs[2]
+
+
+def test_tools_that_need_sign_in_arent_retried(tmp_path, monkeypatch):
+    runs = []
+
+    def fake_run(cmd, prompt, cwd, translator, cancel):
+        runs.append(cmd)
+        translator.feed({"type": "system", "subtype": "init", "session_id": "s",
+                         "mcp_servers": [{"name": "creaper", "status": "needs-auth"}]})
+        return 1, "", False
+
+    monkeypatch.setattr(chat, "find_claude", lambda configured=None: "claude")
+    monkeypatch.setattr(chat, "run_claude", fake_run)
+    ok, _ = chat._turn({"prompt": "hi"}, tmp_path, None, lambda **e: None)
+    assert not ok and len(runs) == 1

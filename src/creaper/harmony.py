@@ -123,7 +123,7 @@ class Key:
         (which gave D# for bVI in G major and B#7 for the backdoor chord in D major):
         - diminished and half-diminished chords are leading-tone chords: the raised
           note below (C#dim7 passing from C to Dm, G#dim as vii°/vi in C);
-        - the raised 6th and 7th of a minor key stay raised (F# major in A minor);
+        - the raised 3rd, 6th and 7th of a minor key stay raised (C#, F# in A minor);
         - a minor chord on the raised 4th stays raised (F#m in C);
         - everything else (borrowed chords, the Neapolitan, tritone substitutes,
           backdoor dominants) is the lowered note above: Eb in G, Ab7 for D7 in G."""
@@ -135,7 +135,7 @@ class Key:
         shape = {i % 12 for i in intervals}
         diminished = 3 in shape and 6 in shape and 7 not in shape
         minor = 3 in shape and 4 not in shape
-        prefer_sharp = diminished or (self.is_minor and rel in (9, 11)) or (rel == 6 and minor)
+        prefer_sharp = diminished or (self.is_minor and rel in (4, 9, 11)) or (rel == 6 and minor)
         below = [i for i, d in enumerate(degs) if (rel - d) % 12 == 1]
         above = [i for i, d in enumerate(degs) if (d - rel) % 12 == 1]
         sharp = spell(pc, self.degree_letter(below[0] + 1)) if below else None
@@ -243,6 +243,9 @@ def _degree_steps(intervals: tuple[int, ...]) -> list[int]:
     s = {i % 12 for i in intervals}
     has_maj3, has_p5 = 4 in s, 7 in s
     dim7 = {3, 6, 9} <= s and not ({10, 11} & s)
+    # An altered dominant (7alt: b9, #9 and both altered 5ths) spells them as #11 and
+    # b13, as jazz writes it: C7alt is C E Bb Db D# F# Ab, not ... Gb G#.
+    altered = not has_p5 and {6, 8} <= s and has_maj3 and 10 in s and bool({1, 3} & s)
     steps = []
     for i in intervals:
         x = i % 12
@@ -250,9 +253,9 @@ def _degree_steps(intervals: tuple[int, ...]) -> list[int]:
             0: 0, 1: 1, 2: 1,
             3: 1 if (has_maj3 and x == 3) else 2,
             4: 2, 5: 3,
-            6: 3 if has_p5 else 4,
+            6: 3 if (has_p5 or altered) else 4,
             7: 4,
-            8: 5 if has_p5 else 4,
+            8: 5 if (has_p5 or altered) else 4,
             9: 6 if dim7 else 5,
             10: 6, 11: 6,
         }[x])
@@ -443,7 +446,9 @@ def _ext_intervals(upper: bool, mark: str, ext: str, figure: str | None) -> tupl
         if seventh_figure:
             return CHORD_QUALITIES["7" if upper else "m7"]
         return CHORD_QUALITIES["" if upper else "m"]
-    if ext.startswith(("sus", "5")) or ext in ("no3",):
+    # A sus chord has no 3rd, so a lower-case numeral doesn't make it minor: "v7sus4"
+    # used to look for an unknown "m7sus4".
+    if ext.startswith(("sus", "5")) or "sus" in ext or ext in ("no3",):
         return _lookup(ext) or _fail(ext)
     if ext in ("maj7", "M7", "Δ", "Δ7", "maj"):
         return CHORD_QUALITIES["maj7" if upper else "m(maj7)"]
@@ -604,7 +609,9 @@ def numeral_for(chord: SpelledChord, key: Key) -> RomanChord:
         sharp = [i for i, d in enumerate(degs) if d == (rel - 1) % 12]
         if key.is_minor and rel == 11 and is_dim:
             degree, acc = 7, 0
-        elif (is_dim and sharp) or not flat:
+        elif (is_dim and sharp) or not flat or (key.is_minor and rel in (4, 9, 11) and sharp):
+            # In minor the raised 3rd, 6th and 7th are #III, #VI, #VII (C# major in A
+            # minor was "bIV", G# major "bI").
             degree, acc = sharp[0] + 1, 1
         else:
             degree, acc = flat[0] + 1, -1
@@ -674,7 +681,8 @@ def _chromatic_labels(chord: SpelledChord, key: Key, rel: int, shape: set[int], 
             t_deg = diatonic_roots.index(target) + 1
             t_chord = diatonic_chords(key)[t_deg - 1]
             t_num = numeral_for(t_chord, key).numeral if t_deg != 1 else ("i" if key.is_minor else "I")
-            if not (t_deg == 7 and not key.is_minor):
+            # A diminished chord isn't tonicized: no "V/ii°" in minor (nor V/vii° in major).
+            if t_chord.quality not in ("dim", "dim7", "m7b5"):
                 labels.append(f"secondary dominant: V{'7' if 10 in shape else ''}/{t_num} (pulls to {t_chord.symbol})")
         sub_target = (chord.root - 1) % 12
         if 10 in shape and sub_target in diatonic_roots:
@@ -745,7 +753,7 @@ def detect_key(histogram: list[float], tonic_hint: int | None = None, top: int =
         if (t, best_mode) in used:
             continue
         used.add((t, best_mode))
-        letter = (spelling or {}).get(t, _plain_name(t))
+        letter = (spelling or {}).get(t) or _simplest_tonic(t, best_mode)
         key = parse_key(f"{letter} {best_mode}")
         outside = [key.spell_pc(pc) for pc in range(12)
                    if histogram[pc] / total > 0.03 and pc not in key.pitch_classes()]
@@ -759,6 +767,28 @@ def detect_key(histogram: list[float], tonic_hint: int | None = None, top: int =
         gap = out[0]["correlation"] - (out[1]["correlation"] if len(out) > 1 else 0)
         out[0]["confidence"] = "high" if gap > 0.1 and out[0]["correlation"] > 0.7 else ("medium" if gap > 0.03 else "low")
     return out
+
+
+def _simplest_tonic(pc: int, mode: str) -> str:
+    """The tonic's name with the simpler key signature: C# minor (4 sharps), not Db minor
+    (8 flats, spelled with Fb and Bbb); Db major, not C# major. Ties keep the flat."""
+    names = [_plain_name(pc)]
+    if "b" in names[0] or names[0] == "F#":
+        names.append(NOTE_SHARP[pc] if names[0] != "F#" else "Gb")
+    def accidentals(name: str) -> int:
+        # Counted on the spelled scale, so theoretical keys (Fb major behind Db minor)
+        # score high instead of missing from the key-signature table.
+        return sum(n.count("#") + n.count("b") for n in parse_key(f"{name} {mode}").spell_scale())
+
+    best = names[0]
+    try:
+        fewest = accidentals(best)
+        for other in names[1:]:
+            if accidentals(other) < fewest:
+                best, fewest = other, accidentals(other)
+    except ValueError:
+        pass
+    return best
 
 
 def _fit(histogram: list[float], tonic: int, mode: str) -> float:

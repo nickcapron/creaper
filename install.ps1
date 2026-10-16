@@ -20,10 +20,22 @@ function Refresh-Path {
                 [Environment]::GetEnvironmentVariable('Path', 'Machine')
 }
 function Add-UserPath($dir) {
-    $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-    if (-not $userPath) { $userPath = '' }
-    if (($userPath -split ';') -notcontains $dir) {
-        [Environment]::SetEnvironmentVariable('Path', ($userPath.TrimEnd(';') + ';' + $dir).TrimStart(';'), 'User')
+    # The registry value as stored, so entries like %USERPROFILE%\bin stay variables:
+    # Environment.SetEnvironmentVariable would write every entry back expanded.
+    $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+    try {
+        $raw = [string]$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+        $parts = @($raw -split ';' | Where-Object { $_ })
+        $expanded = @($parts | ForEach-Object { [Environment]::ExpandEnvironmentVariables($_) })
+        if (($parts -notcontains $dir) -and ($expanded -notcontains $dir)) {
+            $key.SetValue('Path', (@($parts) + $dir) -join ';', [Microsoft.Win32.RegistryValueKind]::ExpandString)
+            # Writing the registry doesn't tell Windows the environment changed; setting
+            # (and clearing) a variable this way does, so new windows see the new PATH.
+            [Environment]::SetEnvironmentVariable('CREAPER_INSTALL', '1', 'User')
+            [Environment]::SetEnvironmentVariable('CREAPER_INSTALL', $null, 'User')
+        }
+    } finally {
+        $key.Close()
     }
     Refresh-Path
 }
@@ -87,7 +99,17 @@ Say "Python: $python"
 $root = Join-Path $env:LOCALAPPDATA 'creaper'
 $venv = Join-Path $root 'venv'
 $venvPython = Join-Path $venv 'Scripts\python.exe'
-if (-not (Test-Path $venvPython)) {
+# An environment from an earlier run only works while the Python it was made from is
+# still installed; after that Python is removed or upgraded, rebuild it.
+$venvWorks = $false
+if (Test-Path $venvPython) {
+    try { & $venvPython -c "import sys" 2>$null; $venvWorks = ($LASTEXITCODE -eq 0) } catch { $venvWorks = $false }
+    if (-not $venvWorks) {
+        Say "creaper's environment no longer works (its Python was removed or upgraded); rebuilding it..."
+        Remove-Item -Recurse -Force $venv
+    }
+}
+if (-not $venvWorks) {
     Say "Creating creaper's environment in $venv..."
     & $python -m venv $venv
 }

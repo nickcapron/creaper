@@ -83,6 +83,7 @@ class Translator:
         self.got_result = False
         self.error_text: str | None = None
         self.tools_missing = False
+        self.tools_status: str | None = None
 
     def feed(self, event: dict[str, Any]) -> None:
         kind = event.get("type")
@@ -93,7 +94,10 @@ class Translator:
             for server in event.get("mcp_servers") or []:
                 if isinstance(server, dict) and server.get("name") == "creaper" \
                         and server.get("status") not in (None, "connected", "pending"):
+                    # Only "failed" (a slow or crashed start) is worth retrying; the
+                    # others (needs-auth, disabled) would fail the same way again.
                     self.tools_missing = True
+                    self.tools_status = server.get("status")
         elif kind == "stream_event":
             inner = event.get("event", {})
             if inner.get("type") == "content_block_start" and inner.get("content_block", {}).get("type") == "text":
@@ -292,7 +296,10 @@ def _turn(request: dict, workdir: Path, cancel_path: Path | None, emit: Callable
     (workdir / "mcp.json").write_text(json.dumps({"mcpServers": {"creaper": server}}), encoding="utf-8")
 
     session_id = request.get("session_id")
-    for attempt in range(2):
+    # Each recovery is tried once, on its own: a turn that needed the tools retry can
+    # still fall back to a fresh conversation, and the other way round.
+    retried_tools = retried_session = False
+    while True:
         if cancel_path is not None and cancel_path.exists():
             return False, True  # stopped (or given up on) before Claude started
         translator = Translator(emit)
@@ -301,13 +308,15 @@ def _turn(request: dict, workdir: Path, cancel_path: Path | None, emit: Callable
         if cancelled:
             return False, True
         if translator.tools_missing:
-            if attempt == 0:
+            if not retried_tools and translator.tools_status == "failed":
+                retried_tools = True
                 emit(t="info", message="creaper's tools didn't start in time, so this message is being sent again.")
                 continue
             emit(t="error", message="creaper's tools didn't start. Send your message again; if it keeps "
-                                    "happening, restart REAPER.")
+                                    "happening, run `creaper doctor` in a terminal or restart REAPER.")
             return False, False
-        if code != 0 and session_id and attempt == 0 and "No conversation found" in stderr:
+        if code != 0 and session_id and not retried_session and "No conversation found" in stderr:
+            retried_session = True
             # The saved conversation is gone (expired or deleted): start a fresh one.
             emit(t="info", message="The previous conversation couldn't be resumed, so this starts a new one.")
             session_id = None
@@ -322,4 +331,3 @@ def _turn(request: dict, workdir: Path, cancel_path: Path | None, emit: Callable
             emit(t="error", message=f"Claude Code stopped: {detail}")
             return False, False
         return True, False
-    return False, False

@@ -118,7 +118,8 @@ def lookup_quality(text: str) -> tuple[int, ...] | None:
     """Chord-quality text -> intervals, tolerating common spellings: Maj7, mi7,
     min(maj7), 7(b9), (add9), -7b5, 7+, ^7."""
     candidates = [text]
-    t = text.replace("Maj", "maj").replace("MA", "maj").replace("^", "maj").replace("♭", "b").replace("♯", "#")
+    # "MAJ" before "MA": replacing "MA" first turned "MAJ7" into "majJ7".
+    t = text.replace("Maj", "maj").replace("MAJ", "maj").replace("MA", "maj").replace("^", "maj").replace("♭", "b").replace("♯", "#")
     t = re.sub(r"^mi(?!n)", "m", t)
     t = re.sub(r"^min", "m", t)
     t = re.sub(r"^-", "m", t)
@@ -369,7 +370,8 @@ def drum_pattern_notes(
     """Step-sequencer patterns -> notes.
 
     Each lane is a string of steps: x = hit, X = accent, o/g = ghost note,
-    1-9 = velocity level, . or - = rest; spaces and | are ignored.
+    1-9 = velocity level, . or - = rest; spaces and | are ignored. A lane shorter
+    than the longest one repeats to fill it.
     swing follows the MPC convention: 50 = straight, ~66 = triplet feel.
     humanize (0-1) randomizes velocities by up to +/-20 at 1.
     resolve maps lane names to notes (and optionally a per-lane channel).
@@ -392,7 +394,10 @@ def drum_pattern_notes(
     notes = []
     for r in range(max(1, repeats)):
         for pitch, lane_channel, cells in lanes:
-            for i, c in enumerate(cells):
+            # A lane shorter than the longest repeats to fill it ({"kick": 16 steps,
+            # "hat": "x.x."} plays the hat all bar, not only on its first 4 steps).
+            for i in range(cycle_steps if cells else 0):
+                c = cells[i % len(cells)]
                 if c in REST_STEPS:
                     continue
                 velocity = round(int(c) * 127 / 9) if c.isdigit() else STEP_VELOCITY[c]

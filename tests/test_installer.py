@@ -34,21 +34,35 @@ def test_claude_desktop_config_created(tmp_path):
     assert json.loads(cfg.read_text(encoding="utf-8"))["mcpServers"]["creaper"]["args"] == ["-m", "creaper"]
 
 
-def test_install_reaimgui_writes_plugin_and_shim(tmp_path, monkeypatch):
+def test_install_reaimgui_writes_only_the_plugin(tmp_path, monkeypatch):
+    # The panel loads ReaImGui's Lua API from the plugin itself, so ReaPack's imgui.lua
+    # shim is no longer downloaded into ReaPack's folder.
     release = {"tag_name": "v9.9", "assets": [{"name": installer.reaimgui_asset(), "browser_download_url": "https://x/plugin"}]}
+    fetched = []
 
     def fake_get(url, timeout=60.0):
+        fetched.append(url)
         if "api.github.com" in url:
             return json.dumps(release).encode()
-        if url.endswith("/plugin"):
-            return b"\0" * 200_000
-        assert url == "https://raw.githubusercontent.com/cfillion/reaimgui/v9.9/shims/imgui.lua"
-        return b"-- shim"
+        assert url.endswith("/plugin"), url
+        return b"\0" * 200_000
 
     monkeypatch.setattr(installer, "_get", fake_get)
     assert installer.install_reaimgui(tmp_path, log=lambda *_: None) == "v9.9"
     assert (tmp_path / "UserPlugins" / installer.reaimgui_asset()).stat().st_size == 200_000
-    assert (tmp_path / "Scripts" / "ReaTeam Extensions" / "API" / "imgui.lua").read_bytes() == b"-- shim"
+    assert not (tmp_path / "Scripts").exists() and len(fetched) == 2
+
+
+def test_install_bridge_keeps_a_startup_script_in_another_encoding(tmp_path):
+    # A __startup.lua with cp1252 comments stopped the install with a decode error.
+    from creaper import cli
+    scripts = tmp_path / "Scripts"
+    scripts.mkdir()
+    original = "-- caf\xe9 r\xe9glages\nreaper.ShowConsoleMsg('hi')\n".encode("cp1252")
+    (scripts / "__startup.lua").write_bytes(original)
+    cli.install_bridge(tmp_path)
+    data = (scripts / "__startup.lua").read_bytes().replace(b"\r\n", b"\n")  # Windows line endings
+    assert data.startswith(original) and b"creaper autostart" in data
 
 
 def test_dry_run_changes_nothing(tmp_path, capsys):

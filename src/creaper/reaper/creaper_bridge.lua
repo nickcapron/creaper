@@ -800,6 +800,9 @@ end
 
 local commands = {}
 local stop_at -- playback stops when it passes this time (seconds)
+-- The user's loop points and repeat setting, put back once a range played for them
+-- (transport play with an end) has stopped: they used to stay changed for good.
+local restore_loop
 local beat_now -- set to write the heartbeat on the next tick instead of within a second
 -- While a long job (a render) blocks the bridge, the heartbeat says so and until when,
 -- so clients wait for it instead of timing out or deciding REAPER has gone.
@@ -1223,7 +1226,11 @@ function commands.set_tempo(p)
       reaper.SetCurrentBPM(0, p.bpm, true)
     else
       local bpm, num, denom, linear, timepos = p.bpm, p.numerator, p.denominator, false, 0
-      if reaper.CountTempoTimeSigMarkers(0) > 0 then
+      local _, first_pos = reaper.GetTempoTimeSigMarker(0, 0)
+      -- Only edit the first marker when it is the song's start: a first marker at bar
+      -- 17 is a change partway through, and editing it left the start tempo alone and
+      -- wiped out that change.
+      if reaper.CountTempoTimeSigMarkers(0) > 0 and first_pos < 0.001 then
         local _, pos, _, _, old_bpm, old_num, old_denom, old_linear = reaper.GetTempoTimeSigMarker(0, 0)
         timepos, linear = pos, old_linear
         bpm = bpm or old_bpm
@@ -1232,8 +1239,8 @@ function commands.set_tempo(p)
         if num and not denom then denom = 4 end
         reaper.SetTempoTimeSigMarker(0, 0, timepos, -1, -1, bpm, num or 0, denom or 0, linear)
       else
-        local _, _, current_bpm = reaper.TimeMap_GetTimeSigAtTime(0, 0)
-        reaper.SetTempoTimeSigMarker(0, -1, 0, -1, -1, bpm or current_bpm, num, denom or 4, false)
+        local cur_num, cur_denom, current_bpm = reaper.TimeMap_GetTimeSigAtTime(0, 0)
+        reaper.SetTempoTimeSigMarker(0, -1, 0, -1, -1, bpm or current_bpm, num or cur_num, denom or cur_denom or 4, false)
       end
     end
     reaper.UpdateTimeline()
@@ -1568,6 +1575,11 @@ function commands.transport(p)
     if action == "play" then
       if end_qn then
         local start_t = start_qn and qn_to_time(start_qn) or reaper.GetCursorPosition()
+        if not restore_loop then
+          local loop_start, loop_end = reaper.GetSet_LoopTimeRange(false, true, 0, 0, false)
+          restore_loop = { start = loop_start, stop = loop_end, rep = reaper.GetSetRepeat(-1) }
+        end
+        restore_loop.since = reaper.time_precise()
         reaper.GetSet_LoopTimeRange(true, true, start_t, qn_to_time(end_qn), false)
         reaper.GetSetRepeat(p.loop and 1 or 0)
         stop_at = (not p.loop) and qn_to_time(end_qn) or nil
@@ -2612,6 +2624,12 @@ local function automation_target(t, target, create)
   elseif kind == "fx" then
     local fx = get_fx(t, target.fx)
     local param = find_param(t, fx, target.parameter)
+    -- The same guard as set_fx_parameter: by number, a preset-saving or controller
+    -- "parameter" could otherwise be automated (and probed, which sets it).
+    local _, param_name = reaper.TrackFX_GetParamName(t, fx, param, "")
+    if create and is_midi_cc_helper(param_name) then
+      fail("'" .. param_name .. "' isn't a sound control (it's preset/controller plumbing), so creaper won't automate it")
+    end
     return reaper.GetFXEnvelope(t, fx, param, create), kind, fx, param
   end
   fail("the automation target must be volume, pan or an FX parameter")
@@ -3246,7 +3264,12 @@ local last_heartbeat = 0
 -- old one notices it no longer owns the bridge and exits.
 local function owns_bridge() return reaper.GetExtState("creaper", "owner") == INSTANCE end
 local previous_beat = tonumber(reaper.GetExtState("creaper", "heartbeat"))
-local taking_over = previous_beat and reaper.time_precise() - previous_beat < 2
+-- A bridge inside a long render beats no heartbeat until it's done, but says how long
+-- it expects to be busy: it's still alive, so take over without wiping the requests
+-- other clients have queued for it.
+local previous_busy_until = tonumber(reaper.GetExtState("creaper", "busy_until"))
+local taking_over = (previous_beat and reaper.time_precise() - previous_beat < 2)
+  or (previous_busy_until and previous_busy_until > os.time()) or false
 reaper.SetExtState("creaper", "owner", INSTANCE, false)
 -- Give a bridge that's still running time to see the handover before we claim requests.
 local claim_after = reaper.time_precise() + (taking_over and 0.5 or 0)
@@ -3325,6 +3348,7 @@ end
 -- waiting for the user rather than gone, and wait too.
 local function write_heartbeat(now)
   last_heartbeat = now
+  reaper.SetExtState("creaper", "busy_until", busy and tostring(busy.until_time) or "", false)
   local recording = reaper.GetPlayState() & 4 ~= 0
   write_file(HEARTBEAT_PATH, json.encode({
     bridge_version = BRIDGE_VERSION, protocol = PROTOCOL, time = os.time(),
@@ -3351,6 +3375,12 @@ local function step()
       write_heartbeat(now) -- fresh, in case stopping opens the prompt and blocks us
       reaper.OnStopButton()
     end
+  end
+  if restore_loop and not stop_at and reaper.GetPlayState() & 1 == 0
+      and reaper.time_precise() - restore_loop.since > 0.5 then
+    reaper.GetSet_LoopTimeRange(true, true, restore_loop.start, restore_loop.stop, false)
+    reaper.GetSetRepeat(restore_loop.rep)
+    restore_loop = nil
   end
 
   if now < claim_after then return end

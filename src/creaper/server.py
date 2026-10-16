@@ -379,6 +379,11 @@ def confirm_with_user(action: str) -> None:
     path = os.environ.get(CONFIRM_FILE_ENV)
     if not path:
         return
+    # Names from the project (tracks, actions, files) are part of the question: keep it
+    # one line, and short, so a crafted name can't add lines of its own to the prompt.
+    action = re.sub(r"\s+", " ", action).strip()
+    if len(action) > 240:
+        action = action[:237] + "..."
     request = Path(path)
     answer = request.with_suffix(".answer")
     with _confirm_lock:  # one question at a time, even if Claude calls tools in parallel
@@ -627,8 +632,9 @@ def transport(
 ) -> dict:
     """Controls REAPER's playback for the user to listen: plays, stops, pauses or
     moves the edit cursor. play with start_bar/end_bar lets the user hear a section
-    ('play bars 9 to 17'). Playing doesn't let you hear: to check the sound yourself,
-    measure it with analyze_audio or show_spectrogram."""
+    ('play bars 9 to 17'); the user's own loop points and repeat setting are put back
+    once it stops. Playing doesn't let you hear: to check the sound yourself, measure
+    it with analyze_audio or show_spectrogram."""
     return call("transport", action=action, start_bar=start_bar, start_beat=start_beat, end_bar=end_bar, loop=loop)
 
 
@@ -782,7 +788,11 @@ def list_drum_maps() -> dict:
 
 @tool(annotations=DESTRUCTIVE)
 def delete_drum_map(instrument: str) -> dict:
-    """Deletes a saved drum map (built-in maps can't be deleted, only overridden)."""
+    """Deletes a saved drum map (built-in maps can't be deleted, only overridden),
+    after asking the user: it can't be undone."""
+    saved = next((k for k in drum_maps.all() if k.lower() == instrument.strip().lower()), None)
+    if saved:
+        confirm_with_user(f"delete your saved drum map for {saved} (this can't be undone)")
     if not drum_maps.delete(instrument):
         if any(instrument.strip().lower() == k.lower() for k in BUILTIN_DRUM_MAPS):
             raise ValueError(f"'{instrument}' is built in; save your own map with that name to override it")

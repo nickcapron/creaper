@@ -13,7 +13,7 @@ from typing import Annotated, Callable, Literal
 from pydantic import Field
 
 from . import composer, harmony, samplelib, speech, talkbox
-from .sample_tools import _check_audio
+from . import sample_tools  # the module, not its names: it may still be loading (circular import)
 from .server import READ_ONLY, ItemId, call, tool
 
 # Notes starting this close together (in QN) count as one onset: the top one sings.
@@ -252,7 +252,7 @@ def chop_vocal(
     shifts each one (at most a tritone, correcting its tuning) onto the chord or key.
     Real voices beat robot vocals, so use this first when the user's samples have
     vocals. One item per chop, all ordinary audio to edit afterwards."""
-    path = _check_audio(path)
+    path = sample_tools._check_audio(path)
     slices = samplelib.slice_vocal(path)
     if not slices:
         raise ValueError("couldn't find any sung or spoken parts in that sample")

@@ -76,7 +76,8 @@ def convert(src: str | Path, dest: Path, fmt: Format, bit_depth: int = 24, sampl
     if gain_db:
         audio *= 10 ** (gain_db / 20)
     clipped = 0
-    if fmt in ("wav", "flac") and bit_depth in (16, 24) or fmt in ("mp3", "ogg"):
+    # Only 32-bit WAV is floating point; FLAC has no float format (32 is written as 24).
+    if not (fmt == "wav" and bit_depth == 32):
         if fmt in ("wav", "flac") and bit_depth == 16:
             lsb = 1 / 32768
             rng = np.random.default_rng(0)
@@ -130,6 +131,9 @@ def _deliver(src: str, dest: Path, fmt: Format, bit_depth: int, sample_rate: int
         notes.append(f"turned down {-gain:.1f} dB so the file doesn't clip (the mix peaks at {peak:+.1f} dBTP); "
                      "master_to_target makes it loud without clipping")
     gain += extra_gain
+    if fmt == "flac" and bit_depth == 32:
+        bit_depth = 24
+        notes.append("FLAC has no 32-bit float format, so it's 24-bit; use wav for a 32-bit float file")
     written = convert(src, dest, fmt, bit_depth, sample_rate, gain, ogg_quality)
     out = {"file": str(dest), "format": fmt + (f" {bit_depth}-bit" if fmt in ("wav", "flac") else
                                                f" (Vorbis quality {ogg_quality:g})" if fmt == "ogg" else ""),

@@ -237,6 +237,12 @@ local function poll_turn()
           if not turn then return end
         end
       end
+      -- Save how far the events were read every few seconds, not only at exit: after
+      -- a crash the restarted panel replayed the whole turn into the same reply.
+      if os.time() - (turn.saved_at or 0) >= 3 then
+        turn.saved_at = os.time()
+        save_state()
+      end
     end
   end
   -- The helper says "started" as soon as Python runs, so this only fires when it

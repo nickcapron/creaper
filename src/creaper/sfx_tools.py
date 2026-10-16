@@ -16,7 +16,7 @@ import soundfile as sf
 from pydantic import Field
 from scipy import signal
 
-from .export_tools import _check_renders, _cleanup, safe_name
+from . import export_tools  # the module, not its names: it may still be loading (circular import)
 from .server import call, confirm_with_user, tool
 
 HEAD_FLOOR_DB = -50.0      # below the peak: where a sound "starts"
@@ -151,7 +151,14 @@ def export_regions(
         raise ValueError(f"no regions to export (regions in the project: {names})")
     missing = [n for n in regions or [] if not any(r["name"].lower() == n.lower() for r in all_regions)]
     out_dir = Path(folder)
-    targets = [(r, out_dir / f"{safe_name(r['name'])}.wav") for r in chosen]
+    targets = [(r, out_dir / f"{export_tools.safe_name(r['name'])}.wav") for r in chosen]
+    by_file: dict[str, list[str]] = {}
+    for r, dest in targets:
+        by_file.setdefault(dest.name.lower(), []).append(r["name"])
+    clashes = [names for names in by_file.values() if len(names) > 1]
+    if clashes:  # one file would silently overwrite the other
+        raise ValueError("these regions would be saved to the same file; rename one of each: "
+                         + "; ".join(" / ".join(f"'{n}'" for n in names) for names in clashes))
     existing = [p.name for _, p in targets if p.exists()]
     if existing and not overwrite:
         confirm_with_user(f"overwrite {len(existing)} existing file(s) in {out_dir} (e.g. {existing[0]})")
@@ -160,11 +167,11 @@ def export_regions(
     extra = loop_crossfade_s + 0.5 if any(_matches(r["name"], loops) for r in chosen) else 0.5
     render = call("render_audio", timeout=900.0, track="master", start_seconds=start, end_seconds=end,
                   tail_seconds=extra)
-    _check_renders(render["files"])
+    export_tools._check_renders(render["files"])
     try:
         audio, fs = sf.read(render["files"][0], dtype="float64", always_2d=True)
     finally:
-        _cleanup(render["files"])
+        export_tools._cleanup(render["files"])
     if fs != sample_rate:
         g = math.gcd(int(fs), int(sample_rate))
         audio = signal.resample_poly(audio, sample_rate // g, fs // g, axis=0)

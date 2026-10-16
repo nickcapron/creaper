@@ -366,7 +366,9 @@ def check_voice_leading(
         if k is None:
             k, _ = _detect_from_chords(parsed, [4.0] * len(parsed))
     if voicings:
-        pitches = [sorted(theory.note_to_midi(n) for n in v) for v in voicings]
+        # In the order given (bass, tenor, alto, soprano): sorting them reassigned the
+        # voices, so crossed voices could never be reported.
+        pitches = [[theory.note_to_midi(n) for n in v] for v in voicings]
         issues = composer.check_voice_leading(pitches, k, parsed if parsed and len(parsed) == len(pitches) else None)
         return {"issues": issues, "verdict": "clean" if not issues else f"{len(issues)} issue(s)"}
     if not parsed:

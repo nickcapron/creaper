@@ -754,6 +754,19 @@ def _r(voice: str) -> tuple[int, int]:
     return lo, hi + 1
 
 
+def _chord_seventh(chord) -> int | None:
+    """The pitch class of a chord's 7th, which should fall by step: a minor or major
+    7th, or the diminished 7th (9 semitones) of a dim7 chord. A 6th (C6, Am6) isn't a
+    7th: it used to be flagged as an "unresolved seventh", and a major 7th never was."""
+    shape = {i % 12 for i in chord.intervals}
+    if len(chord.intervals) < 4:
+        return None
+    for iv in chord.intervals:
+        if iv % 12 in (10, 11) or (iv % 12 == 9 and {3, 6} <= shape):
+            return (chord.root + iv) % 12
+    return None
+
+
 def _transition_cost(p: tuple[int, ...], q: tuple[int, ...], pc_prev: SpelledChord, pc_next: SpelledChord, key: Key) -> float:
     cost = 0.0
     for i in range(4):
@@ -786,7 +799,7 @@ def _transition_cost(p: tuple[int, ...], q: tuple[int, ...], pc_prev: SpelledCho
         for i in (1, 2):
             if p[i] % 12 == leading and q[i] % 12 not in (key.tonic, (key.tonic + 7) % 12):
                 cost += 6
-    seventh = next(((pc_prev.root + iv) % 12 for iv in pc_prev.intervals if iv % 12 in (10, 9) and len(pc_prev.intervals) >= 4), None)
+    seventh = _chord_seventh(pc_prev)
     if seventh is not None:
         for i in range(4):
             if p[i] % 12 == seventh and not (0 < p[i] - q[i] <= 2) and q[i] != p[i]:
@@ -895,7 +908,7 @@ def check_voice_leading(voicings: list[list[int]], key: Key | None = None, chord
             if (a.root - key.tonic) % 12 in (7, 11) and (b.root - key.tonic) % 12 == 0:
                 if p[-1] % 12 == leading and q[-1] - p[-1] != 1:
                     add(k + 1, "unresolved leading tone", f"the top voice's leading tone {key.spell_pc(leading)} doesn't rise to {key.tonic_name}")
-            seventh = next(((a.root + iv) % 12 for iv in a.intervals if iv % 12 in (10, 9) and len(a.intervals) >= 4), None)
+            seventh = _chord_seventh(a)
             if seventh is not None:
                 for i in range(len(p)):
                     if p[i] % 12 == seventh and q[i] != p[i] and not (0 < p[i] - q[i] <= 2):
@@ -1327,7 +1340,7 @@ RHYTHMS: dict[str, dict] = {
     "aksak 7/8 (2+2+3)": {"step": 0.5, "steps": "x.x.x..", "about": "Balkan 7/8 grouped short-short-long."},
     "aksak 9/8 (2+2+2+3)": {"step": 0.5, "steps": "x.x.x.x..", "about": "Balkan/Turkish 9/8 (karsilama)."},
     "5/4 (3+2)": {"step": 0.5, "steps": "x..x.x..x.", "about": "Five beats grouped 3+2."},
-    "maqsum": {"step": 0.25, "steps": "x..x..x.x...x...", "about": "Arabic iqa' (dum tek - tek dum - tek -): dums on 1 and the 'and' of 2... shown as accents."},
+    "maqsum": {"step": 0.25, "steps": "x.x...x.x...x...", "about": "Arabic iqa' (dum tek - tek dum - tek -, in eighths): dums on beats 1 and 3, teks on the 'and' of 1, the 'and' of 2 and beat 4."},
 }
 
 

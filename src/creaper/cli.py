@@ -87,10 +87,12 @@ def install_bridge(resource_dir: Path, autostart: bool = True, chat: bool = True
               "(then run install-bridge again). The MCP server works without it.")
 
     startup = resource_dir / "Scripts" / "__startup.lua"
-    existing = startup.read_text(encoding="utf-8") if startup.exists() else ""
+    # surrogateescape: a startup script saved in another encoding (cp1252 comments)
+    # comes back byte for byte instead of stopping the install with a decode error.
+    existing = startup.read_text(encoding="utf-8", errors="surrogateescape") if startup.exists() else ""
     updated = update_startup(existing, autostart, chat)
     if updated != existing:
-        startup.write_text(updated, encoding="utf-8")
+        startup.write_text(updated, encoding="utf-8", errors="surrogateescape")
     if autostart:
         opens = "the bridge and the chat panel" if chat else "the bridge"
         print(f"REAPER will start {opens} when it launches (a marked block in {startup}).")
