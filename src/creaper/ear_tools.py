@@ -312,6 +312,18 @@ def check_ending(
 
 # ------------------------------------------------------------ many tracks
 
+def _parts(overview: dict) -> list[int]:
+    """Tracks to measure by default: every unmuted track with items, but a layered part
+    ('<part> (layered)' folder) as one, through its folder."""
+    names = {t["name"] for t in overview["tracks"]}
+    layered = {n for n in names if n.endswith(" (layered)")}
+    if not layered:
+        return [t["number"] for t in overview["tracks"] if t.get("item_count") and not t.get("mute")]
+    inside = {r["name"] for r in call("get_routing")["tracks"] if r.get("in_folder") in layered}
+    return [t["number"] for t in overview["tracks"] if not t.get("mute") and (
+        t["name"] in layered or (t.get("item_count") and t["name"] not in inside))]
+
+
 def _playing_lufs(audio: np.ndarray, fs: int) -> float | None:
     """How loud a stretch is while it plays: max short-term LUFS (max momentary when
     it's under 3 s); None when it's silent."""
@@ -405,7 +417,7 @@ def measure_tracks(
     and on a kit that plays every drum from one track, each drum's hit level against the
     kick (a shaker or hat drowning the groove)."""
     overview = call("get_project_overview")
-    chosen = tracks or [t["number"] for t in overview["tracks"] if t.get("item_count") and not t.get("mute")]
+    chosen = tracks or _parts(overview)
     if not chosen:
         raise ValueError("no tracks with items to measure")
     stems = call("render_stems", timeout=900.0, tracks=chosen, start_bar=start_bar, end_bar=end_bar)

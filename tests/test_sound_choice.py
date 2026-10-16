@@ -304,3 +304,80 @@ def test_a_patch_tuned_to_another_key_is_caught():
     assert shifted["transposed_semitones"] == 3
     bad, why = st.score({**base, **shifted}, wanted)
     assert bad >= 5 and any("another key" in w for w in why)
+
+
+# --------------------------------------------------- width, movement, thickness, tails
+
+def test_width_movement_and_partials():
+    import numpy as np
+    from creaper import listen
+    fs = 48000
+    t = np.arange(int(1.2 * fs)) / fs
+    mono = np.sin(2 * np.pi * 220 * t)
+    wide = np.stack([np.sin(2 * np.pi * 220 * t), np.sin(2 * np.pi * 221.5 * t + 1.0)], axis=1)  # detuned L/R
+    assert listen.width_db(np.stack([mono, mono], axis=1), fs, 1.0) == -60.0
+    assert listen.width_db(wide, fs, 1.0) > -6
+    static = listen.held_movement(mono, fs, 0.05, 1.0)
+    sweep_f = 220 * 2 ** (3 * t / 1.2)        # three octaves up over the note
+    swept = listen.held_movement(np.sin(2 * np.pi * np.cumsum(sweep_f) / fs), fs, 0.05, 1.0)
+    assert static["brightness_motion_oct"] < 0.05 and swept["brightness_motion_oct"] > 0.3
+    saw = sum(np.sin(2 * np.pi * 110 * k * t) / k for k in range(1, 40))
+    assert listen.partial_count(mono[: fs // 4], fs) <= 2 and listen.partial_count(saw[: fs // 4], fs) >= 20
+
+
+def test_new_characters_and_washed_out_tails():
+    assert st.targets("pad", ["wide"])["width_db"] == (-12, 0)
+    assert st.targets("pad", ["thick"])["partials"][0] == 15
+    assert "brightness_motion_oct" in st.targets("pad", ["moving"])
+    assert st.targets("bass")["release_s"] == (0, 0.6) and "release_s" not in st.targets("pad")
+    assert "release_s" not in st.targets("lead", ["sustained"])
+    base = {"silent_notes": 0, "attack_ms": 5, "richness": 2, "sustain_db": -3, "low_share": 0.8}
+    dry, _ = st.score({**base, "release_s": 0.2}, st.targets("bass"))
+    long_tail, why = st.score({**base, "release_s": 1.5}, st.targets("bass"))
+    ringing, why2 = st.score({**base, **st.summarise([{"release_s": None}, {"release_s": None}])}, st.targets("bass"))
+    assert dry == 0 and long_tail > 0.5 and ringing >= 1.0 and "rings on" in why2[0]
+    flat, why3 = st.score({**base, "width_db": -40}, st.targets("pad", ["wide"]))
+    assert flat > 3 and "width db" in why3[-1]
+
+
+def test_arturia_only_arguments_need_arturia_candidates(monkeypatch):
+    monkeypatch.setattr(st, "call", lambda cmd, **kw: {"fx": [{"index": 1, "name": "ReaSynth", "instrument": True}]})
+    with pytest.raises(ValueError, match="style only apply with candidates='arturia'"):
+        st.audition_sounds(track="Pad", role="pad", candidates="library", style="synthwave")
+    monkeypatch.setattr(st, "call", lambda cmd, **kw: {"fx": []})
+    with pytest.raises(ValueError, match="candidates='arturia' loads its own"):
+        st.audition_sounds(track="Pad", role="pad", candidates="library")
+
+
+
+def test_ringing_counts_even_when_another_note_stopped():
+    base = {"silent_notes": 0, "attack_ms": 5, "richness": 2, "sustain_db": -3, "low_share": 0.8}
+    m = st.summarise([{"release_s": None}, {"release_s": None}, {"release_s": 0.2}])
+    assert m["release_s"] == 0.2 and m["rings_on"] == 2
+    score, why = st.score({**base, **m}, st.targets("bass"))
+    assert score >= 1.0 and "rings on" in why[0]
+
+
+def test_arturia_search_loosens_only_what_the_palette_filled_in(monkeypatch):
+    from creaper import arturia
+    tried = []
+
+    def fake_find(conn, instrument, type, subtype, characteristics, genre, search, installed, limit=20, patterns=False):
+        tried.append((type, subtype, characteristics, genre))
+        return []
+
+    class Conn:
+        def close(self):
+            pass
+    monkeypatch.setattr(arturia, "find", fake_find)
+    monkeypatch.setattr(arturia, "connect", lambda: Conn())
+    monkeypatch.setattr(st, "_installed_arturia", lambda: {"jup-8 v4": "VST3i: Jup-8 V4 (Arturia)"})
+    monkeypatch.setattr(st, "call", lambda cmd, **kw: {"fx": []})
+    with pytest.raises(ValueError, match="no Arturia presets match"):
+        st.audition_sounds(track="Bass", role="bass", candidates="arturia", subtype="Sub Bass", style="synthwave")
+    assert all(t[1] == "Sub Bass" for t in tried)          # the subtype asked for stays in every try
+    assert tried[-1] == ("Bass", "Sub Bass", None, None)   # the palette's words were let go
+    tried.clear()
+    with pytest.raises(ValueError):
+        st.audition_sounds(track="Bass", role="bass", candidates="arturia", characteristics=["Warm"])
+    assert all(t[2] == ["Warm"] for t in tried)

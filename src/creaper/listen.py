@@ -170,6 +170,59 @@ def transposition(results: list[dict]) -> int | None:
     return common if common and offsets.count(common) >= max(2, 2 * len(offsets) / 3) else None
 
 
+def width_db(stereo: np.ndarray, fs: float, note_off: float) -> float | None:
+    """How wide a held note is: side against mid energy (dB) while held. About -40 or
+    less is mono; -15 is a little width; -6 and up is wide (chorus, unison spread)."""
+    if stereo.ndim < 2 or stereo.shape[1] < 2:
+        return None
+    held = stereo[: max(1, int(note_off * fs))].astype(np.float64)
+    mid, side = (held[:, 0] + held[:, 1]) / 2, (held[:, 0] - held[:, 1]) / 2
+    em, es = float(np.dot(mid, mid)), float(np.dot(side, side))
+    if em <= 1e-12:
+        return None
+    return round(max(-60.0, 10 * math.log10(es / em + 1e-12)), 1)
+
+
+def held_movement(x: np.ndarray, fs: float, start_s: float, end_s: float) -> dict:
+    """How much a held note changes by itself, in 100 ms slices: brightness_motion_oct
+    (spread of its spectral centroid, in octaves: a filter sweep or LFO) and
+    level_motion_db (spread of its level: tremolo, swells). Near 0 is static."""
+    seg = x[int(start_s * fs): int(end_s * fs)]
+    win = int(0.1 * fs)
+    if len(seg) < 4 * win:
+        return {}
+    freqs = np.fft.rfftfreq(win, 1 / fs)
+    band = (freqs >= 20) & (freqs <= 16000)
+    cents, levels = [], []
+    for a in range(0, len(seg) - win, win // 2):
+        part = seg[a: a + win]
+        spec = np.abs(np.fft.rfft(part * np.hanning(win))) ** 2
+        total = float(spec[band].sum())
+        if total <= 1e-14:
+            continue
+        cents.append(math.log2(float((freqs[band] * spec[band]).sum() / total) + 1e-9))
+        levels.append(10 * math.log10(float(np.mean(np.square(part))) + 1e-20))
+    if len(cents) < 4:
+        return {}
+    return {"brightness_motion_oct": round(float(np.std(cents)), 2), "level_motion_db": round(float(np.std(levels)), 1)}
+
+
+def partial_count(x: np.ndarray, fs: float) -> int:
+    """Spectral peaks within 40 dB of the strongest, under 5 kHz: few for a sine or a
+    flute, many for a thick saw stack, a detuned unison or an organ."""
+    if len(x) < 2048:
+        return 0
+    spec = np.abs(np.fft.rfft(x * np.hanning(len(x)), 1 << 15)) ** 2
+    freqs = np.fft.rfftfreq(1 << 15, 1 / fs)
+    level = 10 * np.log10(spec[(freqs >= 30) & (freqs <= 5000)] + 1e-20)
+    if not level.size:
+        return 0
+    from scipy import signal as _signal
+
+    peaks, _ = _signal.find_peaks(level, height=level.max() - 40, prominence=6)
+    return int(len(peaks))
+
+
 def plays_pattern(f: dict) -> bool:
     """A held note or chord that moves by itself (see held_motion, chord_motion)."""
     return (f.get("retriggers", 0) >= PATTERN_RETRIGGERS or f.get("off_pitch_share", 0) >= PATTERN_OFF_PITCH
@@ -227,6 +280,11 @@ def features(x: np.ndarray, fs: float, note_off: float | None = None, expected_h
     played note's frequency, also how well it's in tune (harmonic_fit)."""
     peak = float(np.max(np.abs(x))) if x.size else 0.0
     out: dict = {"peak_db": round(_db(peak), 1)}
+    if note_off is not None and x.size:
+        # How loud it plays while held (RMS over the note): patches match by this, not by
+        # a peak that one transient sets.
+        held = x[: max(1, int(note_off * fs))]
+        out["level_db"] = round(_db(math.sqrt(float(np.mean(np.square(held))))), 1)
     if _db(peak) < SILENT_DB:
         out["silent"] = True
         return out
@@ -293,6 +351,8 @@ def features(x: np.ndarray, fs: float, note_off: float | None = None, expected_h
             settle = min(settle, max(0.05, note_off - on_s - 0.3))
         if note_off is not None and note_off >= 0.4:
             out.update(held_motion(x, fs, on_s + settle, note_off, expected_hz))
+            out.update(held_movement(x, fs, on_s + settle, note_off))
+        out["partials"] = partial_count(x[a: a + int(0.25 * fs)], fs)
         on = int((on_s + settle) * fs)
         tuned, tuned_clarity = _pitch(x[on: on + int(0.25 * fs)], fs, fmin=25.0)
         if tuned and tuned_clarity > 0.85:

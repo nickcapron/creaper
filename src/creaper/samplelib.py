@@ -237,10 +237,64 @@ def slice_vocal(path: str, floor_db: float = -35.0, min_gap: float = 0.08, min_l
     return merged
 
 
+ANALYSIS_VERSION = 2     # cached analyses from before (no sub_share, punch...) are redone
+# Stored lo-fi (an old sampler's 8-bit or low-rate files, like the CMI's): sounds dated
+# unless that's the style. A kick with nothing above 14 kHz is just a kick, so bandwidth
+# (top_hz) is reported but doesn't decide it.
+LOFI_BITS = 8
+LOFI_RATE = 32000
+
+
+def hit_measures(x: np.ndarray, fs: int) -> dict:
+    """What a drum hit measures like, for choosing samples by fit: sub_share (energy under
+    90 Hz in its first second), punch_db (its first 10 ms against the 30-100 ms after:
+    how hard the transient hits), level_db (RMS over its first 300 ms) and top_hz (the
+    frequency 99.5% of its energy sits under: a dull or lo-fi file stops early)."""
+    env = np.abs(x)
+    above = np.flatnonzero(env > env.max() * 0.1) if x.size else np.array([])
+    if not above.size:
+        return {}
+    a = int(above[0])
+    seg = x[a: a + fs]
+    out: dict = {}
+    spec = np.abs(np.fft.rfft(seg * np.hanning(seg.size))) ** 2 if seg.size > 64 else None
+    if spec is not None and spec.sum() > 0:
+        freqs = np.fft.rfftfreq(seg.size, 1 / fs)
+        total = spec.sum()
+        out["sub_share"] = round(float(spec[(freqs >= 20) & (freqs < 90)].sum() / total), 2)
+        cum = np.cumsum(spec) / total
+        out["top_hz"] = int(freqs[min(len(freqs) - 1, int(np.searchsorted(cum, 0.995)))])
+
+    def rms_db(lo: float, hi: float) -> float | None:
+        part = x[a + int(lo * fs): a + int(hi * fs)]
+        return 10 * math.log10(float(np.mean(np.square(part))) + 1e-20) if part.size else None
+
+    head, body = rms_db(0, 0.01), rms_db(0.03, 0.1)
+    if head is not None and body is not None:
+        out["punch_db"] = round(head - body, 1)
+    level = rms_db(0, 0.3)
+    if level is not None:
+        out["level_db"] = round(level, 1)
+    return out
+
+
+def bit_depth(path: str) -> int | None:
+    import soundfile as sf
+
+    try:
+        subtype = sf.info(path).subtype
+    except RuntimeError:
+        return None
+    if subtype in ("FLOAT", "DOUBLE"):
+        return 32
+    digits = "".join(ch for ch in subtype if ch.isdigit())
+    return int(digits) if digits else None
+
+
 def analyze(path: str) -> dict:
     """What a sample is: one-shot or loop, drum type or pitch, tempo and key for loops."""
     x, fs, duration = _load(path)
-    out: dict = {"duration_s": round(duration, 3), "sample_rate": fs}
+    out: dict = {"v": ANALYSIS_VERSION, "duration_s": round(duration, 3), "sample_rate": fs}
     peak = float(np.max(np.abs(x))) if x.size else 0.0
     if peak <= 1e-5:
         return {**out, "silent": True}
@@ -269,7 +323,31 @@ def analyze(path: str) -> dict:
             out["pitch"] = theory.midi_to_note(int(round(69 + 12 * math.log2(f["pitch_hz"] / 440))))
         out["decay_s"] = f.get("decay_s")
         out["brightness_hz"] = f.get("centroid_hz")
+        out.update(hit_measures(x, fs))
+    bits = bit_depth(path)
+    if bits:
+        out["bit_depth"] = bits
+    if (bits and bits <= LOFI_BITS) or fs < LOFI_RATE:
+        out["lofi"] = True
     return out
+
+
+def drum_fit(heard: dict, target) -> tuple[float, list[str]]:
+    """How far a sample's measurements sit outside a palette's Drum target (0 = inside
+    every range) and why. Ratios for times and brightness, 0.1 steps for the sub share,
+    3 dB steps for punch."""
+    total, why = 0.0, []
+    for key, measured_key, scale in (("sub_share", "sub_share", 0.1), ("decay_s", "decay_s", None),
+                                     ("brightness_hz", "brightness_hz", None), ("punch_db", "punch_db", 3.0)):
+        lo, hi = getattr(target, key)
+        v = heard.get(measured_key)
+        if v is None or lo <= v <= hi:
+            continue
+        edge = lo if v < lo else hi
+        d = abs(v - edge) / scale if scale else abs(math.log(max(v, 1e-3) / max(edge, 1e-3)))
+        total += d
+        why.append(f"{key.replace('_', ' ')} {v:g} (wanted {lo:g}-{hi:g})")
+    return round(total, 2), why
 
 
 # ----------------------------------------------------------------- the index
@@ -375,14 +453,22 @@ class SampleLibrary:
 
     def remember(self, path: str, analysis: dict) -> None:
         """Caches a sample's analysis in the index (best effort: a cache)."""
+        self.remember_many({path: analysis})
+
+    def remember_many(self, analyses: dict[str, dict]) -> None:
+        """Caches several analyses with one write of the index."""
+        if not analyses:
+            return
         with self._lock:
             try:
                 index = self._load_index()
+                hit = False
                 for f in index.get("files", []):
-                    if f["path"] == path:
-                        f["analysis"] = analysis
-                        self._save_index(index)
-                        return
+                    if f["path"] in analyses:
+                        f["analysis"] = analyses[f["path"]]
+                        hit = True
+                if hit:
+                    self._save_index(index)
             except OSError:
                 pass
 

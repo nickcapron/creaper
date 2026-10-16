@@ -6,14 +6,24 @@ producer browses: by role and character, across every Arturia instrument install
 
 Read-only. The database is live (the plugins write to it), so it's copied to a temp
 file and the copy is opened read-only. Nothing from it is ever saved in creaper.
+
+Loading a preset: each preset file is the plugin's own state, a Boost text archive
+("22 serialization::archive ..."). Arturia's VST3 plugins take their state as that
+archive twice, each with a little-endian (length, flag) header: flag 1 then flag 0.
+So a preset loads by handing the plugin its file in that frame (apply_fx_state with
+the chunk), which every installed Arturia instrument accepted in a live test: it reads
+back under the preset's name with its parameters set. The file goes from Arturia's
+folder into Arturia's plugin; creaper keeps no copy.
 """
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import os
 import shutil
 import sqlite3
+import struct
 import sys
 import tempfile
 from pathlib import Path
@@ -53,6 +63,69 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
     conn = sqlite3.connect(f"file:{_copy(src).as_posix()}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+ARCHIVE_MAGIC = b"22 serialization::archive"
+MAX_PRESET_BYTES = 16 * 1024 * 1024
+
+
+def preset_chunk(path: str | Path) -> str:
+    """The base64 VST3 state that loads a preset file into its Arturia plugin."""
+    data = Path(path).read_bytes()
+    if not data.startswith(ARCHIVE_MAGIC):
+        raise ValueError(f"{Path(path).name} isn't an Arturia preset file this version of creaper can load")
+    if len(data) > MAX_PRESET_BYTES:
+        raise ValueError(f"{Path(path).name} is too big to be a preset")
+    frame = struct.pack("<II", len(data), 1) + data + struct.pack("<II", len(data), 0) + data
+    return base64.b64encode(frame).decode("ascii")
+
+
+def chunk_preset_name(chunk: str | None) -> str | None:
+    """The preset name an Arturia plugin's state (capture_fx_state's chunk) says it holds."""
+    if not chunk:
+        return None
+    try:
+        raw = base64.b64decode(chunk)
+        n = struct.unpack_from("<I", raw, 0)[0]
+        body = raw[8: 8 + min(n, 400)]
+        if not body.startswith(ARCHIVE_MAGIC):
+            return None
+        # "22 serialization::archive 10 0 7 0 7 <length> <name>": the name is length-prefixed.
+        tokens = body.split(b" ", 8)
+        length = int(tokens[7])
+        return tokens[8][:length].decode("utf-8", "replace")
+    except (ValueError, IndexError, struct.error):
+        return None
+
+
+def resolve(conn: sqlite3.Connection, preset: str, plugin: str | None = None,
+            installed: set[str] | None = None) -> dict:
+    """One preset from a name ('Doomsday Sub') or a browser path ('Jup-8 V4 > Factory >
+    Doomsday Sub'), on the given plugin when several have one by that name, else on an
+    installed one. Returns name, plugin (folder), path."""
+    parts = [p.strip() for p in preset.split(">")]
+    name = parts[-1]
+    if len(parts) >= 2 and not plugin:
+        plugin = parts[0]
+    rows = conn.execute("SELECT name, file_path FROM Preset_Id WHERE LOWER(name) = LOWER(?) AND hide_in_browser = 0",
+                        (name,)).fetchall()
+    found = [{"name": r[0], "plugin": plugin_folder(r[1]), "path": r[1]} for r in rows]
+    if plugin:
+        want = normalize_plugin(plugin)
+        found = [f for f in found if normalize_plugin(f["plugin"]) == want] or \
+                [f for f in found if want in normalize_plugin(f["plugin"])]
+    if installed is not None and len(found) > 1:
+        found = [f for f in found if normalize_plugin(f["plugin"]) in installed] or found
+    if not found:
+        raise ValueError(f"there's no Arturia preset called '{name}'" + (f" for {plugin}" if plugin else "")
+                         + "; find_arturia_presets lists them")
+    if len({f["plugin"] for f in found}) > 1:
+        raise ValueError(f"'{name}' exists for several instruments ({', '.join(sorted({f['plugin'] for f in found}))}): "
+                         "say which with plugin=")
+    if not Path(found[0]["path"]).exists():
+        raise ValueError(f"the preset file for '{name}' isn't on this computer ({found[0]['plugin']} may need "
+                         "reinstalling in Arturia Software Center)")
+    return found[0]
 
 
 def plugin_folder(file_path: str) -> str:
@@ -146,7 +219,8 @@ def find(conn: sqlite3.Connection, instrument: str | None = None, type: str | No
         chars = [r[0].strip() for r in conn.execute(
             "SELECT c.name FROM Preset_Characteristics pc JOIN Characteristics c ON c.key_id = pc.characteristic_key "
             "WHERE pc.preset_key = ? ORDER BY c.type_key, c.name", (row["key_id"],))]
-        out.append({"name": row["name"], "plugin": folder, "type": row["type"], "subtype": row["subtype"] or None,
+        out.append({"name": row["name"], "plugin": folder, "path": row["file_path"], "type": row["type"],
+                    "subtype": row["subtype"] or None,
                     "characteristics": chars, "pack": row["pack"],
                     "browser_path": f"{folder} > {row['pack'] or 'Factory'} > {row['name']}",
                     **({"comment": row["comment"][:160]} if row["comment"] else {})})

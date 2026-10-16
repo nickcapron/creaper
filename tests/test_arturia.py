@@ -135,3 +135,89 @@ def test_presets_that_play_their_own_pattern_are_left_out_unless_asked(db):
     assert "Running Seq" not in names(arturia.find(conn))
     assert "Arp Pad" in names(arturia.find(conn, type="pad", patterns=True))
     assert names(arturia.find(conn, type="sequence")) == ["Running Seq"]
+
+
+# ------------------------------------------------------------------- loading
+
+def test_preset_chunk_frames_the_file_twice_and_names_it(tmp_path):
+    import base64
+    import struct
+    f = tmp_path / "Doomsday Sub"
+    body = b"22 serialization::archive 10 0 7 0 7 12 Doomsday Sub 7 Factory 3 rest of the state"
+    f.write_bytes(body)
+    raw = base64.b64decode(arturia.preset_chunk(f))
+    n = len(body)
+    assert raw == struct.pack("<II", n, 1) + body + struct.pack("<II", n, 0) + body
+    assert arturia.chunk_preset_name(arturia.preset_chunk(f)) == "Doomsday Sub"
+    assert arturia.chunk_preset_name(None) is None and arturia.chunk_preset_name("bm90IGEgY2h1bms=") is None
+    (tmp_path / "junk").write_bytes(b"not a preset")
+    with pytest.raises(ValueError, match="isn't an Arturia preset"):
+        arturia.preset_chunk(tmp_path / "junk")
+
+
+def test_resolve_by_name_or_browser_path(db, tmp_path, monkeypatch):
+    c = sqlite3.connect(db)
+    for key, name, folder in ((30, "Shared Name", "Jup-8 V4"), (31, "Shared Name", "Mini V3")):
+        path = tmp_path / folder / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"22 serialization::archive")
+        c.execute("INSERT INTO Preset_Id (key_id, name, type_v2, subtype_v2, instrument_key, pack, file_path) "
+                  "VALUES (?, ?, 1, 1, 1, 1, ?)", (key, name, str(path).replace("\\", "/").replace(
+                      str(tmp_path).replace("\\", "/"), "C:/ProgramData/Arturia/Presets")))
+    c.commit()
+    c.close()
+    conn = arturia.connect()
+    monkeypatch.setattr(arturia.Path, "exists", lambda self: True)
+    assert arturia.resolve(conn, "Doomsday Sub")["plugin"] == "Jup-8 V4"
+    assert arturia.resolve(conn, "Jup-8 V4 > Factory > doomsday sub")["name"] == "Doomsday Sub"
+    with pytest.raises(ValueError, match="several instruments"):
+        arturia.resolve(conn, "Shared Name")
+    assert arturia.resolve(conn, "Shared Name", plugin="Mini V3")["plugin"] == "Mini V3"
+    assert arturia.resolve(conn, "Shared Name", installed={"mini v3"})["plugin"] == "Mini V3"
+    with pytest.raises(ValueError, match="no Arturia preset called"):
+        arturia.resolve(conn, "Nope")
+
+
+def test_audition_spreads_candidates_across_instruments():
+    from creaper import sound_tools
+    found = [{"name": f"A{i}", "plugin": "Jup-8 V4"} for i in range(20)] + [{"name": "B0", "plugin": "Mini V3"},
+                                                                            {"name": "B1", "plugin": "Mini V3"}]
+    picked = sound_tools._by_plugin(found, 6)
+    assert len(picked) == 6 and {p["plugin"] for p in picked} == {"Jup-8 V4", "Mini V3"}
+    assert [p["name"] for p in picked if p["plugin"] == "Mini V3"] == ["B0", "B1"]
+
+
+def test_load_arturia_preset_tool(db, tmp_path, monkeypatch):
+    from creaper import music_tools, sound_tools
+    preset_file = tmp_path / "Night Drive"
+    preset_file.write_bytes(b"22 serialization::archive 10 0 7 0 7 11 Night Drive 7 Factory")
+    monkeypatch.setattr(arturia, "resolve", lambda conn, preset, plugin=None, installed=None: {
+        "name": "Night Drive", "plugin": "Jup-8 V4", "path": str(preset_file)})
+    applied = {}
+
+    def fake_call(cmd, **kw):
+        if cmd == "list_installed_fx":
+            return {"plugins": [{"name": "Jup-8 V4 (Arturia)", "load_as": "VST3i: Jup-8 V4 (Arturia)"}]}
+        if cmd == "apply_fx_state":
+            applied.update(kw)
+            return {"restored": "full plugin state"}
+        if cmd == "capture_fx_state":
+            return {"plugin": "VST3i: Jup-8 V4 (Arturia)", "chunk": applied["state"]["chunk"]}
+        raise AssertionError(cmd)
+
+    monkeypatch.setattr(sound_tools, "call", fake_call)
+    monkeypatch.setattr(music_tools, "audition_instrument", lambda **kw: {
+        "summary": {"character": "warm"}, "warning": "held notes play a pattern of their own"})
+    out = sound_tools.load_arturia_preset(track="Lead", preset="Night Drive")
+    assert applied["state"]["plugin"] == "VST3i: Jup-8 V4 (Arturia)" and applied["replace_instrument"] is True
+    assert out["confirmed"] is True and out["browser_path"] == "Jup-8 V4 > Factory > Night Drive"
+    assert out["problems"] == ["held notes play a pattern of their own"]
+
+
+def test_another_seed_draws_other_candidates():
+    from creaper import sound_tools
+    found = [{"name": f"A{i:02d}", "plugin": "Jup-8 V4"} for i in range(40)]
+    first = [p["name"] for p in sound_tools._by_plugin([dict(p) for p in found], 5)]
+    again = [p["name"] for p in sound_tools._by_plugin([dict(p) for p in found], 5)]
+    other = [p["name"] for p in sound_tools._by_plugin([dict(p) for p in found], 5, seed=3)]
+    assert first == again and set(first) != set(other)

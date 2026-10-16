@@ -282,9 +282,19 @@ def _channels() -> list[dict]:
             if not snd.get("note"):  # not a sidechain input
                 feeds.setdefault(snd["to"], []).append(src)
     out = []
+    layered = {name for name in by_name if name.endswith(" (layered)")}
     for t in overview["tracks"]:
         name = t["name"]
         r = routing.get(name, {})
+        if r.get("in_folder") in layered:
+            continue  # a layered part is mixed as one, on its folder
+        if name in layered and not t.get("mute"):
+            fx = " ".join(t.get("fx", [])).lower()
+            out.append({"name": name, "track": t["number"], "ref": t.get("guid") or t["number"],
+                        "volume_db": t.get("volume_db", 0.0), "pan": t.get("pan", 0.0),
+                        "has_eq": "eq" in fx, "has_comp": "comp" in fx or "limit" in fx,
+                        "ducked": "duck" in fx, "layered": True})
+            continue
         if t.get("mute") or r.get("folder") or re.search(r" (Voice|Carrier)$", name):
             continue
         if re.search(r"verb|reverb|delay|return", name, re.I) and not t.get("item_count"):

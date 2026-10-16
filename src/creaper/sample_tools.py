@@ -3,13 +3,15 @@ loops in time and key, and build drum kits from samples in REAPER's own sampler.
 
 from __future__ import annotations
 
+import math
+
 import os
 import re
 from pathlib import Path
 from typing import Annotated, Literal
 
 import numpy as np
-from pydantic import Field
+from pydantic import BaseModel, Field
 
 from . import harmony, samplelib, theory
 from .server import READ_ONLY, bridge, call, tool
@@ -58,22 +60,64 @@ def find_samples(
     listen: Annotated[bool, Field(description="Also analyse the top results by ear (type, pitch, tempo, key)")] = True,
     max_results: Annotated[int, Field(ge=1, le=100, description="Most files to return")] = 15,
     refresh: Annotated[bool, Field(description="Re-scan the folders for new files")] = False,
+    style: Annotated[str | None, Field(description=(
+        "The song's genre: drum hits (role kick, snare, clap, closed/open hat) are ranked by how well they "
+        "measure against its drums (weight under 90 Hz, decay, brightness, punch), best first"))] = None,
 ) -> dict:
     """Searches the audio files in the user's sample folders (sample_folders) by
     name, role, loop tempo and key, and (by default) listens to the top results to
-    say what each actually is. Use it to find drum hits, loops, risers or vocals;
+    say what each actually is. With style and a drum role, the hits are ranked by fit to
+    the genre's drums, and lo-fi files (8-bit, or recorded under 32 kHz) are flagged unless
+    the style is lo-fi. Use it to find drum hits, loops, risers or vocals;
     place_loop puts a loop in time and key, build_drum_kit and
     build_sampled_instrument turn hits into playable instruments. (Saved plugin
     sounds are in list_sounds.) Read-only."""
     if refresh:
         library.index(refresh=True)
     hits = library.search(search, role, kind, bpm, key)
+    target, lofi_ok = None, False
+    if style and role:
+        from . import genres
+        from .genres import palettes
+
+        g = genres.find(style)
+        lane = {"closed hat": "hat", "open hat": "hat", "hat": "hat", "hats": "hat", "hihat": "hat", "hi-hat": "hat",
+                "hh": "hat", "rim": "snare"}.get(role.lower(), role.lower())
+        p = palettes.palette(g)
+        target = (p.drums.get(lane) if p else None)
+        lofi_ok = any(w in f"{g.name} {g.family} {' '.join(g.aliases)}".lower()
+                      for w in ("lo-fi", "lofi", "chiptune", "boom bap", "8-bit", "vaporwave"))
+    if target is not None and listen:
+        # Rank by fit: listen to a wider pool first (results are remembered).
+        pool = hits[: max(max_results * 3, 30)]
+        fresh = {}
+        for f in pool:
+            if (f.get("analysis") or {}).get("v") != samplelib.ANALYSIS_VERSION:
+                try:
+                    f["analysis"] = fresh[f["path"]] = samplelib.analyze(f["path"])
+                except Exception as e:  # noqa: BLE001
+                    f["analysis"] = {"error": str(e)}
+        library.remember_many(fresh)
+        for f in pool:
+            heard = f["analysis"]
+            if heard.get("kind") != "one-shot" or "sub_share" not in heard:
+                f["_fit"], f["_why"] = 99.0, ["not a single hit that could be measured (a loop, silent or unreadable)"]
+                continue
+            fit, why = samplelib.drum_fit(heard, target)
+            if f["analysis"].get("lofi") and not lofi_ok:
+                fit += 2.0
+                why = why + ["lo-fi file (8-bit, or recorded under 32 kHz): sounds dated for this style"]
+            f["_fit"], f["_why"] = fit, why
+        hits = sorted(pool, key=lambda f: f["_fit"]) + hits[len(pool):]
     shown = []
     for f in hits[:max_results]:
         entry = {"path": f["path"], "name": f["name"], "folder": f["folder"], "duration_s": f.get("duration_s"),
                  **({"roles_from_name": f["roles"]} if f.get("roles") else {}),
                  **({"bpm_from_name": f["bpm"]} if f.get("bpm") else {}),
                  **({"key_from_name": f["key"]} if f.get("key") else {})}
+        if "_fit" in f:
+            # score: 0 fits the genre's drums, lower is better; off: what falls outside its ranges.
+            entry["fit"] = {"score": f["_fit"], "off": f["_why"]} if f["_why"] else {"score": 0.0}
         if listen:
             analysis = f.get("analysis")
             if analysis is None:
@@ -86,6 +130,9 @@ def find_samples(
         shown.append(entry)
     total = len(library.index().get("files", []))
     out = {"matches": len(hits), "shown": shown, "library_files": total}
+    if target is not None:
+        out["fit"] = "ranked by fit to the genre's drums: score 0 fits, lower is better; off says what's outside"
+
     if not hits:
         out["tip"] = ("Nothing matched. Try fewer words, a role instead of a name, or sample_folders(add=...) to "
                       "index another folder.")
@@ -165,25 +212,49 @@ GM_LANES = {"kick": 36, "kick 2": 35, "rim": 37, "snare": 38, "clap": 39, "snare
             "claves": 75, "conga": 63, "bongo": 60}
 
 
+class Layer(BaseModel):
+    path: str = Field(description="Sample file for the layer")
+    gain_db: float = Field(-6.0, ge=-30, le=6, description=(
+        "Its level against the lane's main sample (negative = quieter); a layer plays on every velocity"))
+
+
+def velocity_bands(n: int) -> list[tuple[int, int]]:
+    """MIDI velocity 1-127 split into n bands, softest first."""
+    edges = [1 + round(i * 127 / n) for i in range(n + 1)]
+    return [(edges[i], edges[i + 1] - 1 if i < n - 1 else 127) for i in range(n)]
+
+
 @tool()
 def build_drum_kit(
     track: Annotated[str | int, Field(description="An empty track, or one without another instrument")],
-    samples: Annotated[dict[str, str], Field(description=(
-        "Drum lane -> sample file, e.g. {'kick': 'C:/.../XOX kick1.wav', 'snare': '...', 'closed hat': '...'}. "
+    samples: Annotated[dict[str, str | list[str]], Field(description=(
+        "Drum lane -> sample file, or a list of 2-4 alternatives for the lane (velocity splits: the quietest "
+        "sample on the softest hits, so a humanised part alternates between them and accents hit harder), e.g. "
+        "{'kick': 'C:/.../kick1.wav', 'snare': ['.../snare a.wav', '.../snare b.wav'], 'closed hat': '...'}. "
         "Lanes: kick, snare, clap, rim, closed hat, pedal hat, open hat, low/mid/high tom, crash, ride, "
         "tambourine, cowbell, shaker, or any other name (placed from C4 up)"))],
+    layers: Annotated[dict[str, list[Layer]] | None, Field(description=(
+        "Extra samples that play with every hit of a lane, at their own level: a click or a sub under the kick, "
+        "a clap on the snare, e.g. {'kick': [{'path': '.../click.wav', 'gain_db': -8}]}"))] = None,
     trim_silence: Annotated[bool, Field(description="Report samples that start late (silence at the start)")] = True,
     velocity_db: Annotated[float, Field(ge=-40, le=0, description="Level at the softest velocity: -18 lets ghost notes and accents work, 0 ignores velocity")] = -18.0,
     release_s: Annotated[float | None, Field(gt=0, le=10, description="Cut each hit this long after its note ends (for samples with long tails, e.g. 0.2 kicks, 0.45 taiko); default: play the whole sample")] = None,
 ) -> dict:
-    """Builds a drum kit from sample files in REAPER's own sampler (one
-    ReaSamplOmatic5000 per drum, on the General MIDI keys), so drum patterns and genre
-    grooves land on the right sounds and every sample can be swapped by name later.
-    Works with any samples, including the ones other instruments ship with."""
+    """Builds a drum kit from sample files in REAPER's own sampler (ReaSamplOmatic5000
+    on the General MIDI keys), so drum patterns and genre grooves land on the right
+    sounds and every sample can be swapped by name later. A lane can have alternatives
+    split by velocity (no machine-gun repeats, real dynamics) and layers that play with
+    each hit (weight and snap a single sample lacks). Works with any samples, including
+    the ones other instruments ship with; find_samples(role=..., style=...) picks ones
+    that fit the genre. Building again on the same track adds samplers to it; to swap a
+    lane's sample later, change its sampler (get_track_details lists them by lane)."""
     pads, used = [], set()
     extra = 60
-    for lane, path in samples.items():
-        path = _check_audio(path)
+    setup: list[dict] = []  # per pad: velocity band and level, set once the samplers exist
+    for lane, given in samples.items():
+        paths = [_check_audio(x) for x in (given if isinstance(given, list) else [given])]
+        if not paths or len(paths) > 8:
+            raise ValueError(f"give the '{lane}' lane 1 to 8 samples")
         key = lane.strip().lower()
         note = GM_LANES.get(key)
         if note is None:
@@ -196,13 +267,51 @@ def build_drum_kit(
                 extra += 1
             note = extra
         used.add(note)
-        pads.append({"note": note, "path": path, "name": f"{lane} - {Path(path).stem}"})
+        if len(paths) > 1:
+            # Softest sample on the lowest velocities: alternatives double as velocity layers.
+            levels = {}
+            for x in paths:
+                try:
+                    levels[x] = samplelib.analyze(x).get("level_db")
+                    if levels[x] is None:
+                        clip, fs, _ = samplelib._load(x, seconds=1.0)
+                        levels[x] = 10 * math.log10(float(np.mean(np.square(clip[: int(0.3 * fs)]))) + 1e-20)
+                except Exception:  # noqa: BLE001
+                    levels[x] = 0.0
+            paths.sort(key=lambda x: levels[x])
+        for x, (lo, hi) in zip(paths, velocity_bands(len(paths)) if len(paths) > 1 else [(1, 127)]):
+            pads.append({"note": note, "path": x, "name": f"{lane} - {Path(x).stem}"})
+            setup.append({"lane": lane, "min_vel": lo, "max_vel": hi, "gain_db": 0.0, "layer": False})
+        for layer in (layers or {}).get(lane, []):
+            lp = _check_audio(layer.path)
+            pads.append({"note": note, "path": lp, "name": f"{lane} layer - {Path(lp).stem}"})
+            setup.append({"lane": lane, "min_vel": 1, "max_vel": 127, "gain_db": layer.gain_db, "layer": True})
+    unknown = set(layers or {}) - set(samples)
+    if unknown:
+        raise ValueError(f"layers for lanes that have no sample: {', '.join(sorted(unknown))}")
     if isinstance(track, str) and not any(t["name"] == track for t in call("get_project_overview").get("tracks", [])):
         call("create_track", name=track)
     result = call("build_sampler_kit", timeout=120.0, track=track, pads=pads, velocity_db=velocity_db, release_s=release_s)
-    out = {"track": result.get("track"),
-           "kit": {p["name"].split(" - ")[0]: f"{theory.midi_to_note(p['note'])} ({p['note']})" for p in pads},
+    for pad, cfg in zip(result.get("pads", []), setup):
+        changes = []
+        if (cfg["min_vel"], cfg["max_vel"]) != (1, 127):
+            changes += [{"parameter": "Minimum velocity", "display_value": cfg["min_vel"]},
+                        {"parameter": "Maximum velocity", "display_value": cfg["max_vel"]}]
+        if cfg["gain_db"]:
+            changes.append({"parameter": "Volume", "display_value": cfg["gain_db"]})
+        if changes:
+            call("set_fx_parameters", track=track, fx=pad["fx"], changes=changes)
+    kit: dict = {}
+    for p, cfg in zip(pads, setup):
+        entry = kit.setdefault(cfg["lane"], {"key": f"{theory.midi_to_note(p['note'])} ({p['note']})", "samples": []})
+        entry["samples"].append(Path(p["path"]).stem + (
+            f" (layer, {cfg['gain_db']:+g} dB)" if cfg["layer"] else
+            f" (velocity {cfg['min_vel']}-{cfg['max_vel']})" if (cfg["min_vel"], cfg["max_vel"]) != (1, 127) else ""))
+    out = {"track": result.get("track"), "kit": kit,
            "note": "Lanes sit on General MIDI keys, so add_drum_pattern and add_genre_groove find them without a drum map."}
+    if any(len(v["samples"]) > 1 for v in kit.values()):
+        out["tip"] = ("lanes with alternatives switch sample by velocity: give the part a feel (apply_feel) or "
+                      "varied velocities so they alternate")
     if trim_silence:
         late = []
         for p in pads:

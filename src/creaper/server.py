@@ -41,12 +41,12 @@ in order and run the check named after each step before moving on):
  2. Form: new_project_tab, set_tempo, then a named region for every section, bar for bar
     from the profile's form (club tracks 5-7 minutes with DJ intro and outro; pop and
     hip-hop 3-4). Never shorten sections to save work. Check: get_project_overview.
- 3. Sounds: for each part find_arturia_presets (type, subtype, character, genre) and
-    ask the user once for all the picks (track, plugin, browser_path); lay the parts down
-    on a placeholder sound meanwhile. If the user isn't there or declines, audition_sounds
-    (saved sounds and presets REAPER can see); program a synth only to adjust a sound.
-    Check: audition_instrument (in tune, right register, no arpeggio or sequence of its
-    own), then save_sound the keepers.
+ 3. Sounds: for each part, on its own track, audition_sounds(candidates="arturia", role,
+    style=<the genre>, character) chooses by listening among Arturia's factory presets
+    (the track needs no instrument first); load_arturia_preset loads one you picked; the
+    user's saved sounds for this song are candidates="library". Program a synth only to
+    adjust a sound. Check: audition_instrument (in tune, right register, no arpeggio or
+    sequence of its own); save_sound the keepers.
  4. Parts, section by section: each section gets its own version of each part, plus a
     contrasting idea (a B part, a counter-melody, a breakdown with new chords or bass).
     Check: analyze_harmony.
@@ -74,7 +74,8 @@ When the user complains, measure before changing anything:
 - harsh, piercing, hurts on headphones: compare_mix_to_style and measure_tracks
   (harsh_pct_p95); cut 2-3 dB around 3 kHz on the worst track. Never boost to compensate.
 - muddy, boomy: compare_mix_to_style (mud), measure_tracks energy; high-pass and dip.
-- fake, cheap, dated, "90s game music": find_arturia_presets and audition_sounds; layer.
+- fake, cheap, dated, "90s game music": audition_sounds(candidates="arturia") with the
+  role and genre (find_arturia_presets to browse); layer.
 - stiff, robotic, mechanical: check_groove; apply_feel with the role and genre feel.
 - out of tune: check_tuning; audition_sounds reports each patch's tuning.
 - clipping, distorted, squashed: analyze_audio (clipped_runs, crest), a lower target.
@@ -99,16 +100,20 @@ Sounds:
   piano. If nothing close is installed, say what you're using; never call a sound
   something it isn't.
 - Designed factory presets sound finished; a patch built from a default rarely does.
-  Find them with find_arturia_presets, then add the plugin and ask the user to pick the
-  preset at its browser_path (creaper can't load Arturia presets itself yet), or use
-  audition_sounds, which loads presets REAPER can see and the user's saved sounds,
-  measures each the way the part plays and keeps the best fit.
+  audition_sounds(candidates="arturia") loads Arturia presets for the role across the
+  installed instruments, measures each the way the part plays and keeps the best fit;
+  load_arturia_preset loads one by name. Other plugins: audition_sounds with the presets
+  REAPER can see and the user's saved sounds.
 - To adjust a sound: get_fx_parameters (search "cutoff", "env", "attack", "reson"...),
   then set_fx_parameters with display_value for numbers and display_text for menus.
   Move controls part way: brightness, resonance, drive and presence at their extremes
   sound harsh and cheap. Say in a sentence what you set.
-- Layer for weight: a bass is a mono sub plus a filtered mid layer; a pad is two synths,
-  one high-passed; a lead can take an octave-down double 8 dB under it.
+- Layer for weight with layer_instrument, once the part is written (the layers play its
+  MIDI): a bass is a mono sub (octave -1, low pass
+  ~180 Hz) under a filtered mid layer; a pad is two synths, one high-passed and wide; a
+  lead can take an octave-down double 8 dB under it. Genre palettes (get_genre_profile)
+  name the layers that fit the style. Drum kits layer too (build_drum_kit layers=, a
+  click or sub under the kick), and alternatives per lane avoid machine-gun repeats.
 - Saved sounds tagged for another project are anchors for that project, not a palette:
   give each song its own sounds. Offer to save_sound a sound the user likes.
 - Prefer the user's own plugins (list_installed_fx, browse by category) over REAPER's
@@ -163,8 +168,8 @@ saying it sounds right: analyze_audio (one thing in depth), measure_tracks (ever
 in one pass), measure_structure, check_groove, check_tuning, check_vocal_clarity,
 show_spectrogram (look for mud, harshness, crowded or empty sections). Figure things out
 before asking: audition_instrument, map_drum_kit, get_fx_parameters, list_fx_presets,
-find_notes. Ask only for what no tool can reach (a plugin's own browser, hardware,
-taste), and then say exactly what to click. Save what will matter again (save_drum_map,
+find_notes. Ask only for what no tool can reach (a non-Arturia plugin's own browser,
+hardware, taste), and then say exactly what to click. Save what will matter again (save_drum_map,
 save_sound, save_note).
 
 Samples and vocals:
@@ -440,7 +445,9 @@ def create_track(
     instrument: Annotated[str | None, Field(description="Instrument plugin to load, e.g. 'Analog Lab V', 'Pigments', 'ReaSynth' (see list_installed_fx kind='instrument')")] = None,
     position: Annotated[int | None, Field(description="Track number it should become; default: last")] = None,
     color: Annotated[str | None, Field(description="#RRGGBB")] = None,
-    show_instrument: Annotated[bool, Field(description="Open the instrument's window so the user can pick a sound")] = False,
+    show_instrument: Annotated[bool, Field(description=(
+        "Open the instrument's window so the user can pick a sound (not needed for Arturia instruments: "
+        "load_arturia_preset and audition_sounds load their presets)"))] = False,
 ) -> dict:
     """Adds one new track, optionally with an instrument plugin so MIDI on it makes
     sound. For folders use create_folder, for submix buses create_bus, and for a
@@ -811,7 +818,8 @@ def save_sound(
 ) -> dict:
     """Saves the plugin's current sound to the user's sound library, so it can be
     loaded on any track in any project. Works for sounds picked in a plugin's own
-    preset browser (Arturia, etc.), which REAPER can't otherwise see."""
+    preset browser, which REAPER can't otherwise see, and ones loaded with
+    load_arturia_preset or audition_sounds."""
     existing = next((e for e in sound_library.search() if e["name"].lower() == name.strip().lower()), None)
     if existing and not overwrite:
         raise ValueError(f"there's already a sound named '{existing['name']}'; pick another name or set overwrite=true")
@@ -917,6 +925,9 @@ def set_send(
         "Where the send taps the track: post-fader (follows the fader; usual for reverb and delay), "
         "pre-fx (the raw input), or post-fx (after the effects, before the fader)"))] = None,
     remove: Annotated[bool, Field(description="Delete the send instead")] = False,
+    midi_only: Annotated[bool, Field(description=(
+        "Send the MIDI only, no audio: another track's instrument plays this track's notes "
+        "(layer_instrument does this for a whole layered part)"))] = False,
 ) -> dict:
     """Creates a send from one track to another (e.g. vocals to a reverb bus), adjusts
     an existing one, or removes it. Only the arguments given change. For one-call
@@ -924,7 +935,7 @@ def set_send(
     add_parallel_compression; get_routing shows every send. Returns the send's
     settings, or that it was removed."""
     return call("set_send", source=source, destination=destination, volume_db=volume_db,
-                pan=pan, mute=mute, mode=mode, remove=remove)
+                pan=pan, mute=mute, mode=mode, remove=remove, midi_only=midi_only)
 
 
 # ----------------------------------------------------------------- analysis
@@ -1845,7 +1856,8 @@ def compose(genre: str, key: str = "", bars: str = "") -> str:
         "add_chord_progression with the style's voicing and comping, write_melody: try a few seeds). Then make "
         "it your own: a contrasting B idea, each section's own variation of the parts, something changing every "
         "8 bars, fills, risers and automation at the section changes, and one signature element.\n"
-        "4. Sounds: find_arturia_presets and audition_sounds for each part before programming anything; then "
+        f"4. Sounds: audition_sounds(candidates='arturia', role=..., style='{genre}') for each part before "
+        "programming anything; then "
         "analyze_harmony and check_groove to check the result and fix anything off.\n"
         "5. measure_structure with the genre: fix copied sections, long loops and a flat energy arc.\n"
         "6. Tell me in a few lines what you wrote, how long it is, what changes from section to section, and why "
@@ -1859,10 +1871,12 @@ def design_sound(description: str, track: str = "") -> str:
     return (
         f"Design this sound: {description}" + (f", on track {track}" if track else "") + ".\n"
         "1. find_notes for my taste and notes on the synth; list_sounds for a close match in my library.\n"
-        "2. Otherwise pick the best-suited synth I have and program it with get_fx_parameters and "
-        "set_fx_parameters (oscillators, filter, envelopes, effects).\n"
-        "3. Play it to me (write a short phrase if the track is empty), measure if useful, and refine.\n"
-        "4. Tell me in a line what you set, and offer to save_sound it."
+        "2. audition_sounds(candidates='arturia') or find_arturia_presets for a factory preset close to it; "
+        "load the best (load_arturia_preset).\n"
+        "3. Program only what's still missing with get_fx_parameters and set_fx_parameters (oscillators, filter, "
+        "envelopes, effects); with nothing close, pick the best-suited synth I have and program it.\n"
+        "4. Play it to me (write a short phrase if the track is empty), measure if useful, and refine.\n"
+        "5. Tell me in a line what you set, and offer to save_sound it."
     )
 
 

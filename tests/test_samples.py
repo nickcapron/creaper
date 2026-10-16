@@ -157,3 +157,132 @@ def test_very_short_samples_can_be_analysed(tmp_path):
     assert samplelib.onset_envelope(click, fs) is not None
     assert samplelib.analyze(str(path))
     assert perception.spectrogram_png(click, fs)[:4] == b"\x89PNG"
+
+
+
+# ------------------------------------------------------- drums by measurement
+
+FS44 = 44100
+
+
+def _kick(fs=FS44):
+    t = np.arange(int(0.6 * fs)) / fs
+    body = np.sin(2 * np.pi * (50 + 80 * np.exp(-t * 40)) * t) * np.exp(-t * 6)
+    click = np.random.default_rng(0).standard_normal(t.size) * np.exp(-t * 400) * 0.6
+    return 0.8 * (body + click)
+
+
+def _hat(fs=FS44):
+    t = np.arange(int(0.15 * fs)) / fs
+    return 0.5 * np.random.default_rng(1).standard_normal(t.size) * np.exp(-t * 40)
+
+
+def test_hit_measures_tell_a_kick_from_a_hat():
+    kick, hat = samplelib.hit_measures(_kick(), FS44), samplelib.hit_measures(_hat(), FS44)
+    assert kick["sub_share"] > 0.4 and hat["sub_share"] < 0.05
+    assert kick["punch_db"] > 3
+    assert hat["top_hz"] > 15000
+
+
+def test_lofi_files_are_flagged(tmp_path):
+    import soundfile as sf
+    from scipy import signal
+    sf.write(str(tmp_path / "clean.wav"), _hat(), FS44, subtype="PCM_24")
+    sf.write(str(tmp_path / "eight.wav"), _hat(), FS44, subtype="PCM_U8")
+    low_rate = signal.resample_poly(_hat(), 1, 2)  # an old sampler's 22 kHz file
+    sf.write(str(tmp_path / "dull.wav"), low_rate, FS44 // 2, subtype="PCM_16")
+    sf.write(str(tmp_path / "kick.wav"), _kick(), FS44, subtype="PCM_24")
+    assert not samplelib.analyze(str(tmp_path / "kick.wav")).get("lofi")  # a kick has no top end anyway
+    clean, eight, dull_ = (samplelib.analyze(str(tmp_path / n)) for n in ("clean.wav", "eight.wav", "dull.wav"))
+    assert not clean.get("lofi") and clean["bit_depth"] == 24 and clean["v"] == samplelib.ANALYSIS_VERSION
+    assert eight["lofi"] and eight["bit_depth"] == 8
+    assert dull_["lofi"]
+
+
+def test_drum_fit_scores_against_a_genre_target():
+    from creaper import genres
+    from creaper.genres import palettes
+    house_kick = palettes.palette(genres.find("house")).drums["kick"]
+    good = {"sub_share": 0.9, "decay_s": 0.3, "punch_db": 2}
+    thin = {"sub_share": 0.05, "decay_s": 0.3, "punch_db": 2}
+    assert samplelib.drum_fit(good, house_kick) == (0.0, [])
+    score, why = samplelib.drum_fit(thin, house_kick)
+    assert score > 2 and "sub share" in why[0]
+
+
+def test_find_samples_ranks_kicks_for_the_style(tmp_path, monkeypatch):
+    import soundfile as sf
+    from creaper import server  # noqa: F401
+    from creaper import sample_tools
+    folder = tmp_path / "kicks"
+    folder.mkdir()
+    sf.write(str(folder / "a thin kick.wav"), _hat(), FS44, subtype="PCM_24")   # named kick, sounds like a click
+    sf.write(str(folder / "b deep kick.wav"), _kick(), FS44, subtype="PCM_24")
+    lib = samplelib.SampleLibrary(tmp_path / "cfg")
+    lib.set_folders([str(folder)])
+    monkeypatch.setattr(sample_tools, "library", lib)
+    out = sample_tools.find_samples(role="kick", style="house")
+    assert [s["name"] for s in out["shown"]][0].startswith("b deep kick")
+    assert out["shown"][0]["fit"]["score"] <= out["shown"][1]["fit"]["score"]
+
+
+def test_velocity_bands_cover_every_velocity_once():
+    from creaper import server  # noqa: F401
+    from creaper.sample_tools import velocity_bands
+    assert velocity_bands(1) == [(1, 127)]
+    for n in (2, 3, 4):
+        bands = velocity_bands(n)
+        assert bands[0][0] == 1 and bands[-1][1] == 127
+        assert all(b[0] == a[1] + 1 for a, b in zip(bands, bands[1:]))
+
+
+def test_build_drum_kit_with_alternatives_and_layers(tmp_path, monkeypatch):
+    import soundfile as sf
+    from creaper import server  # noqa: F401
+    from creaper import sample_tools
+    loud, soft, click = tmp_path / "snare loud.wav", tmp_path / "snare soft.wav", tmp_path / "click.wav"
+    sf.write(str(loud), _hat() * 1.0, FS44)
+    sf.write(str(soft), _hat() * 0.2, FS44)
+    sf.write(str(click), _hat(), FS44)
+    kick = tmp_path / "kick.wav"
+    sf.write(str(kick), _kick(), FS44)
+    calls = []
+
+    def fake_call(cmd, **kw):
+        calls.append((cmd, kw))
+        if cmd == "get_project_overview":
+            return {"tracks": [{"name": "Drums"}]}
+        if cmd == "build_sampler_kit":
+            return {"track": {"name": "Drums"}, "pads": [{"fx": i + 1, "note": p["note"]} for i, p in enumerate(kw["pads"])]}
+        return {}
+    monkeypatch.setattr(sample_tools, "call", fake_call)
+    out = sample_tools.build_drum_kit(track="Drums", samples={"kick": str(kick), "snare": [str(loud), str(soft)]},
+                                      layers={"kick": [sample_tools.Layer(path=str(click), gain_db=-9)]}, trim_silence=False)
+    pads = next(kw for cmd, kw in calls if cmd == "build_sampler_kit")["pads"]
+    assert [p["note"] for p in pads] == [36, 36, 38, 38]          # the layer shares the kick's key
+    sets = [kw for cmd, kw in calls if cmd == "set_fx_parameters"]
+    by_fx = {kw["fx"]: {c["parameter"]: c["display_value"] for c in kw["changes"]} for kw in sets}
+    assert by_fx[2] == {"Volume": -9}                              # the kick's click layer
+    assert by_fx[3] == {"Minimum velocity": 1, "Maximum velocity": 64}   # the soft snare takes the soft hits
+    assert by_fx[4] == {"Minimum velocity": 65, "Maximum velocity": 127}
+    assert out["kit"]["snare"]["samples"] == ["snare soft (velocity 1-64)", "snare loud (velocity 65-127)"]
+    assert "layer, -9 dB" in out["kit"]["kick"]["samples"][1]
+    with pytest.raises(ValueError, match="layers for lanes that have no sample"):
+        sample_tools.build_drum_kit(track="Drums", samples={"kick": str(kick)},
+                                    layers={"clap": [sample_tools.Layer(path=str(click))]}, trim_silence=False)
+
+
+
+def test_a_loop_named_kick_cant_outrank_real_kicks(tmp_path, monkeypatch):
+    import soundfile as sf
+    from creaper import server  # noqa: F401
+    from creaper import sample_tools
+    folder = tmp_path / "kicks"
+    folder.mkdir()
+    sf.write(str(folder / "a kick loop.wav"), np.tile(_kick()[: FS44 // 2], 8), FS44, subtype="PCM_24")
+    sf.write(str(folder / "b deep kick.wav"), _kick(), FS44, subtype="PCM_24")
+    lib = samplelib.SampleLibrary(tmp_path / "cfg")
+    lib.set_folders([str(folder)])
+    monkeypatch.setattr(sample_tools, "library", lib)
+    shown = sample_tools.find_samples(role="kick", style="house")["shown"]
+    assert shown[0]["name"].startswith("b deep kick")

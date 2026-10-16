@@ -1,6 +1,6 @@
 -- @description creaper bridge: lets Claude work in REAPER through the creaper MCP server
 -- @author nickcapron
--- @version 0.23.2
+-- @version 0.24.0
 -- @link https://github.com/nickcapron/creaper
 -- @provides
 --   [nomain] creaper_json.lua
@@ -13,7 +13,7 @@
 --   Every change it makes is a named undo point ("creaper: ..."), so Ctrl+Z
 --   reverts anything Claude did.
 
-local BRIDGE_VERSION = "0.23.2"
+local BRIDGE_VERSION = "0.24.0"
 local PROTOCOL = 2
 
 ----------------------------------------------------------------------- JSON
@@ -1329,6 +1329,12 @@ function commands.set_send(p)
     if p.mode then
       local mode = SEND_MODE_IDS[p.mode] or fail("send mode must be post-fader, pre-fx or post-fx")
       reaper.SetTrackSendInfo_Value(src, 0, index, "I_SENDMODE", mode)
+    end
+    if p.midi_only then
+      -- MIDI on all channels, no audio: a layer plays the source track's notes without
+      -- hearing its sound (a new send carries audio and MIDI).
+      reaper.SetTrackSendInfo_Value(src, 0, index, "I_SRCCHAN", -1)
+      reaper.SetTrackSendInfo_Value(src, 0, index, "I_MIDIFLAGS", 0)
     end
     return send_info(src, 0, index)
   end)

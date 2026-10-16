@@ -30,7 +30,7 @@ def test_instructions_open_with_the_song_checklist():
     steps = re.findall(r"^\s*(\d+)\. ", text[checklist:text.index("When the user complains")], re.M)
     assert steps == [str(i) for i in range(1, len(steps) + 1)] and len(steps) >= 10
     for check in ("measure_structure", "check_groove", "measure_tracks(per_section=True)", "compare_mix_to_style",
-                  "master_to_target", "check_ending", "export_mix", "find_arturia_presets"):
+                  "master_to_target", "check_ending", "export_mix", 'candidates="arturia"'):
         assert check in text[checklist:text.index("When the user complains")], check
 
 
@@ -53,7 +53,7 @@ def test_every_tool_the_guidance_names_exists():
 
 def test_panel_prompt_carries_the_workflow():
     p = chat.PANEL_PROMPT
-    assert "find_arturia_presets" in p and "program the synths yourself" not in p
+    assert "audition_sounds" in p and "load_arturia_preset" in p and "program the synths yourself" not in p
     for check in ("get_genre_profile", "measure_structure", "measure_tracks", "compare_mix_to_style", "check_ending"):
         assert check in p
 

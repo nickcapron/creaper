@@ -509,11 +509,29 @@ def get_genre_profile(
         "length": {"bars": form_bars, "minutes": f"{int(seconds // 60)}:{int(seconds % 60):02d}",
                    "note": "a full track in this style; write all of it unless the user asks for a sketch or loop"},
         "instruments": list(g.instruments), "sound_design": g.sound_design, "production": g.production,
+        **_palette_view(g),
         "theory": g.theory,
         "mix": {"integrated_lufs": list(m.lufs), "loudness_range_lu": list(m.lra), "true_peak_dbtp": m.true_peak,
                 "low_end": m.low_end, "tone": m.tone, "stereo_width": m.width},
         "caveat": "rules of thumb from the records that define the style, not laws",
     }
+
+
+def _palette_view(g) -> dict:
+    """The genre's sound palette (genres/palettes.py), as audition_sounds(style=) uses it."""
+    from .genres import palettes
+
+    p = palettes.palette(g)
+    if not p:
+        return {}
+    sounds = {role: {k: v for k, v in (("type", s.type), ("subtype", s.subtype),
+                                        ("characteristics", list(s.characteristics) or None),
+                                        ("genre_tag", s.genre), ("layers", s.layers or None)) if v}
+              for role, s in p.sounds.items()}
+    return {"sound_palette": {"by_role": sounds, "drums": p.notes,
+                              "use": "audition_sounds(candidates='arturia', role=..., style=<this genre>); layers: "
+                                     "layer_instrument(track, layers=[{'instrument': 'ReaSynth', 'octave': -1, "
+                                     "'lowpass_hz': 180, 'volume_db': -4}])"}}
 
 
 # ------------------------------------------------------------- writing tools
@@ -871,8 +889,9 @@ def sketch_song(
 
 # ---------------------------------------------------------------- listening
 
-def _render_track(track: str | int, start_bar: float, end_bar: float):
-    """Renders a track's range and returns (mono audio, sample rate); deletes the file."""
+def _render_track(track: str | int, start_bar: float, end_bar: float, stereo: bool = False):
+    """Renders a track's range and returns (mono audio, or frames x channels with stereo,
+    and the sample rate); deletes the file."""
     import os
     from pathlib import Path
 
@@ -891,7 +910,7 @@ def _render_track(track: str | int, start_bar: float, end_bar: float):
         if not os.environ.get("CREAPER_KEEP_RENDERS"):
             for f in render["files"]:
                 Path(f).unlink(missing_ok=True)
-    return audio.mean(axis=1), fs
+    return (audio if stereo else audio.mean(axis=1)), fs
 
 
 def _listen(track: str | int, pitches: list[int], channel: int | list[int], note_seconds: float, gap_seconds: float,
@@ -920,7 +939,8 @@ def _listen(track: str | int, pitches: list[int], channel: int | list[int], note
                    "velocity": velocity, "channel": channels[0]} for p in chord or []]
         call("add_midi_notes", item_id=item["id"], notes=notes, replace=True)
         context = call("get_instrument_notes", item_id=item["id"], channel=channels[0])
-        audio, fs = _render_track(track, start_bar, start_bar + length_bars)
+        both, fs = _render_track(track, start_bar, start_bar + length_bars, stereo=True)
+        audio = both.mean(axis=1)
     finally:
         call("delete_item", item_id=item["id"])
     results = []
@@ -929,6 +949,10 @@ def _listen(track: str | int, pitches: list[int], channel: int | list[int], note
         f = listen.features(audio[i * slot: (i + 1) * slot], fs, note_off=None if one_shots else note_seconds,
                             expected_hz=None if one_shots else listen.note_freq(p))
         f.update({"note": theory.midi_to_note(p), "pitch": p, "channel": channels[i]})
+        if not one_shots and not f.get("silent"):
+            width = listen.width_db(both[i * slot: (i + 1) * slot], fs, note_seconds)
+            if width is not None:
+                f["width_db"] = width
         results.append(f)
     if chord:
         x = audio[len(pitches) * slot: (len(pitches) + 1) * slot]
@@ -1114,8 +1138,9 @@ def audition_instrument(
         patterned.append("a held C major chord")
     if patterned:
         out["warning"] = (f"held notes ({', '.join(patterned)}) play a pattern of their own: the patch has a built-in "
-                          "arpeggiator, sequencer or gate. Turn it off in the plugin (get_fx_parameters search "
-                          "'arp', 'seq', 'gate') or choose another sound; written parts would be re-played by it")
+                          "arpeggiator, sequencer, gate or tempo-synced LFO (a wobble). Turn it off in the plugin "
+                          "(get_fx_parameters search 'arp', 'seq', 'gate', 'lfo') or choose another sound, unless "
+                          "that movement is wanted; written parts would be re-played by it")
     shifted = listen.transposition(results)
     if shifted:
         out["transposed_warning"] = (f"it sounds {shifted:+d} semitones from every note played: the patch is tuned to "
