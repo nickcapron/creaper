@@ -1,6 +1,6 @@
 -- @description creaper chat: talk to Claude from a dockable panel inside REAPER
 -- @author nickcapron
--- @version 0.19.3
+-- @version 0.19.4
 -- @link https://github.com/nickcapron/creaper
 -- @about
 --   A chat panel for creaper. Messages go to your own Claude Code (your Claude
