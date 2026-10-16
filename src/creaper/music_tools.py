@@ -895,9 +895,11 @@ def _render_track(track: str | int, start_bar: float, end_bar: float):
 
 
 def _listen(track: str | int, pitches: list[int], channel: int | list[int], note_seconds: float, gap_seconds: float,
-            velocity: int, one_shots: bool = False) -> tuple[list[dict], dict]:
+            velocity: int, one_shots: bool = False, chord: list[int] | None = None) -> tuple[list[dict], dict]:
     """Plays each pitch once on the track (in a temporary item after the end of the
-    project), renders it, measures every note, and removes the item again."""
+    project), renders it, measures every note, and removes the item again. With chord,
+    a held chord is played after them in the same render and the context gets
+    'chord_motion' (does the patch hold it, or play its notes as a pattern)."""
     from . import listen
 
     overview = call("get_project_overview")
@@ -907,12 +909,15 @@ def _listen(track: str | int, pitches: list[int], channel: int | list[int], note
     slot_s = note_seconds + gap_seconds
     slot_qn = slot_s * bpm / 60
     start_bar = int(overview["length"]["bar"]) + 2
-    length_bars = math.ceil(slot_qn * len(pitches) / qn_per_bar) + 1
+    slots = len(pitches) + (1 if chord else 0)
+    length_bars = math.ceil(slot_qn * slots / qn_per_bar) + 1
     item = call("create_midi_item", track=track, start_bar=start_bar, length_bars=length_bars, name="creaper listening")
     try:
         channels = channel if isinstance(channel, list) else [channel] * len(pitches)
         notes = [{"pitch": p, "start": round(i * slot_qn, 6), "length": round(note_seconds * bpm / 60, 6),
                   "velocity": velocity, "channel": c} for i, (p, c) in enumerate(zip(pitches, channels))]
+        notes += [{"pitch": p, "start": round(len(pitches) * slot_qn, 6), "length": round(note_seconds * bpm / 60, 6),
+                   "velocity": velocity, "channel": channels[0]} for p in chord or []]
         call("add_midi_notes", item_id=item["id"], notes=notes, replace=True)
         context = call("get_instrument_notes", item_id=item["id"], channel=channels[0])
         audio, fs = _render_track(track, start_bar, start_bar + length_bars)
@@ -925,6 +930,9 @@ def _listen(track: str | int, pitches: list[int], channel: int | list[int], note
                             expected_hz=None if one_shots else listen.note_freq(p))
         f.update({"note": theory.midi_to_note(p), "pitch": p, "channel": channels[i]})
         results.append(f)
+    if chord:
+        x = audio[len(pitches) * slot: (len(pitches) + 1) * slot]
+        context["chord_motion"] = listen.chord_motion(x, fs, note_seconds, listen.note_freq(min(chord)))
     return results, context
 
 
@@ -1069,12 +1077,15 @@ def audition_instrument(
     """Listens to the track's current sound: plays notes across the range offline (in a
     temporary item that's removed afterwards) and reports its playable range, whether
     it follows pitch (and any transposition), attack, sustain, release, brightness and
-    character (bright/dark, plucky/sustained, pad-like, noisy). Use it to check a patch
-    you designed, or to find out what an unfamiliar sound or preset is."""
+    character (bright/dark, plucky/sustained, pad-like, noisy), each note's tuning, and
+    a warning when held notes play a pattern of their own (a built-in arpeggiator,
+    sequencer or gate, which would re-play every written part). Use it to check a patch
+    you designed, or any preset before writing parts on it."""
     from . import listen
 
     pitches = [theory.note_to_midi(n) for n in notes] if notes else [24 + 12 * i for i in range(7)]
-    results, context = _listen(track, pitches, channel, note_seconds, 1.5, velocity)
+    results, context = _listen(track, pitches, channel, note_seconds, 1.5, velocity,
+                               chord=[60, 64, 67] if note_seconds >= 0.6 else None)
     instrument = context.get("instrument")
     if instrument is None:
         raise ValueError("that track has no instrument to listen to")
@@ -1090,8 +1101,23 @@ def audition_instrument(
                           if r.get(k) is not None})
             if r.get("pitch_hz"):
                 entry["sounds_as"] = theory.midi_to_note(round(69 + 12 * math.log2(r["pitch_hz"] / 440)))
+            if r.get("cents_off") is not None:
+                entry["cents_off"] = r["cents_off"]
+            if listen.plays_pattern(r):
+                entry["plays_own_pattern"] = True
         per_note.append(entry)
     out = {"instrument": instrument, "summary": listen.describe_patch(results), "notes": per_note}
+    patterned = [e["note"] for e in per_note if e.get("plays_own_pattern")]
+    if listen.plays_pattern(context.get("chord_motion") or {}):
+        patterned.append("a held C major chord")
+    if patterned:
+        out["warning"] = (f"held notes ({', '.join(patterned)}) play a pattern of their own: the patch has a built-in "
+                          "arpeggiator, sequencer or gate. Turn it off in the plugin (get_fx_parameters search "
+                          "'arp', 'seq', 'gate') or choose another sound; written parts would be re-played by it")
+    cents = [r["cents_off"] for r in results if r.get("cents_off") is not None]
+    if len(cents) >= 2 and max(cents) - min(cents) > 15:
+        out["tuning_warning"] = (f"its notes are {max(cents) - min(cents):.0f} cents apart in tuning: out of tune "
+                                 "unless a detuned sound is the point")
     late = _late_warning(results)
     if late:
         out["timing"] = late

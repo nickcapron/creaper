@@ -116,3 +116,22 @@ def test_tool(db, monkeypatch):
     assert names(out["presets"]) == ["Night Drive"] and "browser_path" in out["how_to_use"]
     none = sound_tools.find_arturia_presets(type="pad", characteristics=["metallic"])
     assert none["count"] == 0 and "Synthwave" in none["known_words"]["genres"]
+
+
+def test_presets_that_play_their_own_pattern_are_left_out_unless_asked(db):
+    c = sqlite3.connect(db)
+    c.execute("INSERT INTO Types_V2 VALUES (10, 'Sequence')")
+    c.execute("INSERT INTO Characteristics VALUES (9, 'Arpeggiated', 1)")
+    root = "C:/ProgramData/Arturia/Presets/Jup-8 V4/Factory/Factory"
+    c.execute("INSERT INTO Preset_Id (key_id, name, type_v2, subtype_v2, instrument_key, pack, file_path) "
+              f"VALUES (20, 'Arp Pad', 8, 2, 1, 1, '{root}/Arp Pad')")
+    c.execute("INSERT INTO Preset_Characteristics VALUES (100, 20, 9)")
+    c.execute("INSERT INTO Preset_Id (key_id, name, type_v2, subtype_v2, instrument_key, pack, file_path) "
+              f"VALUES (21, 'Running Seq', 10, 0, 1, 1, '{root}/Running Seq')")
+    c.commit()
+    c.close()
+    conn = arturia.connect()
+    assert "Arp Pad" not in names(arturia.find(conn, type="pad"))
+    assert "Running Seq" not in names(arturia.find(conn))
+    assert "Arp Pad" in names(arturia.find(conn, type="pad", patterns=True))
+    assert names(arturia.find(conn, type="sequence")) == ["Running Seq"]

@@ -12,6 +12,7 @@ from typing import Annotated, Literal
 
 from pydantic import Field
 
+from . import listen
 from .server import READ_ONLY, TrackRef, call, sound_library, tool
 
 Role = Literal["bass", "sub", "lead", "pad", "keys", "pluck", "bell", "arp", "strings", "brass"]
@@ -20,6 +21,11 @@ Character = Literal["bright", "dark", "punchy", "soft", "plucky", "sustained", "
 # out of tune (a pizzicato patch spread like that was heard as out of tune), unless detuned is
 # the point.
 IN_TUNE_CENTS = 15.0
+# A held chord each audition ends with, in the role's register: an arpeggiator inside a
+# patch shows itself on a chord (one held note it may just repeat).
+CHORD_PROBE = {"bass": [36, 43, 48], "sub": [36, 43, 48], "lead": [60, 64, 67], "pad": [48, 55, 60, 64],
+               "keys": [48, 55, 60, 64], "pluck": [55, 59, 62], "bell": [67, 71, 74], "arp": [55, 59, 62],
+               "strings": [55, 59, 62, 67], "brass": [55, 59, 62]}
 
 # How each role is auditioned (notes, seconds held) and what it should measure:
 # attack_ms, richness (brightness relative to the note: centroid / fundamental),
@@ -68,6 +74,11 @@ def summarise(results: list[dict]) -> dict:
         values = [r[key] for r in sounding if r.get(key) is not None]
         if values:
             out[key] = round(float(statistics.median(values)), 2)
+    from .listen import plays_pattern
+
+    patterned = sum(1 for r in sounding if plays_pattern(r) or r.get("chord_moves"))
+    if patterned:  # a built-in arpeggiator, sequencer or gate plays over the part's own notes
+        out["plays_own_pattern"] = patterned
     cents = [r["cents_off"] for r in sounding if r.get("cents_off") is not None]
     if len(cents) >= 2:  # how far apart the notes are tuned (one in tune, one 20 cents flat)
         out["tuning_spread_cents"] = round(max(cents) - min(cents), 1)
@@ -108,6 +119,11 @@ def score(measured: dict, wanted: dict[str, tuple[float, float]], detuned: bool 
     if measured.get("silent_notes"):
         return 100.0 + measured["silent_notes"], [f"{measured['silent_notes']} test notes made no sound"]
     total, why = 0.0, []
+    if measured.get("plays_own_pattern"):
+        # The part's notes would be re-played as the patch's own arpeggio or sequence.
+        total += 5.0
+        why.append(f"plays a pattern of its own on {measured['plays_own_pattern']} held notes (a built-in "
+                   "arpeggiator, sequencer or gate): turn it off in the plugin, or pick another sound")
     if not detuned:
         for key, label in (("tuning_spread_cents", "notes tuned"), ("tuning_off_cents", "off pitch by"),
                            ("drift_cents", "drifts")):
@@ -236,7 +252,10 @@ def audition_sounds(
                 else:
                     _, entry = sound_library.find(c["name"])
                     _apply(track, entry["name"], sound_library.state(entry))
-                results, _ = _listen(track, spec["notes"], 1, spec["seconds"], 1.0, 100)
+                results, context = _listen(track, spec["notes"], 1, spec["seconds"], 1.0, 100,
+                                           chord=CHORD_PROBE[role])
+                if listen.plays_pattern(context.get("chord_motion") or {}):
+                    results[0]["chord_moves"] = True  # counted by summarise
             except Exception as e:  # noqa: BLE001 - one bad candidate shouldn't stop the audition
                 ranked.append({**c, "score": 999.0, "why": [f"couldn't audition it: {e}"]})
                 continue
@@ -284,6 +303,9 @@ def find_arturia_presets(
     instrument: Annotated[str | None, Field(description="Only this Arturia instrument, e.g. 'Jup-8 V4', 'Mini V3', 'CMI'")] = None,
     search: Annotated[str | None, Field(description="Words in the preset's name or description")] = None,
     installed_only: Annotated[bool, Field(description="Only presets for Arturia plugins installed in REAPER")] = True,
+    patterns: Annotated[bool, Field(description=(
+        "Include presets that play a pattern of their own (arpeggiated, sequenced, gated); only when the part "
+        "should be that pattern, since any notes written on them are re-played by it"))] = False,
     limit: Annotated[int, Field(ge=1, le=100)] = 20,
 ) -> dict:
     """Finds sounds in Arturia's factory library (about 15,000 presets across the user's
@@ -304,7 +326,8 @@ def find_arturia_presets(
                 installed = {arturia.normalize_plugin(p.get("name", "")) for p in listed}
             except Exception as e:  # noqa: BLE001 - still useful without REAPER's plugin list
                 note = f"couldn't read the installed plugins ({e}), so presets for every Arturia instrument are listed"
-        found = arturia.find(conn, instrument, type, subtype, characteristics, genre, search, installed, limit)
+        found = arturia.find(conn, instrument, type, subtype, characteristics, genre, search, installed, limit,
+                             patterns)
         out: dict = {"count": len(found), "presets": found}
         if not found:
             out["known_words"] = arturia.vocabulary(conn)

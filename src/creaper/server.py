@@ -45,7 +45,8 @@ in order and run the check named after each step before moving on):
     ask the user once for all the picks (track, plugin, browser_path); lay the parts down
     on a placeholder sound meanwhile. If the user isn't there or declines, audition_sounds
     (saved sounds and presets REAPER can see); program a synth only to adjust a sound.
-    Check: audition_instrument (in tune, right register), then save_sound the keepers.
+    Check: audition_instrument (in tune, right register, no arpeggio or sequence of its
+    own), then save_sound the keepers.
  4. Parts, section by section: each section gets its own version of each part, plus a
     contrasting idea (a B part, a counter-melody, a breakdown with new chords or bass).
     Check: analyze_harmony.

@@ -69,6 +69,103 @@ def cents_from(hz: float, reference_hz: float) -> float:
     return (c + 600) % 1200 - 600
 
 
+# A held note that re-attacks this often, or sits off its pitch this much of the time,
+# is a patch playing a pattern of its own: a built-in arpeggiator, sequencer or gate.
+RETRIGGER_DB = 6.0        # a jump this big within RETRIGGER_S is a new attack
+RETRIGGER_S = 0.02
+OFF_PITCH_SEMITONES = 0.7  # further than vibrato goes
+PATTERN_RETRIGGERS = 2
+PATTERN_OFF_PITCH = 0.3
+MAX_DETUNE_CENTS = 100.0   # further off than this is another note, not a detuned one
+
+
+def _retriggers(seg: np.ndarray, fs: float, lowest_hz: float | None) -> int:
+    """Fast jumps in level (RETRIGGER_DB within RETRIGGER_S) inside a held sound, at
+    least 60 ms apart and above its noise floor. The level is measured over two cycles
+    of the lowest note at least, or a deep note's own waves read as ripples."""
+    hop = max(1, int(0.01 * fs))
+    width = max(hop, int(2.0 / lowest_hz * fs) if lowest_hz else hop)
+    if len(seg) < width + 10 * hop:
+        return 0
+    power = np.convolve(np.square(seg), np.ones(width) / width, mode="valid")[::hop]
+    env = 10 * np.log10(power + 1e-18)
+    lag = max(int(round(RETRIGGER_S * fs / hop)), int(np.ceil(width / hop)))
+    rise = env[lag:] - env[:-lag]
+    count, last, loud = 0, -999, env.max()
+    for i in np.flatnonzero(rise >= RETRIGGER_DB):
+        if i - last > 6 and env[i + lag] > loud - 30:
+            count += 1
+            last = i
+    return count
+
+
+def held_motion(x: np.ndarray, fs: float, start_s: float, end_s: float, expected_hz: float | None = None) -> dict:
+    """What a held note does between start_s and end_s: how many times it attacks again
+    (retriggers) and the share of 80 ms slices more than OFF_PITCH_SEMITONES from its
+    median pitch (off_pitch_share). A plain patch holds the note: both stay near 0.
+    (An arpeggiator on a single held note can just repeat it legato: chord_motion
+    catches those.)"""
+    seg = x[int(start_s * fs): int(end_s * fs)]
+    out: dict = {"retriggers": _retriggers(seg, fs, expected_hz)}
+    win, step = int(0.08 * fs), int(0.04 * fs)
+    pitches = []
+    for a in range(0, len(seg) - win, step):
+        f0, clarity = _pitch(seg[a: a + win], fs, fmin=40.0)
+        if f0 and clarity > 0.6:
+            pitches.append(12 * math.log2(f0 / 440))
+    if len(pitches) >= 4:
+        ref = float(np.median(pitches))
+        # Octave errors of the pitch tracker aren't moves.
+        dev = [abs(((p - ref) + 6) % 12 - 6) for p in pitches]
+        out["off_pitch_share"] = round(sum(d > OFF_PITCH_SEMITONES for d in dev) / len(dev), 2)
+    return out
+
+
+CHORD_STEADY = 0.85  # a slice's pitch-class mix this alike to the chord's median mix is the chord held
+
+
+def chord_motion(x: np.ndarray, fs: float, note_off: float, lowest_hz: float) -> dict:
+    """A held chord through the patch: the share of 100 ms slices whose mix of pitch
+    classes (chroma) differs from the chord's usual mix (moving_share), and retriggers.
+    A plain patch holds the chord; an arpeggiator or sequence plays its notes one after
+    another, so each slice is a different note."""
+    env = np.abs(x)
+    above = np.flatnonzero(env > env.max() * 0.03)
+    if not above.size:
+        return {}
+    start = above[0] / fs + 0.05
+    seg = x[int(start * fs): int(note_off * fs)]
+    win, step = int(0.1 * fs), int(0.05 * fs)
+    if len(seg) < win + 3 * step:
+        return {}
+    freqs = np.fft.rfftfreq(win, 1 / fs)
+    band = (freqs >= 50) & (freqs <= 5000)
+    classes = np.round(12 * np.log2(freqs[band] / 440)).astype(int) % 12
+    chromas, levels = [], []
+    for a in range(0, len(seg) - win, step):
+        spec = np.abs(np.fft.rfft(seg[a: a + win] * np.hanning(win))) ** 2
+        chroma = np.bincount(classes, weights=spec[band], minlength=12)
+        levels.append(float(chroma.sum()))
+        chromas.append(chroma / (np.linalg.norm(chroma) + 1e-18))
+    chromas, levels = np.array(chromas), np.array(levels)
+    keep = levels > levels.max() * 1e-3  # gaps between gated notes say nothing about pitch
+    if keep.sum() < 3:
+        return {}
+    ref = np.median(chromas[keep], axis=0)
+    ref /= np.linalg.norm(ref) + 1e-18
+    alike = chromas[keep] @ ref
+    # A chord's notes beat against each other at their difference (about a fifth of the
+    # lowest note's frequency for a triad): measure the level over two of those beats.
+    return {"moving_share": round(float((alike < CHORD_STEADY).mean()), 2),
+            "retriggers": _retriggers(seg, fs, lowest_hz * 0.19)}
+
+
+def plays_pattern(f: dict) -> bool:
+    """A held note or chord that moves by itself (see held_motion, chord_motion)."""
+    return (f.get("retriggers", 0) >= PATTERN_RETRIGGERS or f.get("off_pitch_share", 0) >= PATTERN_OFF_PITCH
+            or f.get("moving_share", 0) >= PATTERN_OFF_PITCH)
+
+
 def harmonic_fit(x: np.ndarray, fs: float, expected_hz: float) -> tuple[int, float, float]:
     """Which octave of the played note the sound's harmonics line up with.
 
@@ -175,18 +272,27 @@ def features(x: np.ndarray, fs: float, note_off: float | None = None, expected_h
         out["harmonicity"] = round(score, 2)
         out["octave_offset"] = k
         out["richness"] = round(out["centroid_hz"] / f0, 1)  # brightness relative to the fundamental
-        # Tuning, timed from where the sound starts (not its loudest moment, which a
-        # steady tone can reach at its very end): the note just after its attack, and
-        # for a held note its last quarter second before the note-off (a sagging or
-        # wobbly patch, a pitch envelope pulling it off).
-        on = start * hop
-        tuned, tuned_clarity = _pitch(x[on + int(0.05 * fs): on + int(0.30 * fs)], fs, fmin=25.0)
-        if tuned and tuned_clarity > 0.5:
+        # Tuning and motion are judged once the attack has settled (a slow pad still
+        # swelling up reads as the wrong pitch), timed from where the sound starts (not
+        # its loudest moment, which a steady tone can reach at its very end): the note
+        # just after its attack, and for a held note its last quarter second before the
+        # note-off (a sagging or wobbly patch, a pitch envelope pulling it off).
+        on_s = start * hop / fs
+        settle = max(0.05, out["attack_ms"] / 1000)
+        if note_off is not None:
+            settle = min(settle, max(0.05, note_off - on_s - 0.3))
+        if note_off is not None and note_off >= 0.4:
+            out.update(held_motion(x, fs, on_s + settle, note_off, expected_hz))
+        on = int((on_s + settle) * fs)
+        tuned, tuned_clarity = _pitch(x[on: on + int(0.25 * fs)], fs, fmin=25.0)
+        # More than a semitone off is another note (a transposed patch, which sounds_as
+        # and octave_offset report) or the tracker locking onto the wrong harmonics.
+        if tuned and tuned_clarity > 0.5 and abs(cents_from(tuned, expected_hz)) <= MAX_DETUNE_CENTS:
             out["cents_off"] = round(cents_from(tuned, expected_hz), 1)
             if note_off is not None and note_off >= 0.6:
                 end = min(len(x), int(note_off * fs))
-                late, late_clarity = _pitch(x[max(on + int(0.30 * fs), end - int(0.25 * fs)): end], fs, fmin=25.0)
-                if late and late_clarity > 0.5:
+                late, late_clarity = _pitch(x[max(on + int(0.25 * fs), end - int(0.25 * fs)): end], fs, fmin=25.0)
+                if late and late_clarity > 0.5 and abs(cents_from(late, tuned)) <= MAX_DETUNE_CENTS:
                     out["drift_cents"] = round(cents_from(late, tuned), 1)
     # Pitch glide: kicks and toms drop fast at the start; bass and synth notes hold.
     early, c1 = _pitch(x[a: a + int(0.07 * fs)], fs, fmin=30.0)

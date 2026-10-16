@@ -47,7 +47,7 @@ def test_audition_keeps_the_best_preset_and_restores_the_rest(monkeypatch):
             loaded["preset"] = args.get("preset")
         return {}
 
-    def fake_listen(track, pitches, channel, seconds, gap, velocity):
+    def fake_listen(track, pitches, channel, seconds, gap, velocity, chord=None):
         m = measured.get(loaded["preset"], {"attack_ms": 300, "richness": 3, "sustain_db": -2})  # the original
         return [dict(m) for _ in pitches], {"instrument": "VSTi: Synth"}
 
@@ -115,7 +115,7 @@ def _audition_fake(monkeypatch, presets, warn=(), track_fx=None):
     from creaper import music_tools
     monkeypatch.setattr(st, "call", fake_call)
     monkeypatch.setattr(st.sound_library, "search", lambda *a, **k: [])
-    monkeypatch.setattr(music_tools, "_listen", lambda track, pitches, *a: (
+    monkeypatch.setattr(music_tools, "_listen", lambda track, pitches, *a, **kw: (
         [{"attack_ms": 300, "richness": 2, "sustain_db": -2} for _ in pitches], {}))
     return loaded, calls
 
@@ -173,7 +173,7 @@ def test_the_winner_is_level_matched_to_the_original(monkeypatch):
     from creaper import music_tools
     monkeypatch.setattr(st, "call", fake_call)
     monkeypatch.setattr(st.sound_library, "search", lambda *a, **k: [])
-    monkeypatch.setattr(music_tools, "_listen", lambda track, pitches, *a: (
+    monkeypatch.setattr(music_tools, "_listen", lambda track, pitches, *a, **kw: (
         [{"attack_ms": 300, "richness": 2, "sustain_db": -2, "peak_db": levels[loaded["preset"]]} for _ in pitches], {}))
     result = st.audition_sounds(track=1, role="pad", candidates="presets")
     assert result["fader_moved_db_to_match_level"] == -10.0
@@ -214,3 +214,73 @@ def test_out_of_tune_patches_score_worse_unless_detuned_is_wanted():
     assert bad > good + 1 and any("out of tune" in w for w in why)
     allowed, why = st.score({**base, **off}, wanted, detuned=True)
     assert allowed == good and not any("out of tune" in w for w in why)
+
+
+# ------------------------------------------------------- patches with a pattern
+
+def _held(kind, seconds=1.2, fs=48000):
+    import numpy as np
+    t = np.arange(int(seconds * fs)) / fs
+    f = np.full(t.size, 220.0)
+    amp = np.minimum(1, t / 0.01)
+    if kind == "vibrato":
+        f = 220 * 2 ** (0.3 / 12 * np.sin(2 * np.pi * 6 * t))
+    elif kind == "tremolo":
+        amp = amp * 10 ** (3 * np.sin(2 * np.pi * 4 * t) / 20)
+    elif kind == "arp":  # 16ths at 120 BPM over a minor triad and its octave, each re-attacked
+        steps = np.array([0, 3, 7, 12])
+        idx = (t / 0.125).astype(int)
+        f = 220 * 2 ** (steps[idx % 4] / 12)
+        amp = np.exp(-(t % 0.125) * 18)
+    elif kind == "gate":  # a trance gate on 8ths
+        amp = np.where((t / 0.25) % 1 < 0.5, 1.0, 0.02)
+    phase = 2 * np.pi * np.cumsum(f) / fs
+    return 0.3 * amp * (np.sin(phase) + 0.4 * np.sin(2 * phase))
+
+
+@pytest.mark.parametrize("kind, expected", [("plain", False), ("vibrato", False), ("tremolo", False),
+                                            ("arp", True), ("gate", True)])
+def test_held_notes_that_play_a_pattern_are_caught(kind, expected):
+    from creaper import listen
+    f = listen.features(_held(kind), 48000, note_off=1.0, expected_hz=220)
+    assert listen.plays_pattern(f) is expected, {k: f.get(k) for k in ("retriggers", "off_pitch_share")}
+
+
+def test_a_patch_with_a_pattern_loses_the_audition():
+    wanted = st.targets("lead")
+    base = {"silent_notes": 0, "attack_ms": 5, "richness": 2, "sustain_db": -3}
+    plain = st.summarise([{"retriggers": 0, "off_pitch_share": 0.0}] * 3)
+    arp = st.summarise([{"retriggers": 6, "off_pitch_share": 0.7}] * 3)
+    assert "plays_own_pattern" not in plain and arp["plays_own_pattern"] == 3
+    good, _ = st.score({**base, **plain}, wanted)
+    bad, why = st.score({**base, **arp}, wanted)
+    assert bad >= good + 5 and any("pattern of its own" in w for w in why)
+
+
+def _chord(arp, seconds=1.2, fs=48000):
+    import numpy as np
+    t = np.arange(int(seconds * fs)) / fs
+    hz = [130.8, 164.8, 196.0]  # C major
+    if arp:  # legato 16ths through the chord: no level dips, only the notes moving
+        idx = (t / 0.125).astype(int) % 3
+        f = np.array(hz)[idx]
+        phase = 2 * np.pi * np.cumsum(f) / fs
+        return 0.3 * (np.sin(phase) + 0.3 * np.sin(2 * phase))
+    return sum(0.1 * (np.sin(2 * np.pi * h * t) + 0.3 * np.sin(4 * np.pi * h * t)) for h in hz)
+
+
+def test_a_chord_shows_an_arpeggiator_a_single_note_hides():
+    from creaper import listen
+    held = listen.chord_motion(_chord(False), 48000, 1.0, 130.8)
+    arped = listen.chord_motion(_chord(True), 48000, 1.0, 130.8)
+    assert held["moving_share"] < 0.1 and not listen.plays_pattern(held)
+    assert arped["moving_share"] > 0.5 and listen.plays_pattern(arped)
+
+
+def test_a_deep_note_isnt_mistaken_for_retriggers():
+    import numpy as np
+    from creaper import listen
+    t = np.arange(int(1.2 * 48000)) / 48000
+    deep = 0.3 * np.minimum(1, t / 0.5) * (np.sin(2 * np.pi * 41.2 * t) + 0.5 * np.sin(4 * np.pi * 41.2 * t))
+    f = listen.features(deep, 48000, note_off=1.0, expected_hz=41.2)
+    assert f["retriggers"] == 0 and not listen.plays_pattern(f)

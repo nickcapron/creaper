@@ -20,6 +20,11 @@ from pathlib import Path
 
 # Types_V2 ids at or above this are effect presets and templates, not instrument sounds.
 FIRST_EFFECT_TYPE = 14
+# Presets that play a pattern of their own (an arpeggiator, sequencer or gate inside the
+# patch): any part written on them is re-played as their pattern. Left out unless asked.
+PATTERN_TYPES = ("sequence",)
+PATTERN_CHARACTERISTICS = ("arpeggiated", "sequenced", "sequence/loop", "tempo-synced", "synced", "gated",
+                           "phrases", "rhythmic")
 
 
 def default_path() -> Path:
@@ -88,11 +93,14 @@ def _like(word: str) -> str:
 
 def find(conn: sqlite3.Connection, instrument: str | None = None, type: str | None = None,
          subtype: str | None = None, characteristics: list[str] | None = None, genre: str | None = None,
-         search: str | None = None, installed: set[str] | None = None, limit: int = 20) -> list[dict]:
+         search: str | None = None, installed: set[str] | None = None, limit: int = 20,
+         patterns: bool = False) -> list[dict]:
     """Presets matching every filter given, curated ones (Arturia's featured picks)
     first. Words match loosely (case-insensitive, part of the name): 'sub' finds 'Sub
     Bass'; each characteristic must be present; genre matches a genre characteristic
-    ('synthwave', 'hip hop'). installed: normalized plugin names to keep (None: all)."""
+    ('synthwave', 'hip hop'). installed: normalized plugin names to keep (None: all).
+    Presets that play a pattern of their own (Sequence type, Arpeggiated, Sequenced,
+    Gated...) are left out unless patterns is True or the type asked for is Sequence."""
     where, args = [], []
     if type:
         where.append("LOWER(t.name) LIKE ?")
@@ -100,6 +108,13 @@ def find(conn: sqlite3.Connection, instrument: str | None = None, type: str | No
     else:
         where.append("p.type_v2 > 0 AND p.type_v2 < ?")
         args.append(FIRST_EFFECT_TYPE)
+    if not patterns and not any(word in (type or "").lower() for word in PATTERN_TYPES):
+        where.append("LOWER(COALESCE(t.name, '')) NOT IN (" + ", ".join("?" * len(PATTERN_TYPES)) + ")")
+        args += list(PATTERN_TYPES)
+        where.append("NOT EXISTS (SELECT 1 FROM Preset_Characteristics pc JOIN Characteristics c "
+                     "ON c.key_id = pc.characteristic_key WHERE pc.preset_key = p.key_id AND LOWER(TRIM(c.name)) IN ("
+                     + ", ".join("?" * len(PATTERN_CHARACTERISTICS)) + "))")
+        args += list(PATTERN_CHARACTERISTICS)
     if subtype:
         where.append("LOWER(s.name) LIKE ?")
         args.append(_like(subtype))
