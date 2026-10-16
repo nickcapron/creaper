@@ -132,9 +132,11 @@ Arranging:
   a different comping rhythm or inversion, a bass variation). Give each section its
   own version of each part (another seed, edit_midi_notes variations, rewritten
   bars) instead of copying one item everywhere.
-- Mark every section change: a fill or drop-out in the bar before, a riser or sweep
-  (a noise synth with automation, or find_samples for risers and reverse cymbals), a
-  crash on the downbeat. Long sections need slow movement: write_automation ramps on
+- Mark every section change: a fill or drop-out in the bar before, a riser or sweep, a
+  crash on the downbeat. add_transitions does this in one call once the sections are
+  named regions (risers, reverse swells, impacts and downlifters it synthesises itself,
+  fills, crashes and kick drop-outs on the drum track); then vary it by hand where a
+  change deserves something special. Long sections need slow movement: write_automation ramps on
   filter cutoff, sends or levels across builds and breakdowns.
 - Every part is performed, not just placed: notes all on the grid at one velocity are
   the clearest sign of a machine-made track. write_bassline, add_chord_progression,
@@ -1973,6 +1975,7 @@ from . import ear_tools  # noqa: E402,F401  (vocal clarity, tuning, spectrograms
 from . import mix_tools  # noqa: E402,F401  (auto_mix)
 from . import motif_tools  # noqa: E402,F401  (motifs reused across songs)
 from . import sfx_tools  # noqa: E402,F401  (sound effects: one file per region)
+from . import arrange_tools  # noqa: E402,F401  (transitions and ear candy)
 
 
 def run() -> None:

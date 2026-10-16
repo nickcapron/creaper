@@ -2,7 +2,8 @@ import subprocess
 import sys
 
 MODULES = ["server", "export_tools", "sfx_tools", "vocal_tools", "sample_tools", "mix_tools", "ear_tools",
-           "motif_tools", "music_tools", "project_tools", "record_tools", "scan_tools", "chat", "cli", "installer"]
+           "motif_tools", "music_tools", "project_tools", "record_tools", "scan_tools", "arrange_tools", "chat", "cli",
+           "installer"]
 
 CHECK = r"""
 import importlib, sys
