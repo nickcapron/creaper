@@ -47,8 +47,11 @@ in order and run the check named after each step before moving on):
     user's saved sounds for this song are candidates="library". Program a synth only to
     adjust a sound. Check: audition_instrument (in tune, right register, no arpeggio or
     sequence of its own); save_sound the keepers.
- 4. Parts, section by section: each section gets its own version of each part, plus a
-    contrasting idea (a B part, a counter-melody, a breakdown with new chords or bass).
+ 4. Parts, section by section: plan_harmony gives each section its own chords (a
+    pre-chorus leaning into the chorus, a reharmonised bridge). Write every part per
+    section: add_genre_groove(bars, energy), write_bassline, add_chord_progression,
+    write_melody (shape verse or hook; candidates keeps the best hook), plus a contrasting
+    idea (write_counter_melody, write_answer, a breakdown with new chords or bass).
     Check: analyze_harmony.
  5. Feel: generators play with a feel; apply_feel on parts written note by note.
     Check: check_groove on the MIDI drums and bass.
@@ -146,10 +149,11 @@ Arranging and composing:
 - Every part is performed: write_bassline, add_chord_progression, write_melody,
   add_genre_groove and sketch_song play with the genre's performance_feel by default;
   apply_feel parts you write note by note. Feel 'none' only when the user wants the grid.
-- Generators (sketch_song, write_melody, write_bassline, add_genre_groove) give competent
-  starting points that sound generic as they are: try a few seeds, edit what they give,
-  write the hook note by note when you have a stronger idea, and give the track one
-  signature element (a vocal chop, a found sample, an unusual sound or rhythm).
+- Generators (sketch_song, write_melody, write_bassline, add_genre_groove) develop their
+  parts (motifs that return varied, bass approach notes and fills, drum variations and
+  fills): give each section its own seed and settings rather than copying one. Write the
+  hook note by note when you have a stronger idea, and give the track one signature
+  element (a vocal chop, a found sample, an unusual sound or rhythm).
 - A big moment comes from the arrangement, not level or harshness: a riser and crash
   into it, a drop-out before it, a richer or doubled part, the band thinning under it. A
   featured lead sits 2-4 LU over the other instruments and under the drums; a section
@@ -1167,7 +1171,8 @@ def duplicate_item(
     start_beat: Beat = None,
 ) -> dict:
     """Copies an audio or MIDI item on the same track (e.g. repeat a 4-bar loop, or
-    reuse the chorus). Copies are placed back to back; vary them afterwards so
+    reuse the chorus). Copies are placed back to back. For generated parts, re-seed
+    or vary rather than copy (write the section again with another seed or energy) so
     sections keep developing. Returns the copies' ids and positions."""
     return call("duplicate_item", item_id=item_id, count=count, start_bar=start_bar, start_beat=start_beat)
 
@@ -1972,8 +1977,9 @@ def compose(genre: str, key: str = "", bars: str = "") -> str:
         "1. find_notes for my taste; get_genre_profile for the style; list_installed_fx for instruments that fit it.\n"
         "2. Choose tempo, key/mode and a progression from the profile (suggest_progressions can add options); "
         "reharmonize if the style calls for richer harmony.\n"
-        "3. Lay it down: sketch_song with my instruments, or build part by part (add_genre_groove, write_bassline, "
-        "add_chord_progression with the style's voicing and comping, write_melody: try a few seeds). Then make "
+        "3. Lay it down: sketch_song with my instruments, or build part by part section by section (plan_harmony, "
+        "add_genre_groove, write_bassline, add_chord_progression with the style's voicing and comping, write_melody "
+        "with candidates, write_counter_melody). Then make "
         "it your own: a contrasting B idea, each section's own variation of the parts, something changing every "
         "8 bars, fills, risers and automation at the section changes, and one signature element.\n"
         f"4. Sounds: audition_sounds(candidates='arturia', role=..., style='{genre}') for each part before "

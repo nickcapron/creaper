@@ -91,6 +91,7 @@ class Genre:
     sound_design: str = ""          # synth, sample and instrument tones
     production: str = ""            # mix and production habits
     theory: str = ""                # what's distinctive about its harmony, rhythm or melody
+    fill_style: str = ""            # snare_roll, clap_roll, tom, dropout, none; "" = the family's (grooves.py)
 
     @property
     def tempo_default(self) -> int:
@@ -230,6 +231,8 @@ def validate(g: Genre) -> list[str]:
         bad(f"comping '{g.comping}' not in {COMPING}")
     if g.bass_style not in BASS_STYLES:
         bad(f"bass_style '{g.bass_style}' not in {BASS_STYLES}")
+    if g.fill_style and g.fill_style not in ("snare_roll", "clap_roll", "tom", "dropout", "none"):
+        bad(f"fill_style '{g.fill_style}' isn't snare_roll, clap_roll, tom, dropout or none")
     if g.melody_density not in DENSITIES:
         bad(f"melody_density '{g.melody_density}' not in {DENSITIES}")
     groove = g.groove

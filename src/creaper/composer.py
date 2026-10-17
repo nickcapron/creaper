@@ -241,22 +241,155 @@ def generate_progression(key: Key, length: int = 4, seed: int | None = None, sev
     grammar = _GRAMMAR[family]
     tonic = "i" if family == "minor" else "I"
     seq = [tonic]
+    if end_on_tonic and length == 2:
+        return ["V7" if sevenths else "V", tonic]
     while len(seq) < length:
         options = grammar.get(seq[-1], grammar[tonic])
         if end_on_tonic and len(seq) == length - 2:
-            dominants = [o for o in options if o[0] in ("V", "vii°")]
-            options = dominants or options
+            # The chord before the last: a dominant, or (after V itself) a predominant.
+            dominants = [o for o in options if o[0] in ("V", "vii°")] or [("V", 1)]
+            options = [o for o in dominants if o[0] != seq[-1]] or \
+                [o for o in options if o[0] not in (tonic, seq[-1])] or [("V", 1)]
         if end_on_tonic and len(seq) == length - 1:
             seq.append(tonic)
             break
         names, weights = zip(*options)
+        # Never the same chord twice running, and no A-B-A-B ping-pong.
+        allowed = [(n_, w_) for n_, w_ in zip(names, weights) if n_ != seq[-1]
+                   and not (len(seq) >= 3 and n_ == seq[-2] and seq[-1] == seq[-3])]
+        if allowed:
+            names, weights = zip(*allowed)
         choice = rng.choices(names, weights)[0]
-        if len(seq) >= 2 and choice == seq[-2] and rng.random() < 0.5:
-            choice = rng.choices(names, weights)[0]
         seq.append(choice)
     if sevenths:
         seq = [_SEVENTHS.get(n, n) for n in seq]
     return seq
+
+
+# ------------------------------------------------------ harmony per section
+
+SECTION_KINDS = [  # in order: "pre-chorus" before "chorus"
+    (r"pre[- ]?chorus|build|lift", "pre"), (r"chorus|hook|refrain|drop", "chorus"), (r"bridge|middle 8", "bridge"),
+    (r"break", "breakdown"), (r"intro", "intro"), (r"outro|ending|coda", "outro"), (r"verse|main|groove|a section", "verse"),
+]
+_PRE = {"major": ["ii", "IV", "vi", "V"], "minor": ["iv", "VI", "VII", "V"]}
+
+
+def section_kind(name: str) -> str:
+    import re as _re
+    n = name.lower()
+    return next((kind for pattern, kind in SECTION_KINDS if _re.search(pattern, n)), "verse")
+
+
+def _numerals(progression: str) -> tuple[str | None, list[str]]:
+    mode = None
+    body = progression
+    if ":" in progression:
+        mode, _, body = progression.partition(":")
+        mode = mode.strip()
+    return mode, [p for p in body.replace(" ", "").split("-") if p]
+
+
+def plan_harmony(progressions: list[str], key: Key, sections: list[str], lift_last_chorus: bool = False,
+                 seed: int | None = None, default_mode: str | None = None) -> list[dict]:
+    """A progression for each section so the song moves harmonically: verses (and the
+    intro, outro) the style's first progression; choruses its second, or the first
+    rotated to start on IV or vi (VI or iv in minor) when there's only one; the
+    pre-chorus avoids the tonic and ends on V, leaning into the chorus; a bridge the
+    verse reharmonised (borrowed chords and relative substitutes); breakdowns the
+    chorus's chords. With lift_last_chorus the last chorus goes up a whole step.
+    Only progressions in the key's family (major or minor) are used: a progression
+    without a "mode:" prefix is in default_mode. When none fits, they are played on the
+    relative key (major ones on C for A minor), which has the same notes.
+    Returns [{'section', 'kind', 'numerals', 'chords', 'key'}]; a bridge whose
+    reharmonisation splits chords also has 'slots', each chord's length in the verse's
+    chord lengths (0.5 = half of one)."""
+    if not progressions:
+        raise ValueError("give at least one progression")
+
+    def minor_mode(mode: str) -> bool:
+        return scales_db.find_scale(mode).intervals[2] == 3
+
+    def fits(p: str) -> bool:
+        mode = _numerals(p)[0] or default_mode
+        return mode is None or minor_mode(mode) == key.is_minor
+
+    fitting = [p for p in progressions if fits(p)]
+    home = key if fitting else _relative(key)   # where the numerals are played
+    progressions = fitting or list(progressions)
+    family = "minor" if key.is_minor else "major"
+    home_family = "minor" if home.is_minor else "major"
+    verse_mode, verse = _numerals(progressions[0])
+    verse_mode = verse_mode or default_mode
+    if len(progressions) > 1 and _numerals(progressions[1])[1] != verse:
+        chorus_mode, chorus = _numerals(progressions[1])
+        chorus_mode = chorus_mode or default_mode
+    else:
+        chorus_mode = verse_mode
+        starts = ("IV", "vi") if home_family == "major" else ("VI", "iv")
+        turn = next((i for i, n in enumerate(verse) if n.rstrip("7maj9") in starts or n in starts), None)
+        chorus = verse[turn:] + verse[:turn] if turn else verse[1:] + verse[:1]
+    pre = _PRE[family]
+
+    def realise(numerals: list[str], mode: str | None, k: Key) -> list[str]:
+        text = "-".join(numerals)
+        return [rc.chord.symbol for rc in realize(f"{mode}: {text}" if mode else text, k)]
+
+    verse_events = timeline([rc.chord for rc in realize(("%s: " % verse_mode if verse_mode else "") + "-".join(verse), home)], 4.0)
+    verse_symbols = [e.chord.symbol for e in verse_events]
+    # The bridge: the verse reharmonised. Borrowed chords do nothing to a progression
+    # already in minor, so minor keys try dominants and mediants first.
+    sets = ([["secondary_dominants", "chromatic_mediants"], ["modal_interchange", "relative_subs"]] if home_family == "minor"
+            else [["modal_interchange", "relative_subs"], ["secondary_dominants", "chromatic_mediants"]])
+    bridge_chords, how = verse_symbols, "the verse reharmonised"
+    bridge_slots = [1.0] * len(verse_symbols)   # each chord's length, in the verse's chord slots
+    for techniques in sets + [["tritone_subs", "deceptive"]]:
+        evs, _ = reharmonize(verse_events, home, techniques, seed=seed, amount=0.9)
+        if [e.chord.symbol for e in evs] != verse_symbols:
+            bridge_chords = [e.chord.symbol for e in evs]
+            bridge_slots = [round(e.length / 4.0, 6) for e in evs]
+            how = f"the verse reharmonised ({', '.join(t.replace('_', ' ') for t in techniques)})"
+            break
+    choruses = [i for i, s in enumerate(sections) if section_kind(s) == "chorus"]
+    out = []
+    for i, name in enumerate(sections):
+        kind = section_kind(name)
+        k, shown = home, key
+        if kind in ("chorus", "breakdown"):
+            numerals, mode = chorus, chorus_mode
+        elif kind == "pre":
+            numerals, mode, k = pre, None, key
+        elif kind == "bridge":
+            out.append({"section": name, "kind": kind, "numerals": None, "chords": " ".join(bridge_chords),
+                        "key": key.name, "how": how, "slots": bridge_slots})
+            continue
+        else:
+            numerals, mode = verse, verse_mode
+        row = {"section": name, "kind": kind, "numerals": "-".join(numerals)}
+        if k is not key:
+            row["how"] = f"played on {home.name}, the relative key (the same notes)"
+        if lift_last_chorus and choruses and i == choruses[-1] and len(choruses) > 1:   # one chorus: nothing to lift
+            k, shown = _key_up(k, 2), _key_up(key, 2)
+            row["how"] = "the last chorus a whole step up"
+        row["chords"] = " ".join(realise(numerals, mode, k))
+        row["key"] = shown.name
+        out.append(row)
+    return out
+
+
+def _relative(key: Key) -> Key:
+    """The relative major of a minor key, or the relative minor of a major one."""
+    return _key_up(H.parse_key(f"{key.spell_pc(key.tonic)} {'major' if key.is_minor else 'minor'}"),
+                   3 if key.is_minor else -3)
+
+
+def _key_up(key: Key, semitones: int) -> Key:
+    """The same mode on a tonic `semitones` higher, spelled as musicians would."""
+    mode = "minor" if key.is_minor else "major"
+    # The spelling with fewer accidentals: Db major but C# minor, Ab major but G# minor.
+    names = (["C", "C#", "D", "Eb", "E", "F", "F#", "G", "G#", "A", "Bb", "B"] if key.is_minor
+             else ["C", "Db", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"])
+    return H.parse_key(f"{names[(key.tonic + semitones) % 12]} {mode}")
 
 
 # -------------------------------------------------------------- reharmonize
@@ -678,23 +811,85 @@ def _muddy(v: list[int]) -> float:
 
 def voice_chords(chords: list[SpelledChord], style: str = "close", octave: int = 4,
                  prev: list[int] | None = None, key: Key | None = None) -> list[list[int]]:
-    """A voicing per chord in the given style, each chosen to move as little as possible from the last."""
+    """A voicing per chord in the given style, each chosen to move as little as possible
+    from the last, without the same top note three times running (the line on top goes
+    somewhere) and, when a chord comes back, in another inversion than last time."""
     if style == "satb":
         return satb(chords, key or Key(chords[0].root, chords[0].root_name[0], scales_db.find_scale("major")))
     center = 12 * (octave + 1) + 4
-    out = []
+    out: list[list[int]] = []
+    last_for: dict[str, list[int]] = {}
     for c in chords:
         cands = _candidates(c, style, octave)
+        tops = [v[-1] for v in out[-2:]]
+        same_top = len(tops) == 2 and tops[0] == tops[1]
+        before = last_for.get(c.symbol)
+        just_before = out[-1] if out else None
 
         def cost(v: list[int]) -> float:
             drift = abs(sum(v) / len(v) - center)
             move = 0.0 if prev is None else _movement(prev, v)
-            return move + 0.6 * drift + _muddy(v)
+            penalty = 0.0
+            if same_top and v[-1] == tops[-1]:
+                penalty += TOP_REPEAT_PENALTY
+            if before is not None and v == before and v != just_before:
+                penalty += REVOICE_PENALTY   # the chord came back: another inversion this time
+            return move + 0.6 * drift + _muddy(v) + penalty
 
         best = min(cands, key=cost)
         out.append(best)
+        last_for[c.symbol] = best
         prev = best
     return out
+
+
+TOP_REPEAT_PENALTY = 5.0   # as costly as moving a voice five semitones
+REVOICE_PENALTY = 3.0
+
+# Comping patterns whose chord changes can land an 8th early (anticipated, pushed).
+ANTICIPATE_STYLES = {"stabs", "push", "charleston"}
+# Held patterns that take a 4-3 suspension on a phrase's last chord.
+SUSPEND_STYLES = {"sustain", "half_notes", "quarters"}
+
+
+def develop_comp(notes: list[dict], events: list[ChordEvent], pattern: str, anticipate: bool | None = None,
+                 suspensions: bool = True, phrase_chords: int = 4) -> list[dict]:
+    """A chord part that moves like a player's: in stab styles (or with anticipate=True)
+    each chord change lands an 8th early, cutting the chord before it short; in held
+    styles the last chord of each phrase (every phrase_chords chords) starts with its
+    third raised to the 4th and resolves down to it halfway (a 4-3 suspension)."""
+    out = [dict(n) for n in notes]
+    if anticipate is None:
+        anticipate = pattern in ANTICIPATE_STYLES
+    if anticipate:
+        for e in events[1:]:
+            hits = [n for n in out if abs(n["start"] - e.start) < 1e-6]
+            if not hits:
+                continue
+            new_start = e.start - 0.5
+            # The old chord's own hits in that 8th give way to the new chord.
+            out = [n for n in out if not (new_start - 1e-6 <= n["start"] < e.start - 1e-6)]
+            for n in out:
+                if n["start"] < new_start - 1e-6 and n["start"] + n["length"] > new_start:
+                    n["length"] = round(max(0.05, new_start - n["start"] - 0.02), 6)
+            for n in hits:
+                n["start"] = round(new_start, 6)
+                n["length"] = round(n["length"] + 0.5, 6)
+    if suspensions and pattern in SUSPEND_STYLES:
+        for i, e in enumerate(events):
+            if (i + 1) % phrase_chords or e.length < 2:
+                continue
+            third = next((iv for iv in e.chord.intervals if iv % 12 in (3, 4)), None)
+            if third is None or 5 in [iv % 12 for iv in e.chord.intervals]:
+                continue
+            third_pc = (e.chord.root + third) % 12
+            fourth_pc = (e.chord.root + 5) % 12
+            for n in [n for n in out if abs(n["start"] - e.start) < 1e-3 and n["pitch"] % 12 == third_pc]:
+                half = round(n["length"] / 2, 6)
+                sus = dict(n, pitch=n["pitch"] + (fourth_pc - third_pc) % 12, length=half)
+                n["start"], n["length"] = round(n["start"] + half, 6), round(n["length"] - half, 6)
+                out.append(sus)
+    return sorted(out, key=lambda n: (n["start"], n["pitch"]))
 
 
 def _movement(a: list[int], b: list[int]) -> float:
@@ -1200,6 +1395,136 @@ def bassline(events: list[ChordEvent], style: str = "root", key: Key | None = No
     return notes
 
 
+# Styles whose notes are short enough to take approach notes and fills; held styles
+# (whole, reese, root), a pedal and lines that already lead (walking, tumbao) are left
+# as they are.
+_DEVELOP_STYLES = {"eighths", "sixteenths", "offbeat", "root_fifth", "octaves", "arpeggio", "boogie",
+                   "motown", "alberti", "808", "syncopated", "one_drop"}
+
+
+def bar_variety(notes: list[dict], meter: str = "4/4") -> float:
+    """Distinct bars (pitches and positions) over all bars: a four-bar loop repeated
+    eight times is 4/32 = 0.12; a part where every bar is new is 1."""
+    bar = _bar_len(meter)
+    if not notes:
+        return 0.0
+    t0 = min(n["start"] for n in notes)
+    by_bar: dict[int, list] = {}
+    for n in notes:
+        b = int((n["start"] - t0) // bar + 1e-9)
+        by_bar.setdefault(b, []).append((n["pitch"], round((n["start"] - t0) % bar, 2)))
+    bars = [tuple(sorted(by_bar.get(b, []))) for b in range(max(by_bar) + 1)]
+    return round(len(set(bars)) / max(1, len(bars)), 2)
+
+
+def develop_bass(notes: list[dict], events: list[ChordEvent], style: str, meter: str = "4/4",
+                 seed: int | None = None, groove: list[float] | None = None, kick: str = "lock") -> list[dict]:
+    """A bass part that moves instead of looping one bar: an approach note (a semitone
+    or the 5th) into each chord change, every second bar of a two-bar cell varied (one
+    weak note to the octave, the 5th or the chord's 7th), and the last beat of every
+    4th bar a fill (an octave run, a b7 lead-in, or a drop-out). groove: the kick's
+    positions in the bar (QN, e.g. [0, 1, 2, 3]); kick 'lock' accents notes on the kick
+    and softens the rest, 'avoid' moves notes off the kick to the next 16th (an offbeat
+    house bass). Notes never leave their bar or the part."""
+    if style not in _DEVELOP_STYLES or not notes or not events:
+        return notes
+    rng = random.Random(None if seed is None else seed * 7 + 3)
+    bar = _bar_len(meter)
+    t0, end = events[0].start, events[-1].end
+    out = [dict(n) for n in sorted(notes, key=lambda n: n["start"])]
+
+    def bar_of(t: float) -> int:
+        return int((t - t0) // bar + 1e-9)
+
+    # Approach notes into each change of root.
+    for e, nxt in zip(events, events[1:]):
+        target_pc = (nxt.chord.bass if nxt.chord.bass is not None else nxt.chord.root) % 12
+        here = (e.chord.bass if e.chord.bass is not None else e.chord.root) % 12
+        if target_pc == here:
+            continue
+        last = [n for n in out if e.end - 1.0 - 1e-6 <= n["start"] < e.end - 1e-6]
+        if not last:
+            continue
+        n = last[-1]
+        target = min((p for p in range(n["pitch"] - 7, n["pitch"] + 8) if p % 12 == target_pc),
+                     key=lambda p: abs(p - n["pitch"]))
+        n["pitch"] = target + (rng.choice((-1, 1)) if rng.random() < 0.6 else -5)
+        n["length"] = min(n["length"], e.end - n["start"])
+    # The second bar of each two-bar cell: one weak-beat note moves.
+    for b in range(1, bar_of(end - 1e-6) + 1, 2):
+        weak = [n for n in out if bar_of(n["start"]) == b and abs((n["start"] - t0) % 1) > 1e-6]
+        if not weak:
+            continue
+        n = rng.choice(weak)
+        ev = chord_at(events, n["start"])
+        root = (ev.chord.bass if ev and ev.chord.bass is not None else (ev.chord.root if ev else n["pitch"])) % 12
+        seventh = next(((ev.chord.root + i) % 12 for i in ev.chord.intervals if i % 12 in (10, 11)), None) if ev else None
+        options = [n["pitch"] + 12 if n["pitch"] + 12 <= 60 else n["pitch"] - 12, n["pitch"] + 7 if n["pitch"] + 7 <= 60 else n["pitch"] - 5]
+        if seventh is not None:
+            options.append(min((p for p in range(n["pitch"] - 6, n["pitch"] + 7) if p % 12 == seventh), key=lambda p: abs(p - n["pitch"])))
+        if n["pitch"] % 12 == root:
+            n["pitch"] = rng.choice(options)
+    # A fill on the last beat of every 4th bar.
+    for b in range(3, bar_of(end - 1e-6) + 1, 4):
+        beat_start = t0 + (b + 1) * bar - 1.0
+        if beat_start >= end - 1e-6:
+            continue
+        in_beat = [n for n in out if beat_start - 1e-6 <= n["start"] < beat_start + 1.0 - 1e-6]
+        anchor_note = next((n for n in reversed(out) if n["start"] < beat_start), None)
+        if anchor_note is None:
+            continue
+        r = anchor_note["pitch"]
+        kind = rng.choice(("run", "b7", "dropout"))
+        for n in in_beat:
+            out.remove(n)
+        for n in out:
+            if n["start"] < beat_start and n["start"] + n["length"] > beat_start - 0.02:
+                n["length"] = round(max(0.05, beat_start - n["start"] - 0.02), 6)
+        if kind == "run":
+            for i, step in enumerate((0, 12, 7, 12)):
+                p = r + step if r + step <= 60 else r + step - 12
+                out.append({"pitch": p, "start": round(beat_start + i * 0.25, 6), "length": 0.2,
+                            "velocity": max(1, min(127, anchor_note.get("velocity", 100) - 4 + 3 * i)), "channel": 1})
+        elif kind == "b7":
+            out.append({"pitch": r + 10 if r + 10 <= 60 else r - 2, "start": round(beat_start + 0.5, 6), "length": 0.45,
+                        "velocity": anchor_note.get("velocity", 100), "channel": 1})
+        # dropout: the beat stays empty, so the downbeat after it lands harder
+    out.sort(key=lambda n: n["start"])
+    # Against the kick.
+    if groove:
+        kicks = [g % bar for g in groove]
+        for n in out:
+            pos = (n["start"] - t0) % bar
+            on_kick = any(abs(pos - k) < 0.05 for k in kicks)
+            if kick == "lock":
+                n["velocity"] = max(1, min(127, n.get("velocity", 100) + (8 if on_kick else -6)))
+            elif kick == "avoid" and on_kick:
+                moved = n["start"] + 0.25
+                if bar_of(moved) == bar_of(n["start"]) and moved < end - 0.05:
+                    n["start"] = round(moved, 6)
+                    n["length"] = round(max(0.05, n["length"] - 0.25), 6)
+    return _tidy_line(out, end)
+
+
+def _tidy_line(notes: list[dict], end: float) -> list[dict]:
+    """No two notes of one pitch on one start, none running into the next note of its
+    pitch, none past the end."""
+    out: list[dict] = []
+    seen: set = set()
+    for n in sorted(notes, key=lambda n: (n["start"], n["pitch"])):
+        k = (n["pitch"], round(n["start"], 4))
+        if k in seen or n["start"] >= end - 1e-6:
+            continue
+        seen.add(k)
+        out.append(n)
+    for i, n in enumerate(out):
+        nxt = next((m for m in out[i + 1:] if m["pitch"] == n["pitch"]), None)
+        stop = min(end, nxt["start"] - 0.02 if nxt else end)
+        if n["start"] + n["length"] > stop:
+            n["length"] = round(max(0.05, stop - n["start"]), 6)
+    return out
+
+
 # ------------------------------------------------------------------- melody
 
 _DENSITY_ONSETS = {"sparse": (2, 4), "medium": (4, 6), "busy": (6, 9)}
@@ -1229,13 +1554,55 @@ def _motif_rhythm(rng: random.Random, density: str, bar: float, syncopation: flo
     return sorted(chosen)
 
 
+# The cell's moves, in scale steps: mostly steps, the odd leap.
+_MOVES = ([-2, -1, 1, 2, 3, -3, 4, -4], [2.0, 5.0, 5.0, 2.5, 1.5, 1.0, 0.7, 0.5])
+# Where each shape sits in the range (0 = low end, 1 = top).
+_SHAPE_HEIGHT = {"hook": 0.6, "verse": 0.35, "answer": 0.5}
+# The period: each phrase's kind, in order (A, its answer, a contrast, A again to close).
+_PERIOD = ("A", "A'", "B", "A''")
+
+
+def _cell(rng: random.Random, density: str, bar: float, syncopation: float) -> tuple[list[float], list[int]]:
+    """A one-bar idea: a rhythm and the scale-step moves between its notes (the first is 0)."""
+    rhythm = _motif_rhythm(rng, density, bar, syncopation)
+    moves = [0] + [rng.choices(*_MOVES)[0] for _ in rhythm[1:]]
+    # A cell that only climbs or only falls has no shape to remember: turn its last move.
+    if len(moves) > 2 and all(m > 0 for m in moves[1:]) or len(moves) > 2 and all(m < 0 for m in moves[1:]):
+        moves[-1] = -moves[-1]
+    return rhythm, moves
+
+
+def _rhythm_variant(rng: random.Random, rhythm: list[float], bar: float) -> list[float]:
+    """The same rhythm with one onset moved or added: recognisably the cell, not a copy."""
+    slots = [x * 0.5 for x in range(int(bar * 2))]
+    out = list(rhythm)
+    if len(out) > 1 and rng.random() < 0.5:
+        out.pop(rng.randrange(1, len(out)))
+    out.append(rng.choice(slots))
+    return sorted(set(round(x, 3) for x in out))
+
+
+def _bar_plan(phrase_bars: int) -> list[str]:
+    """What each bar of a phrase does: the cell, the cell moved to the chord, its rhythmic
+    variant, ..., and the ending."""
+    if phrase_bars <= 1:
+        return ["end"]
+    body = ["cell", "shift", "variant", "shift"]
+    return [body[i % 4] for i in range(phrase_bars - 1)] + ["end"]
+
+
 def melody(events: list[ChordEvent], key: Key, density: str = "medium", low: int = 60, high: int = 79,
            scale: str | None = None, meter: str = "4/4", phrase_bars: int = 4, seed: int | None = None,
-           syncopation: float = 0.3, velocity: int = 92) -> list[dict]:
-    """A melody over the chords: a one-bar rhythmic motif repeated and varied in
-    phrases, chord tones on strong beats, stepwise motion with leaps recovered in
-    the opposite direction, an arch toward a high point, a half-close (2nd or 5th)
-    at the end of the first phrase and the tonic at the end."""
+           syncopation: float = 0.3, velocity: int = 92, shape: str = "hook", rests: bool = True,
+           register_lift: int = 0) -> list[dict]:
+    """A melody built like a song's: one bar-long cell (a rhythm and a contour) that
+    phrases repeat, move onto each bar's chord and vary, phrases in a period A A' B A''
+    (A and B different cells, B higher), question phrases ending on the 2nd or 5th and
+    answers on the tonic, a held last note and a breath at the end of each phrase
+    (rests), chord tones on strong beats, pickups short and phrase endings long, and the
+    tonic at the end; each later period a step higher, so it builds. shape sets the
+    register (hook high, verse low, answer between);
+    register_lift raises it this many scale steps (a chorus a 3rd-5th over the verse)."""
     rng = random.Random(seed)
     bar = _bar_len(meter)
     if not events:
@@ -1245,64 +1612,127 @@ def melody(events: list[ChordEvent], key: Key, density: str = "medium", low: int
     pool = [p for p in range(low, high + 1) if p % 12 in scale_pcs]
     if not pool:
         raise ValueError("no scale notes in that range")
-    motif = _motif_rhythm(rng, density, bar, syncopation)
-    variant = sorted(set(motif[:-1] + [round(rng.choice([x * 0.5 for x in range(int(bar * 2))]), 2)]))
     n_bars = max(1, math.ceil((total_end - total_start) / bar - 1e-6))
-    onsets: list[float] = []
-    for b in range(n_bars):
-        pos_in_phrase = b % phrase_bars
-        rhythm = motif if pos_in_phrase in (0, 2) else variant
-        if pos_in_phrase == phrase_bars - 1:
-            rhythm = [x for x in motif if x < bar / 2] or [0.0]  # phrase ending: fewer, longer notes
-        for x in rhythm:
-            t = total_start + b * bar + x
-            if t < total_end - 0.1:
-                onsets.append(t)
+    cells = {"A": _cell(rng, density, bar, syncopation), "B": _cell(rng, density, bar, syncopation)}
+    # B answers A: the other cell, its contour turned upside down so it's a contrast.
+    cells["B"] = (cells["B"][0], [0] + [-m for m in cells["B"][1][1:]])
+    variants = {k: _rhythm_variant(rng, r, bar) for k, (r, _) in cells.items()}
+    home = int(round((len(pool) - 1) * _SHAPE_HEIGHT.get(shape, 0.5))) + register_lift
+    home = max(0, min(len(pool) - 1, home))
+    plan = _bar_plan(phrase_bars)
+    n_phrases = math.ceil(n_bars / phrase_bars)
+    # Room to build: the last period reaches the shape's height, earlier ones sit under it.
+    home = max(0, home - min(2, (n_phrases - 1) // 4))
+
+    def nearest_index(pitch_pcs: set[int], around: int, spread: int = 3) -> int:
+        cands = [i for i in range(max(0, around - spread), min(len(pool), around + spread + 1)) if pool[i] % 12 in pitch_pcs]
+        return min(cands, key=lambda i: (abs(i - around), -i)) if cands else around
+
     notes: list[dict] = []
-    prev = rng.choice([p for p in pool if abs(p - (low + high) / 2) <= 5] or pool)
-    prev_leap = 0
-    for k, t in enumerate(onsets):
-        e = chord_at(events, t)
+    for b in range(n_bars):
+        phrase, step = divmod(b, phrase_bars)
+        kind = _PERIOD[phrase % 4]
+        last_phrase = phrase == n_phrases - 1
+        role = plan[min(step, len(plan) - 1)] if b < n_bars - 1 else "end"
+        rhythm, moves = cells["B" if kind == "B" else "A"]
+        if role == "variant":
+            rhythm = variants["B" if kind == "B" else "A"]
+            moves = moves + [rng.choice(_MOVES[0][:4]) for _ in range(len(rhythm) - len(moves))]
+        bar_start = total_start + b * bar
+        e = chord_at(events, bar_start)
         chord_pcs = e.chord.pitch_classes() if e else scale_pcs
-        bar_index = int((t - total_start) // bar)
-        pos_in_phrase = bar_index % phrase_bars
-        phrase_progress = (pos_in_phrase + ((t - total_start) % bar) / bar) / phrase_bars
-        strong = abs(((t - total_start) % bar) % 2) < 1e-6 or abs((t - total_start) % 1) < 1e-6
-        last_of_phrase = (k + 1 == len(onsets)) or int((onsets[k + 1] - total_start) // bar) // phrase_bars != bar_index // phrase_bars
-        final = k + 1 == len(onsets)
-        target_height = low + (high - low) * (0.35 + 0.45 * math.sin(math.pi * min(1.0, phrase_progress * 1.1)))
-        weights = []
-        for p in pool:
-            step = p - prev
-            w = {0: 1.0, 1: 5.0, 2: 6.0, 3: 3.0, 4: 3.0, 5: 2.0, 7: 1.5}.get(abs(step), 0.6 if abs(step) <= 9 else 0.1)
-            if prev_leap and abs(prev_leap) > 4 and step * prev_leap > 0:
-                w *= 0.25  # recover from a leap in the opposite direction
-            if strong and p % 12 in chord_pcs:
-                w *= 3.5
-            elif strong:
-                w *= 0.4
-            w *= math.exp(-abs(p - target_height) / 6)
-            if final:
-                w *= 25 if p % 12 == key.tonic else (4 if p % 12 in chord_pcs else 0.05)
-            elif last_of_phrase:
-                deg = (p - key.tonic) % 12
-                w *= 6 if deg in (2, 7) else (2 if p % 12 in chord_pcs else 0.3)
-            weights.append(w)
-        p = rng.choices(pool, weights)[0]
-        if final:
-            tonics = [q for q in pool if q % 12 == key.tonic]
-            if tonics:
-                p = min(tonics, key=lambda q: abs(q - prev))
-        nxt_t = onsets[k + 1] if k + 1 < len(onsets) else total_end
-        length = (nxt_t - t) * (0.95 if final or last_of_phrase else 0.88)
-        if not final:
-            length = min(length, 2.0)
-        accent = 6 if strong else -6
-        notes.append({"pitch": p, "start": round(t, 6), "length": round(max(0.1, length), 6),
-                      "velocity": max(1, min(127, velocity + accent + rng.randint(-5, 5))), "channel": 1})
-        prev_leap = p - prev
-        prev = p
+        # Each later period sits a step higher: the line builds, and its peak comes late.
+        start_index = home + (2 if kind == "B" else 0) + (1 if kind == "A''" and role == "shift" else 0) + min(2, phrase // 4)
+        if role in ("shift", "variant", "end"):
+            start_index = nearest_index(chord_pcs, start_index)   # the cell moved onto this bar's chord
+        if role == "end":
+            # The phrase closes: the cell's first half, then one long note and a breath.
+            head = [x for x in rhythm if x < bar / 2] or [0.0]
+            closing = (last_phrase and b == n_bars - 1) or kind in ("A'", "A''")
+            target_pcs = {key.tonic % 12} if closing else {(key.tonic + 2) % 12, (key.tonic + 7) % 12}
+            onsets = head
+        else:
+            onsets = rhythm
+            target_pcs = None
+        # The contour centred on the bar's start, so a climbing cell can't run into the
+        # top of the range early and leave the later periods nowhere higher to go.
+        path = [0]
+        for j in range(1, len(onsets)):
+            path.append(path[-1] + (moves[j] if j < len(moves) else rng.choice((-1, 1))))
+        middle = round((max(path) + min(path)) / 2)
+        bar_notes = []
+        for j, x in enumerate(onsets):
+            t = bar_start + x
+            if t >= total_end - 0.1:
+                break
+            idx = start_index + path[j] - middle
+            idx = max(0, min(len(pool) - 1, idx))
+            strong = abs(x % 1) < 1e-6
+            ec = chord_at(events, t)
+            pcs = ec.chord.pitch_classes() if ec else scale_pcs
+            if strong and pool[idx] % 12 not in pcs:
+                idx = nearest_index(pcs, idx, 1)
+            bar_notes.append([t, idx])
+        if role == "end" and bar_notes:
+            # The held note: the target degree nearest where the line is.
+            bar_notes[-1][1] = nearest_index(target_pcs, bar_notes[-1][1], 4)
+        for k, (t, i) in enumerate(bar_notes):
+            nxt = bar_notes[k + 1][0] if k + 1 < len(bar_notes) else bar_start + bar
+            length = (nxt - t) * 0.9
+            in_bar = t - bar_start
+            if k + 1 < len(bar_notes) and in_bar % 1 >= 0.5 - 1e-6:
+                length = min(length, (nxt - t) * 0.6)                        # a pickup: short
+            if role == "end" and k == len(bar_notes) - 1:
+                length = max(bar * 0.5 - in_bar % bar, (bar - in_bar) * (0.6 if rests else 0.95))  # held, then a breath
+            strong = abs(in_bar % 1) < 1e-6
+            notes.append({"pitch": pool[i], "start": round(t, 6),
+                          "length": round(max(0.1, min(length, total_end - t)), 6),
+                          "velocity": max(1, min(127, velocity + (6 if strong else -6) + rng.randint(-4, 4))),
+                          "channel": 1})
+    if notes:
+        # The last note is the tonic, nearest the line, and lasts to the end.
+        tonics = [q for q in pool if q % 12 == key.tonic]
+        if tonics:
+            notes[-1]["pitch"] = min(tonics, key=lambda q: abs(q - notes[-1]["pitch"]))
+        notes[-1]["length"] = round(max(0.1, total_end - notes[-1]["start"]), 6)
     return notes
+
+
+def hook_score(notes: list[dict], meter: str = "4/4") -> dict:
+    """How memorable a melody's shape is: bar_repetition (share of bars whose rhythm and
+    intervals come back from an earlier bar: a hook repeats, a ramble doesn't), range
+    (semitones), rest_ratio (share of the time silent: room to breathe), peak_position
+    (the last time it reaches its highest note, 0 start .. 1 end), and score (0 best; how far those
+    sit from 0.35-0.75, 7-15, 0.08-0.35 and 0.45-0.85)."""
+    if not notes:
+        return {}
+    bar = _bar_len(meter)
+    t0 = min(n["start"] for n in notes)
+    by_bar: dict[int, list[dict]] = {}
+    for n in sorted(notes, key=lambda n: n["start"]):
+        by_bar.setdefault(int((n["start"] - t0) // bar + 1e-9), []).append(n)
+    seen, repeats = set(), 0
+    for b in sorted(by_bar):
+        ns = by_bar[b]
+        sig = tuple((round((n["start"] - t0) % bar, 2), ns[i]["pitch"] - ns[i - 1]["pitch"] if i else 0)
+                    for i, n in enumerate(ns))
+        repeats += sig in seen
+        seen.add(sig)
+    end = max(n["start"] + n["length"] for n in notes)
+    covered = sum(n["length"] for n in notes)
+    # The climax: the last time the line reaches its highest note.
+    highest = max(n["pitch"] for n in notes)
+    top = max((n for n in notes if n["pitch"] == highest), key=lambda n: n["start"])
+    out = {"bar_repetition": round(repeats / max(1, len(by_bar)), 2),
+           "range": max(n["pitch"] for n in notes) - min(n["pitch"] for n in notes),
+           "rest_ratio": round(max(0.0, 1 - covered / max(1e-9, end - t0)), 2),
+           "peak_position": round((top["start"] - t0) / max(1e-9, end - t0), 2)}
+
+    def off(v: float, lo: float, hi: float, scale: float) -> float:
+        return 0.0 if lo <= v <= hi else (lo - v if v < lo else v - hi) / scale
+    out["score"] = round(off(out["bar_repetition"], 0.35, 0.75, 0.1) + off(out["range"], 7, 15, 3)
+                         + off(out["rest_ratio"], 0.08, 0.35, 0.05) + off(out["peak_position"], 0.45, 0.85, 0.1), 2)
+    return out
 
 
 # ------------------------------------------------------------------- rhythm
@@ -1458,6 +1888,137 @@ def chord_lookup(chord_notes: list[dict], hold: float = 4.0) -> Callable[[float]
         before = [x for x in times if x <= t + 1e-3 and t - x <= hold]
         return onsets[before[-1]] if before else (sounding or None)
     return at
+
+
+# ------------------------------------------------------------ second lines
+
+HOLD_QN = 1.0   # a melody note this long leaves room for the counter-melody to move under it
+
+
+def counter_melody(melody_notes: list[dict], chords_at: Callable[[float], set[int] | None], key: Key,
+                   low: int | None = None, high: int | None = None, density: float = 0.5,
+                   seed: int | None = None, velocity: int = 78) -> list[dict]:
+    """A second line that answers the melody instead of doubling it. It moves where
+    the melody rests or holds (in 8ths through a gap, on the beats under a long note)
+    and, where the melody is busy for a half bar, holds one long note under it instead.
+    It moves against the melody's direction, never repeats a note straight away, sits
+    on chord tones on the beat, a 3rd or 6th under the melody where they meet (never in
+    unison or an octave with any melody note it sounds against), below the melody's
+    register by default, and avoids parallel 5ths and octaves with it.
+    density (0-1): how much of the room it fills."""
+    if not melody_notes:
+        return []
+    rng = random.Random(seed)
+    mel = sorted((n for n in melody_notes if not n.get("muted")), key=lambda n: n["start"])
+    if not mel:
+        return []
+    lo_m = min(n["pitch"] for n in mel)
+    low = low if low is not None else lo_m - 14
+    high = high if high is not None else lo_m - 1
+    pool = [p for p in range(low, high + 1) if p % 12 in key.pitch_classes()]
+    if not pool:
+        raise ValueError("no scale notes in that range for the counter-melody")
+    end = max(n["start"] + n["length"] for n in mel)
+
+    def melody_at(t: float) -> dict | None:
+        return next((n for n in mel if n["start"] <= t + 1e-6 < n["start"] + n["length"]), None)
+
+    def melody_move(t: float) -> int:
+        """+1 / -1 / 0: where the melody is heading around t."""
+        before = [n for n in mel if n["start"] <= t]
+        after = [n for n in mel if n["start"] > t]
+        if before and after:
+            return (after[0]["pitch"] > before[-1]["pitch"]) - (after[0]["pitch"] < before[-1]["pitch"])
+        return 0
+
+    # Room: inside long held notes (after their first 8th) and in the gaps between notes.
+    slots: list[float] = []
+    t = min(n["start"] for n in mel)
+    grid = 0.5
+    while t < end - 1e-6:
+        here = melody_at(t)
+        moving = any(abs(n["start"] - t) < 1e-6 for n in mel)
+        in_gap = here is None
+        # Under a held note it moves in quarters (on the beat); in a gap, in 8ths.
+        under_hold = (here is not None and here["length"] >= HOLD_QN and t >= here["start"] + grid - 1e-6
+                      and not moving and abs(t % 1) < 1e-6)
+        if (in_gap or under_hold) and rng.random() < 0.35 + 0.6 * density:
+            slots.append(round(t, 6))
+        t += grid
+    # Where the melody is busy for a whole half bar: one held note under it.
+    first = min(n["start"] for n in mel)
+    w = math.ceil(first / 2 - 1e-9) * 2   # from the first half bar the melody is in, never before it
+    while w < end - 1e-6:
+        if not any(w - 1e-6 <= s_ < w + 2 - 1e-6 for s_ in slots) and rng.random() < 0.3 + 0.7 * density:
+            slots.append(float(w))
+        w += 2
+    slots.sort()
+
+    def sounding(t0: float, t1: float) -> list[dict]:
+        return [n for n in mel if n["start"] < t1 - 1e-6 and n["start"] + n["length"] > t0 + 1e-6]
+
+    notes: list[dict] = []
+    recent: list[int] = []
+    prev = pool[len(pool) // 2]
+    prev_interval = None
+    for k, t in enumerate(slots):
+        strong = abs(t % 1) < 1e-6
+        pcs = chords_at(t) or key.pitch_classes()
+        above = melody_at(t)
+        nxt = slots[k + 1] if k + 1 < len(slots) else t + 1.0
+        length = min(max(0.25, (nxt - t) * 0.92), 2.0)
+        against = sounding(t, t + length)
+        # Against the melody where it moves; free (but still moving) where it holds or rests.
+        melody_moves = any(abs(n["start"] - t) <= 0.5 + 1e-6 for n in mel)
+        direction = -melody_move(t) if melody_moves else 0
+        best, best_cost = None, None
+        for p in pool:
+            step = p - prev
+            cost = abs(step) * 0.5
+            if step == 0:
+                cost += 3.0                      # a line, not one note repeated
+            elif p in recent:
+                cost += 1.2                      # nor two notes swapped back and forth
+            if direction and step and (step > 0) != (direction > 0):
+                cost += 2.0                      # contrary motion: against the melody's way
+            if strong and p % 12 not in pcs:
+                cost += 4.0
+            if any((n["pitch"] - p) % 12 == 0 for n in against):
+                cost += 10.0                     # unison or octave with the melody
+            if above is not None:
+                iv = (above["pitch"] - p) % 12
+                if iv in (3, 4, 8, 9):
+                    cost -= 1.5                  # a 3rd or 6th under it
+                if prev_interval is not None and iv in (0, 7) and prev_interval == iv:
+                    cost += 8.0                  # parallel 5ths or octaves
+            cost += rng.random() * 0.5
+            if best_cost is None or cost < best_cost:
+                best, best_cost = p, cost
+        notes.append({"pitch": best, "start": t, "length": round(length, 6),
+                      "velocity": max(1, min(127, velocity + (4 if strong else -4))), "channel": 1})
+        prev_interval = ((above["pitch"] - best) % 12) if above is not None else None
+        prev = best
+        recent = (recent + [best])[-2:]
+    return notes
+
+
+def answer(motif: list[dict], key: Key, gap: float = 0.0) -> list[dict]:
+    """A reply to a motif, placed right after it (plus gap QN): the same rhythm, its
+    contour turned upside down around its first note, and its last note on the tonic
+    (or on the 5th when the motif itself ends home), the way a call gets its response."""
+    if not motif:
+        return []
+    ns = sorted(motif, key=lambda n: n["start"])
+    t0 = ns[0]["start"]
+    span = max(n["start"] + n["length"] for n in ns) - t0
+    turned = invert(ns, axis=ns[0]["pitch"], key=key)
+    shift = span + gap
+    out = [dict(n, start=round(n["start"] + shift, 6)) for n in turned]
+    last = out[-1]
+    home_pc = key.tonic if ns[-1]["pitch"] % 12 != key.tonic else (key.tonic + 7) % 12
+    last["pitch"] = min((p for p in range(max(0, last["pitch"] - 7), min(127, last["pitch"] + 7) + 1)
+                         if p % 12 == home_pc), key=lambda p: abs(p - last["pitch"]))
+    return out
 
 
 def sequence(notes: list[dict], key: Key, repeats: int = 2, steps: int = -1, span: float | None = None) -> list[dict]:

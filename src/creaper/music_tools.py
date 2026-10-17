@@ -94,6 +94,7 @@ def _events(chords: list[TimedChord] | str, key: Key | None, chord_length: float
         parsed, nums, key2 = _parse_list(chords, key)
         events = composer.timeline(parsed, chord_length, start, [n or "" for n in nums])
     else:
+        chords = [TimedChord(**c) if isinstance(c, dict) else c for c in chords]   # e.g. plan_harmony's fill
         parsed, nums, key2 = _parse_list([c.chord for c in chords], key)
         events, t = [], start
         for c, sc, num in zip(chords, parsed, nums):
@@ -547,7 +548,9 @@ def add_chord_progression(
         "cluster (with added 9ths), satb (four-part chorale by the voice-leading rules)"))] = "close",
     rhythm: Annotated[Rhythm, Field(description="How the chords are played: sustain, stabs, offbeat, skank, strum, bossa, montuno, charleston, arpeggio_up, alberti, pulse_16...")] = "sustain",
     chord_length: Annotated[float, Field(gt=0, description="QN per chord when chords is a string")] = 4.0,
-    octave: Annotated[int, Field(ge=1, le=7, description="Register; 4 is around middle C")] = 4,
+    octave: Annotated[int, Field(ge=1, le=7, description=(
+        "Register: 3 (default) keeps the chords around C3-C5, under a lead; 4 is an octave up, around middle C "
+        "and above"))] = 3,
     bass_octave: Annotated[int | None, Field(ge=0, le=6, description="Also add the root (or slash bass) in this octave, e.g. 2")] = None,
     arp_rate: Annotated[float, Field(gt=0, le=4, description="Note length for arpeggio patterns in QN (0.25 = 16ths)")] = 0.5,
     velocity: Annotated[int, Field(ge=1, le=127, description="Note velocity, 1-127")] = 80,
@@ -555,6 +558,10 @@ def add_chord_progression(
     replace: Annotated[bool, Field(description="Delete the item's existing notes first")] = False,
     seed: Annotated[int | None, Field(description="Seeds the small random velocity variations; same seed, same part")] = None,
     feel: FeelArg = "natural",
+    anticipate: Annotated[bool | None, Field(description=(
+        "Land each chord change an 8th early (pushed); default: on for stabs, push and charleston"))] = None,
+    suspensions: Annotated[bool, Field(description=(
+        "In held styles, a 4-3 suspension on the last chord of each 4-chord phrase"))] = True,
 ) -> dict:
     """Writes a chord part (pads, piano or guitar comping, stabs, arpeggios) into a
     MIDI item from chord symbols or Roman numerals with a key, in the voicing and
@@ -564,12 +571,16 @@ def add_chord_progression(
     suggest_progressions or a genre profile can supply the chords. Returns each
     chord's Roman numeral and the notes chosen. It's played with a feel (chords
     rolled slightly low to high, the top voice singing, accents on the beat; held
-    pads stay smooth) unless feel is 'none'."""
+    pads stay smooth) unless feel is 'none'. The voicings keep the top line moving (no
+    top note three times running) and re-voice a chord that comes back; stab styles
+    anticipate the changes and held styles take a 4-3 suspension at phrase ends. The
+    default register (octave 3) changed from 4: chords now sit under the lead."""
     k = _key(key)
     events, k = _events(chords, k, chord_length, start)
     voicings = composer.voice_chords([e.chord for e in events], voicing, octave, key=k)
     meter = _project_meter() if rhythm not in ("sustain",) else "4/4"
     notes = composer.comp(events, voicings, rhythm, meter=meter, velocity=velocity, rate=arp_rate, seed=seed)
+    notes = composer.develop_comp(notes, events, rhythm, anticipate, suspensions)
     if bass_octave is not None:
         for e in events:
             notes.append({"pitch": theory.bass_note(e.chord.to_chord(), bass_octave), "start": e.start,
@@ -599,19 +610,35 @@ def write_bassline(
     replace: Annotated[bool, Field(description="Delete the item's existing notes first")] = False,
     seed: Annotated[int | None, Field(description="Varies the line in styles with choices (walking, syncopated...); same seed, same line")] = None,
     feel: FeelArg = "natural",
+    develop: Annotated[bool, Field(description=(
+        "Make the line move rather than loop: approach notes into chord changes, every second bar varied, a fill "
+        "at the end of every 4th bar (riff styles; held, walking and tumbao lines are left as they are)"))] = True,
+    groove: Annotated[list[float] | None, Field(description=(
+        "Where the kick hits in the bar (QN from the bar line, e.g. [0, 1, 2, 3] four on the floor, [0, 2.5] a "
+        "broken beat), to play with it"))] = None,
+    kick: Annotated[Literal["lock", "avoid"], Field(description=(
+        "With groove: lock (notes on the kick accented, the rest softer: bass and kick as one) or avoid (notes "
+        "moved off the kick: the offbeat house bass)"))] = "lock",
 ) -> dict:
     """Composes a bassline into a MIDI item that follows a chord progression in a
-    chosen style (walking, 808, one-drop, octaves, tumbao...), in the project's meter.
-    Use it to have creaper write the bass from chords; add_midi_notes takes a bass
-    line you've written note by note. It's played with a feel (in the pocket, leaning
-    on the downbeats) unless feel is 'none'. Returns the key, the style and the first
-    notes."""
+    chosen style (walking, 808, one-drop, octaves, tumbao...), in the project's meter,
+    and by default develops it: approach notes into the chord changes, two-bar cells
+    with the second bar varied, and fills at the ends of phrases, so it doesn't loop one
+    bar; groove locks it to (or keeps it off) the kick. Use it to have creaper write the
+    bass from chords; add_midi_notes takes a line you've written note by note. It's
+    played with a feel (in the pocket, leaning on the downbeats) unless feel is 'none'.
+    Returns the key, the style, how varied the bars are and the first notes."""
     k = _key(key)
     events, k = _events(chords, k, chord_length, start)
-    notes = composer.bassline(events, style, k, octave, meter=_project_meter(), velocity=velocity, seed=seed)
+    meter = _project_meter()
+    notes = composer.bassline(events, style, k, octave, meter=meter, velocity=velocity, seed=seed)
+    if develop:
+        notes = composer.develop_bass(notes, events, style, meter, seed, groove, kick)
+    variety = composer.bar_variety(notes, meter)   # before the feel: its timing makes every bar look new
     notes = _perform(notes, "bass", feel, seed)
     result = _write(item_id, notes, replace)
-    result.update({"key": k.name, "style": style, "first_bar": _note_names([n["pitch"] for n in notes[:8]])})
+    result.update({"key": k.name, "style": style, "distinct_bars": variety,
+                   "first_bar": _note_names([n["pitch"] for n in notes[:8]])})
     return result
 
 
@@ -621,10 +648,12 @@ def write_melody(
     chords: TimedChordsArg,
     key: KeyArg = None,
     density: Annotated[Literal["sparse", "medium", "busy"], Field(description="How many notes per bar")] = "medium",
-    low: Annotated[str | int, Field(description="Lowest note, e.g. C4 (vocal-like), A3")] = "C4",
-    high: Annotated[str | int, Field(description="Highest note, e.g. G5")] = "G5",
+    low: Annotated[str | int, Field(description=(
+        "Lowest note: G4 (default) keeps a lead over chords at their default octave 3; C4 or lower for a "
+        "vocal-like line, A3 for a low one (robot vocals are clearest below E4)"))] = "G4",
+    high: Annotated[str | int, Field(description="Highest note, e.g. C6 (default)")] = "C6",
     scale: Annotated[str | None, Field(description="Scale the melody uses, e.g. 'minor pentatonic', 'blues'; default: the key's")] = None,
-    phrase_bars: Annotated[int, Field(ge=1, le=16, description="Phrase length: the motif repeats and the phrase closes every this many bars")] = 4,
+    phrase_bars: Annotated[int, Field(ge=1, le=16, description="Phrase length: the cell repeats and the phrase closes every this many bars")] = 4,
     syncopation: Annotated[float, Field(ge=0, le=1, description="How often notes land off the beat, 0-1")] = 0.3,
     chord_length: Annotated[float, Field(gt=0, description="QN per chord when chords is a string")] = 4.0,
     velocity: Annotated[int, Field(ge=1, le=127, description="Note velocity, 1-127")] = 92,
@@ -632,23 +661,126 @@ def write_melody(
     replace: Annotated[bool, Field(description="Delete the item's existing notes first")] = False,
     seed: Annotated[int | None, Field(description="Same seed, same melody; change it for another idea")] = None,
     feel: FeelArg = "natural",
+    shape: Annotated[Literal["hook", "verse", "answer"], Field(description=(
+        "What the melody is for: hook (a chorus or lead line, high in the range), verse (lower, more talkative), "
+        "answer (between, for a reply to another line)"))] = "hook",
+    register_lift: Annotated[int, Field(ge=-6, le=6, description=(
+        "Scale steps up (or down) from the shape's register: a chorus 2-4 steps over its verse"))] = 0,
+    rests: Annotated[bool, Field(description="End each phrase with a held note and a breath")] = True,
+    candidates: Annotated[int, Field(ge=1, le=12, description=(
+        "Compose this many (seeds from seed up) and keep the one with the best hook_score"))] = 1,
+    write: Annotated[bool, Field(description="False: only return the notes and scores, write nothing")] = True,
 ) -> dict:
-    """Composes a melody into a MIDI item over a chord progression: a rhythmic motif
-    developed in phrases, chord tones on strong beats, stepwise lines with leaps
-    recovered, a high point, a half-close at the end of the first phrase and the
-    tonic at the end. Use it to have creaper invent a lead or topline; add_midi_notes
-    writes a melody you've worked out note by note, and place_motif reuses a saved
-    theme. Try several seeds. It's played with a feel (phrases louder toward their
-    peak, strong beats leaning) unless feel is 'none'. Returns the notes and the
-    non-chord tones used."""
+    """Composes a melody into a MIDI item over a chord progression, built like a song's:
+    a one-bar cell (rhythm and contour) that its phrases repeat, move onto each chord and
+    vary, phrases in a period A A' B A'' (B a contrasting, higher cell), question
+    phrases ending on the 2nd or 5th and answers on the tonic, a breath at the end of
+    each phrase, each later period a step higher so the line builds to a late peak, and
+    the tonic at the end. hook_score in the result rates its shape (score 0 is best:
+    bars that come back, a singable range, room to breathe, a late peak); candidates
+    keeps the best of several seeds, write=False tries without writing. Use it for a
+    lead or topline; add_midi_notes writes one worked out note by note, place_motif
+    reuses a saved theme, write_counter_melody adds a second line. It's played with a
+    feel (phrases louder toward their peak) unless feel is 'none'."""
     k = _key(key)
     events, k = _events(chords, k, chord_length, start)
-    notes = composer.melody(events, k, density, theory.note_to_midi(low), theory.note_to_midi(high), scale,
-                            _project_meter(), phrase_bars, seed, syncopation, velocity)
+    lo, hi = theory.note_to_midi(low), theory.note_to_midi(high)
+    base = seed if seed is not None else random.randrange(1, 10**6)
+    tried = []
+    for s_ in range(base, base + candidates):
+        notes = composer.melody(events, k, density, lo, hi, scale, _project_meter(), phrase_bars, s_, syncopation,
+                                velocity, shape=shape, rests=rests, register_lift=register_lift)
+        tried.append((composer.hook_score(notes, _project_meter()), s_, notes))
+    score, chosen_seed, notes = min(tried, key=lambda x: (x[0].get("score", 99), x[1]))
+    result: dict = {"key": k.name, "seed": chosen_seed, "hook_score": score, "notes_written": 0,
+                    "melody": _note_names([n["pitch"] for n in notes][:32]),
+                    "nonchord_tones": composer.nonchord_tones(notes, events)[:12]}
+    if candidates > 1:
+        result["candidates"] = [{"seed": s_, **{k_: v for k_, v in sc.items() if k_ in ("score", "bar_repetition", "peak_position")}}
+                                for sc, s_, _ in tried]
+    if not write:
+        result["note"] = "nothing written: call again with write=True and this seed to keep it"
+        return result
+    played = _perform(notes, "lead", feel, chosen_seed)
+    result.update(_write(item_id, played, replace))
+    result["notes_written"] = len(notes)
+    return result
+
+
+@tool()
+def write_counter_melody(
+    item_id: ItemId,
+    melody_item_id: Annotated[str, Field(description="The melody to answer (a MIDI item)")],
+    chords_item_id: Annotated[str | None, Field(description="The chord part, for chord tones on the beat")] = None,
+    chords: Annotated[str | None, Field(description="Or the chords as text, e.g. 'Am F C G' (chord_length QN each)")] = None,
+    key: KeyArg = None,
+    chord_length: Annotated[float, Field(gt=0, description="QN per chord when chords is text")] = 4.0,
+    low: Annotated[str | int | None, Field(description="Lowest note; default: about an octave under the melody")] = None,
+    high: Annotated[str | int | None, Field(description="Highest note; default: just under the melody's lowest")] = None,
+    density: Annotated[float, Field(ge=0, le=1, description="How much of the melody's room it fills, 0-1")] = 0.5,
+    replace: Annotated[bool, Field(description="Delete the item's existing notes first")] = False,
+    seed: Annotated[int | None, Field(description="Same seed, same line")] = None,
+    feel: FeelArg = "natural",
+) -> dict:
+    """Writes a counter-melody: a second line that answers the melody rather than
+    doubling it. It moves where the melody rests or holds a long note, goes against the
+    melody's direction, lands on chord tones on the beat, sits a 3rd or 6th under the
+    melody where they overlap (never in unison or octaves with it), stays below it, and
+    avoids parallel 5ths and octaves. Put it on its own track with another sound (a
+    pad, strings, a second synth) so the two lines are heard apart."""
+    mel = call("get_midi_notes", item_id=melody_item_id, limit=20000).get("notes", [])
+    if not mel:
+        raise ValueError("the melody item has no notes")
+    if chords_item_id:
+        chord_notes = call("get_midi_notes", item_id=chords_item_id, limit=20000).get("notes", [])
+        at = composer.chord_lookup(chord_notes)
+    elif chords:
+        k0 = _key(key)
+        events, _ = _events(chords, k0, chord_length, 0.0)
+
+        def at(t: float):
+            e = composer.chord_at(events, t)
+            return e.chord.pitch_classes() if e else None
+    else:
+        at = lambda t: None  # noqa: E731 - no chords given: scale tones only
+    k = _key(key)
+    if k is None:
+        k = harmony.parse_key(harmony.detect_key(harmony.histogram_from_notes(mel),
+                                                 min(mel, key=lambda n: n["start"])["pitch"] % 12)[0]["key"])
+    lo = theory.note_to_midi(low) if low is not None else None
+    hi = theory.note_to_midi(high) if high is not None else None
+    notes = composer.counter_melody(mel, at, k, lo, hi, density, seed)
+    if not notes:
+        raise ValueError("the melody leaves no room for a counter-melody (no rests or held notes)")
     played = _perform(notes, "lead", feel, seed)
     result = _write(item_id, played, replace)
-    result.update({"key": k.name, "notes_written": len(notes), "melody": _note_names([n["pitch"] for n in notes][:32]),
-                   "nonchord_tones": composer.nonchord_tones(notes, events)[:12]})
+    result.update({"key": k.name, "notes_written": len(notes), "line": _note_names([n["pitch"] for n in notes][:24])})
+    return result
+
+
+@tool()
+def write_answer(
+    item_id: ItemId,
+    motif_item_id: Annotated[str, Field(description="The item with the motif (the call) to answer")],
+    key: KeyArg = None,
+    gap: Annotated[float, Field(ge=0, le=8, description="QN of rest between the call and the answer")] = 0.0,
+    replace: Annotated[bool, Field(description="Delete the item's existing notes first")] = False,
+    feel: FeelArg = "natural",
+) -> dict:
+    """Writes the answer to a motif, call-and-response style: the same rhythm right
+    after it, its contour upside down, ending on the tonic (or the 5th when the call
+    already ended home). Write it into the same item for a two-part phrase, or onto
+    another track for one instrument answering another."""
+    motif = call("get_midi_notes", item_id=motif_item_id, limit=20000).get("notes", [])
+    if not motif:
+        raise ValueError("the motif item has no notes")
+    k = _key(key) or harmony.parse_key(harmony.detect_key(harmony.histogram_from_notes(motif),
+                                                          min(motif, key=lambda n: n["start"])["pitch"] % 12)[0]["key"])
+    notes = composer.answer(motif, k, gap)
+    played = _perform(notes, "lead", feel, None)
+    result = _write(item_id, played, replace)
+    result.update({"key": k.name, "answer": _note_names([n["pitch"] for n in notes][:24]),
+                   "starts_at_qn": notes[0]["start"]})
     return result
 
 
@@ -698,21 +830,107 @@ def add_genre_groove(
     start: Annotated[float, Field(ge=0, description="Start in QN from the item start")] = 0.0,
     replace: Annotated[bool, Field(description="Delete the item's existing notes first")] = False,
     feel: Annotated[FeelName | None, Field(description="How it's played; default: the genre's own feel (performance_feel)")] = None,
+    bars: Annotated[int | None, Field(ge=1, le=512, description=(
+        "Fill this many bars (instead of repeats): a whole section, varied as it goes"))] = None,
+    variations: Annotated[bool, Field(description=(
+        "Keep it alive as a drummer would: a small change every 2nd and 4th bar, a fill every 8th (in the genre's "
+        "fill style, bigger every 16th) and a crash after it. False repeats the stock groove exactly"))] = True,
+    energy: Annotated[int | None, Field(ge=1, le=4, description=(
+        "The section's energy: 4 (chorus, drop) puts the hats in 16ths, 1 (intro, breakdown) thins the kick to "
+        "the strong beats; default: as written"))] = None,
+    seed: Annotated[int | None, Field(description="Same seed, same variations")] = None,
 ) -> dict:
-    """Programs a genre's stock drum groove (from its genre profile, with the genre's
-    swing) on the track's drum instrument in one call: a quick, idiomatic starting
-    beat. For your own pattern, fills and variations use add_drum_pattern, which this
-    calls. Returns the lanes and notes used, and how drums work in that genre."""
+    """Programs a genre's drum groove (from its genre profile, with the genre's swing)
+    on the track's drum instrument in one call, developed over the bars: small
+    variations every 2nd and 4th bar, a fill every 8th in the genre's own fill style
+    (snare or clap roll, toms, a drop-out), a crash on the downbeat after it, and hats
+    and kick that follow the section's energy. Write one call per section (bars=, its
+    energy) so the verse and chorus differ. For your own pattern use add_drum_pattern,
+    which this calls. Returns the lanes and notes used, how varied the bars are, and how
+    drums work in that genre."""
+    from . import grooves
+
     g = genres.find(genre)
     groove = g.groove
+    step = groove.get("step", 0.25)
     played_as = feel or feel_mod_for(g)
-    result = add_drum_pattern(item_id=item_id, pattern=dict(groove["pattern"]), step=groove.get("step", 0.25),
-                              repeats=repeats, swing=groove.get("swing", g.swing), humanize=humanize, start=start,
+    pattern = dict(groove["pattern"])
+    meter = _project_meter()
+    bar_qn = composer._bar_len(meter)
+    longest = max(len([c for c in s if c not in " |"]) for s in pattern.values())
+    groove_bars = max(1, round(longest * step / bar_qn))
+    total_bars = bars or repeats * groove_bars
+    fill = grooves.fill_style_for(g)
+    if variations or energy is not None or bars:
+        pattern = grooves.vary_groove(pattern, step, total_bars, fill if variations else "none",
+                                      energy, 0 if seed is None else seed, bar_qn)
+        if not variations:  # energy only: no fills or variations, the same bar each time
+            pattern = grooves.vary_groove(dict(groove["pattern"]), step, total_bars, "none", energy, 0, bar_qn)
+        reps = 1
+    else:
+        reps = repeats
+    result = add_drum_pattern(item_id=item_id, pattern=pattern, step=step, repeats=reps,
+                              swing=groove.get("swing", g.swing), humanize=humanize, start=start,
                               replace=replace, feel=played_as)
     result["genre"] = g.name
     result["feel"] = played_as
+    result["bars"] = total_bars
+    if variations:
+        result["fill_style"] = fill
+        result["distinct_bars"] = grooves.distinct_bars(pattern, step, bar_qn)
     result["how_the_drums_work"] = g.drums
     return result
+
+
+@tool(annotations=READ_ONLY)
+def plan_harmony(
+    genre: Annotated[str, Field(description="A genre from list_genres; its progressions are the starting point")],
+    key: KeyArg = None,
+    sections: Annotated[list[str] | None, Field(description=(
+        "Section names in order, e.g. ['Intro', 'Verse 1', 'Pre-Chorus', 'Chorus', ...]; default: the project's regions"))] = None,
+    lift_last_chorus: Annotated[bool, Field(description=(
+        "Put the last chorus a whole step up (the classic pop lift); needs two or more choruses"))] = False,
+    seed: Annotated[int | None, Field(description="Varies the bridge's reharmonisation")] = None,
+) -> dict:
+    """Plans the harmony section by section so the song doesn't loop one progression:
+    verses on the genre's first progression, choruses on its second (or the first
+    turned to start on IV or vi), a pre-chorus that avoids the tonic and ends on V, a
+    bridge that reharmonises the verse, and optionally a last chorus a whole step up.
+    Returns each section's chords (one pass of its progression); with the sections taken
+    from the regions, also 'fill': the chords, timed, repeated to fill the region at the
+    genre's harmonic rhythm, from its start_bar. Pass a section's fill as the chords of
+    add_chord_progression, write_bassline and write_melody, starting at its bar.
+    Read-only."""
+    g = genres.find(genre)
+    k = _key(key) or harmony.parse_key(g.keys[0] if g.keys else f"{'A' if 'minor' in g.modes[0] else 'C'} {g.modes[0]}")
+    names = sections
+    spans: list[tuple[float, float]] = []
+    overview = None
+    if not names:
+        overview = call("get_project_overview")
+        regions = sorted(overview.get("regions", []), key=lambda r: r["start"]["seconds"])
+        names = [r["name"] for r in regions]
+        spans = [(r["start"].get("bar"), r.get("end", {}).get("bar")) for r in regions]
+    if not names:
+        raise ValueError("give the sections, or name them as regions first")
+    plan = composer.plan_harmony(list(g.progressions), k, names, lift_last_chorus, seed, default_mode=g.modes[0])
+    if spans and all(a is not None and b is not None for a, b in spans):
+        bar_qn = composer._bar_len(overview.get("time_signature") or "4/4")
+        chord_qn = round(bar_qn / g.harmonic_rhythm, 6)
+        for row, (a, b) in zip(plan, spans):
+            chords = row["chords"].split()
+            slots = row.pop("slots", None) or [1.0] * len(chords)
+            total, t, i, fill = (b - a) * bar_qn, 0.0, 0, []
+            while t < total - 1e-6:
+                length = min(slots[i % len(chords)] * chord_qn, total - t)
+                fill.append({"chord": chords[i % len(chords)], "length": round(length, 6)})
+                t += length
+                i += 1
+            row.update({"start_bar": a, "bars": round(b - a, 2), "fill": fill})
+    else:
+        for row in plan:
+            row.pop("slots", None)
+    return {"genre": g.name, "key": k.name, "sections": plan}
 
 
 @tool(annotations=READ_ONLY)
@@ -858,18 +1076,20 @@ def sketch_song(
                                    humanize=0.15, feel=played_as)
             entry["lanes"] = res.get("lanes")
         elif part == "bass":
-            notes = composer.bassline(events, g.bass_style if g.bass_style != "none" else "root", k, 2, meter, seed=seed)
+            bass_style = g.bass_style if g.bass_style != "none" else "root"
+            notes = composer.bassline(events, bass_style, k, 2, meter, seed=seed)
+            notes = composer.develop_bass(notes, events, bass_style, meter, seed)
             entry["notes"] = _write(item["id"], _perform(notes, "bass", played_as, seed), False).get("note_count")
             entry["style"] = g.bass_style
         elif part == "chords":
-            voicings = composer.voice_chords([e.chord for e in events], g.voicing, 4, key=k)
+            voicings = composer.voice_chords([e.chord for e in events], g.voicing, 3, key=k)
             comping = g.comping if g.comping != "none" else "sustain"
             notes = composer.comp(events, voicings, comping, meter=meter, seed=seed)
             role = "pad" if comping == "sustain" else "arp" if comping.startswith(("arpeggio", "alberti", "pulse")) else "chords"
             entry["notes"] = _write(item["id"], _perform(notes, role, played_as, seed), False).get("note_count")
             entry["voicing"], entry["comping"] = g.voicing, g.comping
         elif part == "melody":
-            notes = composer.melody(events, k, g.melody_density, 62, 81, g.melody_scale, meter, 4, seed,
+            notes = composer.melody(events, k, g.melody_density, 67, 86, g.melody_scale, meter, 4, seed,
                                     0.5 if g.swing > 54 else 0.3)
             entry["notes"] = _write(item["id"], _perform(notes, "lead", played_as, seed), False).get("note_count")
             entry["scale"] = g.melody_scale or k.scale.name

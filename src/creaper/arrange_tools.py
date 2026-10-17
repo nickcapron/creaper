@@ -33,6 +33,27 @@ FILLS = {  # (steps per lane, 16th steps) ending on the downbeat
 }
 
 
+# The same fills in a genre's own style (genres' fill_style, grooves.fill_style_for).
+STYLED_FILLS = {
+    "snare_roll": {"subtle": {"snare": "..57"}, "build": {"snare": "3456789X"},
+                   "epic": {"snare": "o.o.o.o.xxxxXXXX"}},
+    "clap_roll": {"subtle": {"clap": "..57"}, "build": {"clap": "3456789X"},
+                  "epic": {"clap": "o.o.o.o.xxxxXXXX"}},
+    "tom": {"subtle": {"low tom": "..5X"}, "build": {"high tom": "x.x.....", "mid tom": "....x...", "low tom": "......xX"},
+            "epic": FILLS["epic"]},
+}
+
+
+def fill_for(intensity: str, fill_style: str | None) -> dict[str, str] | None:
+    """The fill to write: in the genre's style when one is given (None for a genre
+    whose fill is a drop-out or nothing), else the stock fills."""
+    if not fill_style:
+        return FILLS[intensity]
+    if fill_style in ("dropout", "none"):
+        return None
+    return STYLED_FILLS.get(fill_style, STYLED_FILLS["snare_roll"])[intensity]
+
+
 def energy(name: str) -> int:
     n = name.lower()
     return next((level for pattern, level in ENERGY if re.search(pattern, n)), 2)
@@ -157,6 +178,9 @@ def add_transitions(
     elements: Annotated[list[Element] | None, Field(description=(
         "Only these touches: riser, reverse, impact, downlifter, crash, fill, dropout; default: chosen per change"))] = None,
     drum_track: Annotated[str | int | None, Field(description="Track for fills, crashes and drop-outs; default: the one named Drums/Kit/Beat")] = None,
+    style: Annotated[str | None, Field(description=(
+        "The song's genre: fills follow its fill style (a clap roll for house, toms for rock, no fill where the "
+        "genre drops out instead)"))] = None,
 ) -> dict:
     """Adds transitions and ear candy at every section change, as a producer would: into
     a bigger section a riser (or reverse swell) building to it, an impact and a crash on
@@ -170,6 +194,11 @@ def add_transitions(
     several undo steps: to take it all off, delete the Transitions items and undo the
     drum edits. Returns what was added at each change."""
     overview = call("get_project_overview")
+    fill_style = None
+    if style:
+        from . import genres, grooves
+
+        fill_style = grooves.fill_style_for(genres.find(style))
     if sections is None:
         if overview.get("regions"):
             sections = sections_from_regions(overview["regions"])
@@ -240,7 +269,9 @@ def add_transitions(
                             "length": 1.0, "velocity": 112, "channel": channel}])
                         done.append(e)
                 elif e == "fill":
-                    pattern = FILLS[intensity]
+                    pattern = fill_for(intensity, fill_style)
+                    if pattern is None:
+                        continue  # this genre drops out (or plays on) instead of filling
                     steps = max(len(s) for s in pattern.values())
                     fill_start = at_qn - steps * 0.25
                     item = _item_at(drum_items, fill_start)
@@ -249,7 +280,9 @@ def add_transitions(
                         rel = max(0.0, fill_start - item["start"]["qn"])
                         # The fill replaces the groove under it (the backbeat snare, and for
                         # a tom fill the hats), or the two play at once and flam.
-                        clear = list(pattern) + (["closed hat", "open hat"] if intensity == "epic" else [])
+                        toms = any("tom" in lane for lane in pattern)
+                        clear = list(pattern) + (["closed hat", "open hat"] if toms and intensity == "epic" else []) + \
+                            (["snare"] if toms else [])
                         for lane in clear:
                             call("delete_midi_notes", item_id=item["id"], start=rel, end=at_qn - item["start"]["qn"],
                                  pitch=_lane(item["id"], lane)[0])
