@@ -78,7 +78,9 @@ When the user complains, measure before changing anything:
   role and genre (find_arturia_presets to browse); layer.
 - stiff, robotic, mechanical: check_groove; apply_feel with the role and genre feel.
 - out of tune: check_tuning; audition_sounds reports each patch's tuning.
-- clipping, distorted, squashed: analyze_audio (clipped_runs, crest), a lower target.
+- clipping, distorted, squashed: analyze_audio (clipped_runs, crest); master_to_target
+  reports limiter_gr_db and the peakiest parts when the mix needs density: auto_mix's
+  dynamics stage (or compress those parts), then master again, or a lower target.
 - flat, doesn't build: measure_structure (section loudness against its role).
 - can't understand the words: check_vocal_clarity.
 Work out whether it's the tuning, the sound, the notes or the level, fix that one thing,
@@ -1334,7 +1336,10 @@ def setup_sidechain(
     """Sets up side-chain compression in one go: routes the source into the target's
     compressor sidechain (channels 3/4), switches the compressor to listen to it,
     then measures the source and sets the sidechain level (and ReaComp's threshold)
-    so it actually ducks by about the depth asked for."""
+    so it actually ducks by about the depth asked for. With ReaComp the depth is then
+    measured on the ducked part (with and without the compressor) and the threshold
+    calibrated to it; a whole kit as the trigger gets its detector low-passed at 150 Hz
+    so only the kick ducks."""
     result = call("setup_sidechain", source=source, target=target, compressor=compressor, fx=fx)
     # A quiet trigger never crosses the threshold, so calibrate on the source's real level.
     measured = analyze_audio(track=source)
@@ -1357,9 +1362,24 @@ def setup_sidechain(
     if result.get("is_reacomp"):
         # Measured with a -6 dBFS trigger: about 2, 4.5 and 10 dB of average ducking.
         threshold = {"light": -24, "medium": -34, "heavy": -44}[depth]
-        call("set_fx_parameters", track=ducked, fx=result["fx_index"],
-             changes=[{"parameter": "Threshold", "display_value": threshold}])
+        changes = [{"parameter": "Threshold", "display_value": threshold}]
+        source_name = str(call("describe_track", track=source).get("name") or source)
+        if re.search(r"drum|kit|beat|groove|loop", source_name, re.I) and not re.search(r"kick|\bbd\b", source_name, re.I):
+            # A whole kit triggering: only its kick should duck (a full-kit trigger once
+            # ducked a bass 24 dB on every hat and snare).
+            changes.append({"parameter": "Lowpass", "display_value": KIT_DETECTOR_LOWPASS_HZ})
+            result["detector_lowpass_hz"] = KIT_DETECTOR_LOWPASS_HZ
+        call("set_fx_parameters", track=ducked, fx=result["fx_index"], changes=changes)
         result["threshold_db"] = threshold
+        # Then by measurement: the ducked part with and without the compressor.
+        try:
+            profile = plugin_profiles.find_profile("ReaComp")
+            cal = _calibrate_compressor(ducked, result["fx_index"], profile, DUCK_DEPTH_DB[depth], None, None,
+                                        sidechain=True)
+            result["threshold_db"] = cal.get("value", threshold)
+            result["measured_ducking_db"] = cal.get("loud_part_reduction_db")
+        except Exception as e:  # noqa: BLE001 - the table threshold still ducks about right
+            result["note"] = f"ducking set from the table, not measured ({e})"
     else:
         result["note"] = (result.get("note") or "") + (
             " The trigger is set to peak around -6 dBFS; set how hard it ducks with the compressor's own "
@@ -1458,7 +1478,7 @@ def master_to_target(
     eq: Annotated[str | None, Field(description="Also put this EQ first on the master (added flat, for shaping tone), e.g. 'EQ SITRAL-295'")] = None,
     start_bar: Bar = None,
     end_bar: Annotated[float | None, Field(description="Measure only this range (e.g. the loudest section) to save time")] = None,
-    passes: Annotated[int, Field(ge=1, le=5)] = 3,
+    passes: Annotated[int, Field(ge=1, le=5)] = 4,
     force: Annotated[bool, Field(description=(
         "Master even when the mix fails its checks (clipping, a flat loudness range, a piercing top end); "
         "only after telling the user why it refused and getting a yes"))] = False,
@@ -1468,14 +1488,19 @@ def master_to_target(
     Arturia's Bus FORCE, Comp VCA-65, FET-76, TUBE-STA) are set up and calibrated by
     measurement so the glue takes about glue_db off the peaks. Then the limiter and
     master fader are adjusted until the integrated loudness is within 0.5 LU of the
-    target, and the true peak is checked against the ceiling. Each step renders the
-    range, so a short loud section is much faster than the whole song.
+    target, and the true peak is checked against the ceiling. The limiter never does
+    more than about 5 dB of gain reduction: if the target needs more, it stops there and
+    names the peakiest parts to compress (the mix needs density, not more limiting); a
+    sparse mix (peaks over 12 dB above its loudness) aims for the quiet end of the
+    style's range. Each step renders the range, so a short loud section is much faster
+    than the whole song.
     First it checks the mix (with any limiter and glue already on the master bypassed)
     and refuses, changing nothing, when it clips, when the whole song never changes level
     (loudness range under 2 LU, ambient styles excepted) or when it's piercing for its
     style: mastering would only make those worse. Fix the
     mix, or pass force=True when the user wants it mastered anyway."""
     profile_style = styles.find_style(style) if style else None
+    target_given = target_lufs
     if not force:
         # The mix as it reaches the master chain: a limiter or glue left by an earlier run
         # would flatten the loudness range this check is about.
@@ -1546,6 +1571,34 @@ def master_to_target(
     lim = limiter["index"]
     call("set_fx_parameters", track="master", fx=lim, changes=[{"parameter": "Ceiling", "display_value": ceiling_dbtp}])
     threshold = _number(call("get_fx_parameters", track="master", fx=lim, search="Threshold")["parameters"][0]["display"])
+    # What reaches the limiter (after the EQ and glue): ReaLimit's threshold is the gain
+    # into its ceiling, so its gain reduction on the peaks is about pre_peak - threshold.
+    call("update_fx", track="master", fx=lim, enabled=False)
+    try:
+        pre = analyze_audio(track="master", start_bar=start_bar, end_bar=end_bar)
+    finally:
+        call("update_fx", track="master", fx=lim, enabled=True)
+    start_fader = call("describe_track", track="master").get("volume_db") or 0.0
+    pre_peak = (pre.get("levels") or {}).get("sample_peak_dbfs")
+    if pre_peak is not None:
+        # Measured after the master fader, but the limiter sits before it.
+        pre_peak -= float(start_fader)
+    pre_lufs = (pre.get("loudness") or {}).get("integrated_lufs")
+    if pre_lufs is not None:
+        pre_lufs -= float(start_fader)
+    pre_plr = round(pre_peak - pre_lufs, 1) if pre_peak is not None and pre_lufs is not None else None
+    if pre_plr is not None:
+        result["mix_peak_to_loudness_db"] = pre_plr
+    if (target_given is None and style and pre_plr is not None and pre_plr > SPARSE_MIX_PLR_DB
+            and target_lufs > styles.find_style(style).lufs[0]):
+        # A sparse, peaky mix can't take the middle of the genre's range without crushing:
+        # aim for its quiet end.
+        target_lufs = styles.find_style(style).lufs[0]
+        result["target_lufs"] = target_lufs
+        result["target_note"] = (f"the mix's peaks sit {pre_plr:g} dB over its loudness (sparse or peaky), so this "
+                                 f"aims at the quiet end of {style}'s range rather than squashing it")
+    min_threshold = (pre_peak - LIMITER_MAX_GR_DB) if pre_peak is not None else -30.0
+    capped = False
     # Two controls: the limiter threshold pushes loudness up; the master fader (after
     # the limiter) brings it down, so a mix that's already too loud can be tamed.
     fader = call("describe_track", track="master").get("volume_db")
@@ -1571,7 +1624,13 @@ def master_to_target(
         if delta > 0:  # too quiet: undo any fader cut first, then drive the limiter
             lift = min(delta, -fader)
             fader += lift
-            threshold = max(-30.0, threshold - (delta - lift))
+            wanted = threshold - (delta - lift)
+            if wanted < min_threshold:
+                if threshold <= min_threshold + 0.05 and not lift:
+                    capped = True
+                    break  # already limiting as hard as it should
+                capped = True
+            threshold = max(-30.0, min_threshold, wanted)
         else:          # too loud: ease the limiter first, then pull the fader down
             ease = min(-delta, -threshold)
             threshold += ease
@@ -1597,6 +1656,17 @@ def master_to_target(
         final = history[-1]
     result["passes"] = history
     result["reached"] = abs(final["integrated_lufs"] - target_lufs) <= 0.5
+    if pre_peak is not None:
+        result["limiter_gr_db"] = round(max(0.0, pre_peak - threshold), 1)
+    if capped and not result["reached"]:
+        result["limited_at"] = (
+            f"stopped at {final['integrated_lufs']:g} LUFS: going louder would take more than {LIMITER_MAX_GR_DB:g} dB "
+            f"of limiting, which flattens the hits and sounds like clipping. The mix needs density first: compress "
+            f"the peakiest parts (below), or aim lower")
+        try:
+            result["peakiest_parts"] = _peakiest_parts(start_bar, end_bar)
+        except Exception:  # noqa: BLE001 - the advice is a bonus
+            pass
     result["true_peak_ok"] = final["true_peak_dbtp"] is None or final["true_peak_dbtp"] <= ceiling_dbtp + 0.05
     result["chain"] = [f["name"] for f in master_fx()]
     # Squashed = little room between peaks and loudness (loud commercial masters sit
@@ -1619,56 +1689,105 @@ def _number(display: str) -> float:
     return value * 1000 if re.search(r"\d\s*k", display.lower()) else value
 
 
-def _measure(track: str | int, start_bar: float | None, end_bar: float | None) -> dict:
-    m = analyze_audio(track=track, start_bar=start_bar, end_bar=end_bar)
-    if m.get("silent") or m.get("loudness", {}).get("integrated_lufs") is None:
-        raise ValueError("that range is silent, so there's nothing to measure")
-    return m
+LIMITER_MAX_GR_DB = 5.0       # more limiting than this on the peaks is heard as squashing or clipping
+SPARSE_MIX_PLR_DB = 12.0      # a mix whose peaks sit this far over its loudness is sparse or peaky
 
 
-def _crest(m: dict) -> float:
-    value = m.get("levels", {}).get("envelope_range_db")
-    if value is None:
-        raise ValueError(f"too little sound in that range to calibrate a compressor (measured: {m.get('levels')})")
-    return value
+def _peakiest_parts(start_bar: float | None, end_bar: float | None, top: int = 3) -> list[dict]:
+    """The tracks whose peaks stand furthest over their loudness (peak minus max short-term
+    LUFS): the ones to compress or clip when the master can't get loud."""
+    from .ear_tools import measure_tracks
+
+    table = measure_tracks(start_bar=start_bar, end_bar=end_bar).get("tracks", {})
+    rows = [{"track": name, "peak_to_loudness_db": round(m["peak_dbfs"] - m["lufs_playing"], 1)}
+            for name, m in table.items() if isinstance(m, dict) and m.get("peak_dbfs") is not None
+            and m.get("lufs_playing") is not None]
+    return sorted(rows, key=lambda r: -r["peak_to_loudness_db"])[:top]
 
 
+DUCK_DEPTH_DB = {"light": 2.0, "medium": 4.5, "heavy": 9.0}   # dB the ducked part dips under the hits
+KIT_DETECTOR_LOWPASS_HZ = 150   # a whole-kit trigger listens to its kick only
 THRESHOLD_BELOW_RMS_DB = 6.0  # a calibrated threshold stays within this of the material's RMS level
+CALIBRATE_BARS = 8            # compressors are calibrated on the song's loudest stretch this long
+MAX_DRIVE_STEP_DB = 6.0       # the secant step's limit: a big jump overshot into crushing
+
+
+def _render_array(track: str | int, start_bar: float | None, end_bar: float | None):
+    """Renders a track (or "master") and returns (audio, sample rate, render info)."""
+    from .ear_tools import _render
+
+    return _render(track, start_bar, end_bar)
+
+
+def _loudest_bars(track: str | int, audio, fs: int, render: dict) -> tuple[float, float] | None:
+    """The song's loudest CALIBRATE_BARS bars, as (start_bar, end_bar), when the render
+    is longer than that; None to keep the range as it is."""
+    overview = call("get_project_overview")
+    bpm = float(overview.get("tempo_bpm") or 120)
+    num, den = (int(x) for x in (overview.get("time_signature") or "4/4").split("/"))
+    span_s = CALIBRATE_BARS * num * 4 / den * 60 / bpm
+    if audio.shape[0] / fs <= span_s * 1.25:
+        return None
+    t0 = analysis.loudest_span(audio.mean(axis=1), fs, span_s)
+    start = call("time_to_positions", times=[render["start"]["seconds"] + t0])[0]
+    first = max(1, int(start["bar"]))
+    return float(first), float(first + CALIBRATE_BARS)
 
 
 def _calibrate_compressor(track: str | int, fx_index: int, profile: plugin_profiles.Profile, target_db: float,
-                          start_bar: float | None, end_bar: float | None, passes: int = 7) -> dict:
-    """Moves a compressor's drive until it takes about target_db off the transients,
-    measured as the drop in average short-window crest factor against the compressor
-    bypassed (independent of output level, so make-up gain and output links don't
-    fool it). Steps grow while nothing changes, so it finds where compression starts."""
+                          start_bar: float | None, end_bar: float | None, passes: int = 7,
+                          sidechain: bool = False) -> dict:
+    """Moves a compressor's drive until it takes about target_db off the loud moments,
+    measured directly: renders with the compressor bypassed and engaged, lined up, and
+    reads the gain reduction where the music is loud (analysis.gain_reduction), on the
+    song's loudest 8 bars when no range is given. Make-up gain, output level and a quiet
+    intro don't fool it. Steps grow while nothing changes (to find where compression
+    starts) and move at most 6 dB a step (more only while it's still looking for where
+    compression starts). With sidechain, the reduction is the ducking
+    the trigger causes, so the part's own dynamics and level don't limit the search."""
     call("update_fx", track=track, fx=fx_index, enabled=False)
     try:
-        dry = _measure(track, start_bar, end_bar)
-        base = _crest(dry)
+        dry_audio, fs, render = _render_array(track, start_bar, end_bar)
+        span = _loudest_bars(track, dry_audio, fs, render) if start_bar is None and end_bar is None else None
+        if span:
+            start_bar, end_bar = span
+            dry_audio, fs, render = _render_array(track, start_bar, end_bar)
     finally:
         call("update_fx", track=track, fx=fx_index, enabled=True)
+    if float(abs(dry_audio).max()) <= 1e-6:
+        raise ValueError("that range is silent, so there's nothing to calibrate a compressor on")
+    base = analysis.envelope_range(dry_audio, fs)
+    if base is None:
+        raise ValueError("too little sound in that range to calibrate a compressor")
+    rms = analysis._db(float((dry_audio.astype("float64") ** 2).mean()) ** 0.5)
     # A threshold far under the material's average level compresses everything all the
-    # time: on a quiet mix the search once ran down to -52 dB and crushed it 15-20 dB.
-    rms = dry.get("levels", {}).get("rms_dbfs")
-    floor = rms - THRESHOLD_BELOW_RMS_DB if (profile.drive_more == "down" and rms is not None) else None
+    # time: on a quiet mix the old search once ran down to -52 dB and crushed it 15-20 dB.
+    floor = (rms - THRESHOLD_BELOW_RMS_DB if (profile.drive_more == "down" and rms is not None and not sidechain)
+             else None)
     params = call("get_fx_parameters", track=track, fx=fx_index, search=profile.drive)["parameters"]
     exact = next((p for p in params if p["name"] == profile.drive), None)
     if exact is None:
         raise ValueError(f"{profile.name} has no '{profile.drive}' control; its profile may be out of date")
     drive = _number(exact["display"])
-    if base < 2 * target_db:
+    where = {"measured_on_bars": [start_bar, end_bar]} if span else {}
+    if base < 2 * target_db and not sidechain:
         # Little difference between loud and quiet moments (sustained, already
         # squashed material): chasing a reduction would only crush it.
         return {"control": profile.drive, "value": round(drive, 2), "loud_part_reduction_db": 0.0,
-                "target_db": target_db, "calibration": [],
+                "target_db": target_db, "calibration": [], **where,
                 "note": f"the material has little dynamic movement ({base:.1f} dB between loud and quiet moments), "
                         "so the compressor was left at its gentle starting settings instead of being pushed"}
+
+    def reduction_now() -> float:
+        wet, _, _ = _render_array(track, start_bar, end_bar)
+        return float(analysis.gain_reduction(dry_audio, wet, fs).get("gr_db_p95") or 0.0)
+
     steps: list[dict] = []
     boost, previous = 1.0, None
     reduction = 0.0
+    lo, hi = profile.drive_range or (-60, 60)
     for _ in range(passes):
-        reduction = round(base - _crest(_measure(track, start_bar, end_bar)), 2)
+        reduction = round(reduction_now(), 2)
         steps.append({"drive": round(drive, 2), "loud_part_reduction_db": reduction})
         if abs(reduction - target_db) <= 0.3:
             break
@@ -1683,10 +1802,10 @@ def _calibrate_compressor(track: str | int, fx_index: int, profile: plugin_profi
             d_drive = steps[-1]["drive"] - steps[-2]["drive"]
             d_red = steps[-1]["loud_part_reduction_db"] - steps[-2]["loud_part_reduction_db"]
             if d_drive and abs(d_red) > 0.05:
-                lo, hi = profile.drive_range or (-60, 60)
                 jump = (target_db - reduction) * d_drive / d_red
-                jump = max(-0.25 * (hi - lo), min(0.25 * (hi - lo), jump))
-                new_drive = max(lo, min(hi, drive + jump))
+                new_drive = drive + jump
+        new_drive = max(drive - MAX_DRIVE_STEP_DB * boost, min(drive + MAX_DRIVE_STEP_DB * boost, new_drive))
+        new_drive = max(lo, min(hi, new_drive))
         if floor is not None and new_drive < floor:
             if drive <= floor:
                 break  # already as low as it should go
@@ -1697,7 +1816,8 @@ def _calibrate_compressor(track: str | int, fx_index: int, profile: plugin_profi
         call("set_fx_parameters", track=track, fx=fx_index,
              changes=[{"parameter": profile.drive, "display_value": drive}])
     result = {"control": profile.drive, "value": round(drive, 2), "loud_part_reduction_db": reduction,
-              "target_db": target_db, "calibration": steps}
+              "target_db": target_db, "calibration": steps, **where,
+              "method": "gain reduction read from dry and processed renders, on the loud part"}
     best = min(steps, key=lambda s_: abs(s_["loud_part_reduction_db"] - target_db))
     if abs(best["loud_part_reduction_db"] - target_db) > 0.3:
         # Couldn't get there: settle on the closest setting rather than a pinned control.

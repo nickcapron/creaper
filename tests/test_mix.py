@@ -42,7 +42,7 @@ def test_plan_cleans_up_without_touching_what_the_user_set():
     assert "highpass_hz" not in acts["Lead"] and "compress" not in acts["Lead"]   # has its own EQ and compressor
     assert "compress" not in acts["Vocal"]                               # already even (crest 8 dB)
     assert "highpass_hz" not in acts["Kick"] and "reverb_send_db" not in acts["Kick"]
-    assert acts["Vocal"]["reverb_send_db"] == -14
+    assert acts["Vocal"]["reverb_send_db"] == -12
 
 
 def test_silent_tracks_are_left_alone():
@@ -127,7 +127,7 @@ def test_mastering_reports_the_master_as_it_ends_up(monkeypatch):
             return {"volume_db": 0.0}
         return {}
 
-    readings = iter([-20.0, -14.2])
+    readings = iter([-20.0, -20.0, -14.2])  # the first is the pre-limiter check
     monkeypatch.setattr(server, "call", fake_call)
     monkeypatch.setattr(server, "analyze_audio", lambda **a: {
         "loudness": {"integrated_lufs": next(readings)}, "levels": {"true_peak_dbtp": -1.5}})
@@ -277,3 +277,115 @@ def test_no_mix_bus_glue_when_the_master_already_compresses(monkeypatch):
     monkeypatch.setattr(mix_tools, "call", lambda command, **a: {"fx": [{"index": 1, "name": "VST3: Bus FORCE (Arturia)"}]}
                         if command == "get_track_details" else {})
     assert "skipped" in mix_tools._mix_bus_glue(None, None)
+
+
+
+def test_plan_narrows_spread_lows_and_widens_pads_in_wide_genres():
+    from creaper import mix_tools
+    channels = [
+        {"name": "Bass", "role": "bass", "level": -14, "stereo": {"low_end_correlation_below_150hz": 0.4}},
+        {"name": "Kick", "role": "kick", "level": -12, "stereo": {"low_end_correlation_below_150hz": 0.98}},
+        {"name": "Kit", "role": "drums", "level": -12, "stereo": {"low_end_correlation_below_150hz": 0.5}},
+        {"name": "Pad", "role": "pad", "level": -22, "stereo": {"correlation": 0.9, "side_to_mid_db": -20}},
+        {"name": "Keys", "role": "keys", "level": -20, "stereo": {"correlation": 0.2, "side_to_mid_db": -20}},
+    ]
+    wide = {a["name"]: a for a in mix_tools.plan_mix(channels, {"mix": {"width": "wide"}})["channels"]}
+    assert wide["Bass"].get("mono_low") and not wide["Kick"].get("mono_low")
+    assert wide["Kit"]["low_end_not_mono"] == 0.5 and not wide["Kit"].get("mono_low")
+    assert wide["Pad"]["widen_db"] == mix_tools.WIDEN_DB
+    assert "widen_db" not in wide["Keys"]        # widening would make it worse in mono
+    narrow = {a["name"]: a for a in mix_tools.plan_mix(channels, {"mix": {"width": "narrow"}})["channels"]}
+    assert "widen_db" not in narrow["Pad"]
+
+
+
+def test_a_new_reverb_is_sized_for_the_genre_with_predelay_and_filters(monkeypatch):
+    from creaper import mix_tools
+    sets = []
+
+    def fake_call(cmd, **kw):
+        if cmd == "get_project_overview":
+            return {"tracks": []}
+        if cmd == "set_fx_parameters":
+            sets.append({c["parameter"]: c.get("display_value", c.get("value")) for c in kw["changes"]})
+        return {}
+
+    monkeypatch.setattr(mix_tools, "call", fake_call)
+    assert mix_tools._reverb_return(120, "pop") == "Reverb"
+    assert sets[0]["Room size"] == 0.35 and sets[0]["Delay"] == 31.2   # a 64th at 120 BPM
+    assert (sets[0]["Hipass"], sets[0]["Lowpass"]) == mix_tools.REVERB_FILTER_HZ
+    mix_tools._reverb_return(60, "film and games")
+    assert sets[1]["Room size"] == 0.65 and sets[1]["Delay"] == 40.0     # slow songs: capped at 40 ms
+    mix_tools._reverb_return(200, None)
+    assert sets[2]["Room size"] == 0.5 and sets[2]["Delay"] == 20.0     # fast songs: at least 20 ms
+
+
+
+def _spec(low=10, mids=40, upper=5, presence=2, air=1.0, oct31=-20, oct63=-10):
+    return {"bands": {"sub (20-60 Hz)": {"share_pct": low / 2}, "bass (60-250 Hz)": {"share_pct": low / 2},
+                      "low mids (250-500 Hz)": {"share_pct": 5}, "mids (500 Hz-2 kHz)": {"share_pct": mids},
+                      "upper mids (2-4 kHz)": {"share_pct": upper}, "presence (4-6 kHz)": {"share_pct": presence},
+                      "air (6-20 kHz)": {"share_pct": air}},
+            "octave_bands_db": {"31.5 Hz": oct31, "63 Hz": oct63, "125 Hz": -15, "1 kHz": -10}}
+
+
+def test_tone_pass_presence_air_carve_and_low_heavy_keys():
+    from creaper import mix_tools
+    channels = [
+        {"name": "Kick", "role": "kick", "level": -10, "spectrum": _spec(low=80, oct31=-6, oct63=-12)},
+        {"name": "Bass", "role": "bass", "level": -12, "spectrum": _spec(low=70, oct31=-14, oct63=-5)},
+        {"name": "Lead", "role": "lead", "level": -15, "spectrum": _spec(upper=3, presence=2, air=0.5)},
+        {"name": "Vocal", "role": "vocal", "level": -13, "spectrum": _spec(upper=25, presence=12, air=5)},
+        {"name": "Pad", "role": "pad", "level": -20, "spectrum": _spec(low=30)},
+    ]
+    acts = {a["name"]: a for a in mix_tools.plan_mix(channels)["channels"]}
+    assert acts["Bass"]["carve"] == {"hz": 32, "db": mix_tools.CARVE_DB}     # where the kick is loudest
+    assert acts["Kick"]["carve"] == {"hz": 63, "db": mix_tools.CARVE_DB}     # and the other way round
+    assert acts["Lead"]["presence_db"] == mix_tools.PRESENCE_LIFT_DB and acts["Lead"]["air_db"] == mix_tools.AIR_LIFT_DB
+    assert acts["Vocal"]["presence_db"] == mix_tools.PRESENCE_CUT_DB and "air_db" not in acts["Vocal"]
+    assert acts["Pad"]["highpass_hz"] >= 250
+    # Every EQ sets band 5 on purpose: a bass with only a carve isn't high-passed at ReaEQ's default 100 Hz.
+    bass_eq = {c["parameter"]: c["display_value"] for c in mix_tools.eq_changes(acts["Bass"])}
+    assert bass_eq["Freq-High Pass 5"] == mix_tools.NO_HIGHPASS_HZ and bass_eq["Freq-Band 2"] == 32
+
+
+def test_kick_and_bass_sharing_an_octave_leave_it_to_the_kick():
+    from creaper import mix_tools
+    carve = mix_tools._kick_bass_carve([{"name": "K", "role": "kick", "spectrum": _spec(oct63=-4)},
+                                        {"name": "B", "role": "bass", "spectrum": _spec(oct63=-3)}])
+    assert carve == {"B": {"hz": 63, "db": mix_tools.CARVE_DB}}
+
+
+
+def test_section_lifts_raise_choruses_that_dont_lift():
+    from creaper import mix_tools
+    table = mix_tools.plan_section_lifts([
+        {"name": "Intro", "lufs": -16.0}, {"name": "Verse", "lufs": -12.0}, {"name": "Chorus", "lufs": -11.8},
+        {"name": "Breakdown", "lufs": -16.0}, {"name": "Drop", "lufs": -10.0}, {"name": "Outro", "lufs": -15.0}])
+    gains = {r["section"]: r["gain_db"] for r in table}
+    assert gains["Chorus"] == 1.3          # 0.2 LU over the verse: 1.3 more makes 1.5
+    assert gains["Drop"] == 0.0            # 6 LU over the breakdown already
+    assert gains["Verse"] == 0.0 and gains["Breakdown"] == 0.0 and gains["Outro"] == 0.0
+    flat = mix_tools.plan_section_lifts([{"name": "Verse", "lufs": -10.0}, {"name": "Chorus", "lufs": -12.0}])
+    assert flat[1]["gain_db"] == mix_tools.MAX_SECTION_GAIN_DB   # capped
+
+
+
+def test_colour_picks_the_first_amount_that_lifts_the_top_without_losing_punch():
+    from creaper import mix_tools
+    trials = [{"amount": 15, "rise_db": 0.8, "crest_drop_db": 0.1}, {"amount": 30, "rise_db": 2.4, "crest_drop_db": 0.4},
+              {"amount": 45, "rise_db": 3.9, "crest_drop_db": 1.6}]
+    assert mix_tools.choose_colour(trials)["amount"] == 30
+    crushing = [{"amount": 15, "rise_db": 0.9, "crest_drop_db": 0.3}, {"amount": 30, "rise_db": 2.6, "crest_drop_db": 1.4}]
+    assert mix_tools.choose_colour(crushing)["amount"] == 15          # the most it can take with its punch
+    assert mix_tools.choose_colour([{"amount": 15, "rise_db": 0.1, "crest_drop_db": 0.0}]) is None
+
+
+def test_band_db_hears_added_harmonics():
+    import numpy as np
+    from creaper import mix_tools
+    fs = 22050
+    t = np.arange(fs) / fs
+    clean = 0.5 * np.sin(2 * np.pi * 110 * t)
+    driven = np.tanh(3 * clean) / 3 * 1.5
+    assert mix_tools.band_db(driven, fs) > mix_tools.band_db(clean, fs) + 20

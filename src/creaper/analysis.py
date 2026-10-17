@@ -140,6 +140,80 @@ def envelope_range(audio: np.ndarray, fs: float, window_s: float = 0.05) -> floa
     return float(np.percentile(level, 95) - np.percentile(level, 10))
 
 
+def _window_db(mono: np.ndarray, n: int) -> np.ndarray:
+    count = mono.size // n
+    power = np.mean(np.square(mono[: count * n].reshape(count, n)), axis=1)
+    return 10 * np.log10(power + 1e-20)
+
+
+def align(dry: np.ndarray, wet: np.ndarray, fs: float, max_lag_s: float = 0.05) -> int:
+    """Samples the wet signal lags the dry one (a plugin's lookahead or latency), found
+    by cross-correlating the first 20 seconds; 0 when they're already aligned."""
+    n = min(dry.size, wet.size, int(20 * fs))
+    if n < 1024:
+        return 0
+    a, b = dry[:n] - dry[:n].mean(), wet[:n] - wet[:n].mean()
+    size = 1 << int(np.ceil(np.log2(2 * n)))
+    corr = np.fft.irfft(np.fft.rfft(b, size) * np.conj(np.fft.rfft(a, size)), size)
+    lag_max = int(max_lag_s * fs)
+    lags = np.concatenate([np.arange(0, lag_max + 1), np.arange(-lag_max, 0)])
+    values = np.concatenate([corr[: lag_max + 1], corr[-lag_max:]])
+    return int(lags[int(np.argmax(values))])
+
+
+GR_WINDOW_S = 0.05
+GR_LOUD_DB = 12.0   # gain reduction is read where the dry signal is within this of its loudest
+
+
+def gain_reduction(dry: np.ndarray, wet: np.ndarray, fs: float) -> dict:
+    """How much a compressor or limiter turns the loud moments down: the level difference
+    between the dry and processed renders in 50 ms windows (aligned first), relative to
+    the quietest 5% of windows (which carry only make-up gain or a level change), read
+    where the dry signal is within GR_LOUD_DB of its loudest. Make-up gain and output
+    level don't count. Measure one section (calibration uses the loudest 16 bars, see
+    loudest_span): across sections, a quiet intro turned up reads like the rest turned
+    down. Returns p95 and median gain reduction in dB."""
+    d = dry.mean(axis=1) if dry.ndim > 1 else dry
+    w = wet.mean(axis=1) if wet.ndim > 1 else wet
+    lag = align(d.astype(np.float64), w.astype(np.float64), fs)
+    if lag > 0:
+        w = w[lag:]
+    elif lag < 0:
+        d = d[-lag:]
+    n = int(GR_WINDOW_S * fs)
+    count = min(d.size, w.size) // n
+    if count < 4:
+        return {}
+    dry_db, wet_db = _window_db(d[: count * n].astype(np.float64), n), _window_db(w[: count * n].astype(np.float64), n)
+    audible = dry_db > -60
+    if audible.sum() < 4:
+        return {}
+    diff = dry_db - wet_db
+    # The zero point: the quietest 5% of the differences carry only make-up gain. Never
+    # above 0, or compression applied everywhere (a pad held over the threshold) would
+    # read as a level change and vanish. A plain cut in level reads as reduction.
+    reference = min(0.0, float(np.percentile(diff[audible], 5)))
+    gr = np.maximum(0.0, diff - reference)
+    loud = audible & (dry_db >= dry_db[audible].max() - GR_LOUD_DB)
+    return {"gr_db_p95": _round(float(np.percentile(gr[loud], 95)), 2),
+            "gr_db_median": _round(float(np.median(gr[loud])), 2), "lag_samples": lag}
+
+
+def loudest_span(mono: np.ndarray, fs: float, span_s: float) -> float:
+    """Start (s) of the loudest span_s stretch: where a compressor is calibrated, so a
+    quiet intro or breakdown doesn't decide how hard it works."""
+    if mono.size <= int(span_s * fs):
+        return 0.0
+    hop = int(0.5 * fs)
+    db = _window_db(mono.astype(np.float64), hop)
+    width = max(1, int(span_s / 0.5))
+    if db.size <= width:
+        return 0.0
+    power = 10 ** (db / 10)
+    sums = np.convolve(power, np.ones(width), mode="valid")
+    return float(np.argmax(sums) * 0.5)
+
+
 def clipped_runs(audio: np.ndarray, min_run: int = 3, near_full_scale: float = 0.99) -> int:
     """Flat tops: runs of min_run or more samples in a row with the same value, at the
     file's highest level, when that level is at full scale. A plugin or a fixed-point

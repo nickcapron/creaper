@@ -88,6 +88,21 @@ PROFILES: tuple[Profile, ...] = (
                   "output": "Output Gain", "mix": "Mix", "link": "Input/Output Link"},
     ),
     Profile(
+        "Stereo Width", "width",
+        "REAPER's JS stereo width (Stillwell): Width Boost raises or lowers the side signal against the "
+        "middle in dB; -20 is close to mono (for basses and kicks whose low end has spread), +3 to +6 "
+        "widens a pad or keys. Center Boost does the same for the middle.",
+        controls={"width": "Width Boost (dB)", "center": "Center Boost (dB)", "gain": "Gain (dB)",
+                  "balance": "Width Balance (%)"},
+    ),
+    Profile(
+        "Soft Clipper/Limiter", "clipper",
+        "REAPER's JS soft clipper: Boost drives the signal into a soft knee at 0 dBFS that rounds the "
+        "peaks over it; Output Brickwall caps the result. Turn the track down by the boost to keep its "
+        "loudness: only the peaks change.",
+        controls={"drive": "Boost (dB)", "ceiling": "Output Brickwall (dB)"},
+    ),
+    Profile(
         "EQ SITRAL-295", "eq",
         "Broadcast-style EQ with two channels (L/R, or Mid/Side via M/S Mode): high-pass, low shelf "
         "(50-300 Hz), bell (normalized frequency), high shelf (5-30 kHz) and low-pass per channel. "
