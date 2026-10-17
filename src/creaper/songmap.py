@@ -142,10 +142,15 @@ def song_map(tracks: dict[str, list[dict]], sections: list[dict], bar_qn: float 
     return {"sections": table, "findings": findings(table, tracks, bar_qn)}
 
 
+# The names auto_mix reads as a lead and as a chord part (mix_tools.ROLE_WORDS).
+LEAD_WORDS = ("lead", "melody", "vocal", "hook", "pluck", "arp", "solo", "synth")
+CHORD_WORDS = ("chord", "pad", "keys", "piano", "comp", "rhodes", "organ", "string", "stab", "guitar")
+
+
 def _lead_and_chords(names: list[str]) -> tuple[str | None, str | None]:
     lower = {n: n.lower() for n in names}
-    lead = next((n for n, l in lower.items() if any(w in l for w in ("lead", "melody", "vocal", "hook"))), None)
-    chords = next((n for n, l in lower.items() if any(w in l for w in ("chord", "pad", "keys", "piano", "comp"))), None)
+    lead = next((n for n, l in lower.items() if any(w in l for w in LEAD_WORDS)), None)
+    chords = next((n for n, l in lower.items() if n != lead and any(w in l for w in CHORD_WORDS)), None)
     return lead, chords
 
 

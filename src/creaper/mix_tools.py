@@ -54,7 +54,7 @@ ROLE_WORDS = [
     ("pad", r"\bpad|string|choir|atmos|ambien"),
     ("keys", r"key|piano|rhodes|clav|organ|\bep\b|wurli|stab|brass|chord|guitar"),
     ("lead", r"lead|hook|arp|pluck|melody|synth|solo"),
-    ("fx", r"\bfx\b|riser|sweep|impact|noise|downlifter|uplifter|whoosh"),
+    ("fx", r"\bfx\b|riser|sweep|impact|noise|downlifter|uplifter|whoosh|transition"),
 ]
 DANCE_FAMILIES = {"electronic dance"}
 

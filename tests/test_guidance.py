@@ -12,7 +12,7 @@ INSTRUCTIONS_WORD_BUDGET = 2000
 # Words in the instructions that look like tool names but are parameters or result fields.
 NOT_TOOLS = {"browser_path", "chords_item", "clipped_runs", "display_text", "display_value", "harsh_pct_p95",
              "item_id", "peak_to_loudness_db", "per_channel", "per_section", "performance_feel", "realtime_only",
-             "true_peak_ok", "limiter_gr_db"}
+             "true_peak_ok", "limiter_gr_db", "lead_for"}
 
 
 def tool_names():

@@ -34,6 +34,7 @@ STAGE_CHECKS = {
 PART_TRACK = {"drums": "Drums", "bass": "Bass", "chords": "Chords", "lead": "Lead", "counter": "Counter"}
 PART_ROLES = {"drums": ("drums",), "bass": ("bass",), "chords": ("keys", "pad"), "lead": ("lead",), "counter": ()}
 MAX_SONG_BARS = 512
+VOICE_LOW, VOICE_HIGH = "E3", "E4"   # a lead for a robot or sung vocal: near a speaking voice
 
 
 # ------------------------------------------------------------------ helpers
@@ -154,13 +155,25 @@ def _form_rows(ctx: _Context) -> list[dict]:
     return rows
 
 
+NUMBER_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8,
+                "nine": 9, "ten": 10, "twelve": 12, "sixteen": 16, "thirty": 30, "sixty": 60}
+
+
 def target_bars(length: str | None, bpm: float, bar_qn: float) -> int | None:
     """Bars a length from the brief asks for: '16 bars', 'a 30 s loop', '3-4 minutes'
-    (the shorter end of a range); None when it gives no number."""
+    (the shorter end of a range), 'a 3-minute song', 'three minutes', '3:30'; None when
+    it gives no number."""
     if not length:
         return None
-    m = re.search(r"(\d+(?:\.\d+)?)\s*(?:-\s*\d+(?:\.\d+)?\s*)?(bars?|s\b|secs?|seconds?|m\b|mins?|minutes?)",
-                  length.lower())
+    text = length.lower()
+    for word, n in NUMBER_WORDS.items():
+        text = re.sub(rf"\b{word}\b", str(n), text)
+    clock = re.search(r"(\d+):([0-5]\d)", text)
+    if clock:
+        seconds = int(clock.group(1)) * 60 + int(clock.group(2))
+        return max(1, int(round(seconds * bpm / 60 / bar_qn)))
+    m = re.search(r"(\d+(?:\.\d+)?)(?:\s*-\s*\d+(?:\.\d+)?)?\s*-?\s*(bars?|s\b|secs?|seconds?|m\b|mins?|minutes?)",
+                  text)
     if not m:
         return None
     n, unit = float(m.group(1)), m.group(2)
@@ -171,16 +184,18 @@ def target_bars(length: str | None, bpm: float, bar_qn: float) -> int | None:
 
 
 def _sounds_rows(ctx: _Context) -> list[dict]:
+    """Every MIDI track has an instrument; before the parts are written, the tracks with
+    their sounds chosen count (the sounds stage comes before the parts)."""
     rows = []
     for t in ctx.overview.get("tracks", []):
         details = call("get_track_details", track=t.get("guid") or t["name"])
         midi = [i for i in details.get("items", []) if i.get("type") == "midi" and not i.get("muted")]
-        if not midi:
-            continue
         has = details.get("instrument_fx") is not None
-        rows.append(songmap.row("instrument", "pass" if has else "fail", None, None,
-                                "load a sound: audition_sounds or load_arturia_preset", track=t["name"]))
-    return rows or [songmap.row("instrument", "fail", None, None, "no MIDI tracks yet: write the parts")]
+        if midi or has:
+            rows.append(songmap.row("instrument", "pass" if has else "fail", None, None,
+                                    "load a sound: audition_sounds or load_arturia_preset", track=t["name"]))
+    return rows or [songmap.row("instrument", "fail", None, None,
+                                "no sounds yet: a track per part with its sound (audition_sounds)")]
 
 
 def _parts_rows(ctx: _Context) -> list[dict]:
@@ -397,6 +412,9 @@ def build_song(
     seed: Annotated[int | None, Field(description="Same seed, same song; default: a new one (returned)")] = None,
     replace: Annotated[bool, Field(description=(
         "Delete MIDI items already on those tracks inside the song first (asks the user); without it, refuses"))] = False,
+    lead_for: Annotated[Literal["instrument", "voice"], Field(description=(
+        "voice: the lead is for add_robot_vocal to sing, so it's written low (E3-E4) and sparse, where words stay "
+        "clear, with no counter-melody under it"))] = "instrument",
 ) -> dict:
     """Writes a whole song, section by section, each section its own variant: the
     harmony planned per section (plan_harmony: a verse, a chorus that turns, a
@@ -440,6 +458,9 @@ def build_song(
         call("set_tempo", bpm=tempo)
     overview = call("get_project_overview")
     plan = songmap.plan_song(g, layout, seed, [arrange_tools.energy(n) for n, _ in layout])
+    if lead_for == "voice":
+        for row in plan:
+            row["parts"].pop("counter", None)
     if not make_regions:   # each section where its region is (there can be gaps between them)
         for row, s in zip(plan, existing):
             row["start_bar"] = int(s["start_bar"])
@@ -510,8 +531,10 @@ def build_song(
                                                       rhythm=rhythm, seed=p["seed"], feel=played_as)
                 report["parts"][part] = {"rhythm": rhythm}
             elif part == "lead":
+                voice = {"low": VOICE_LOW, "high": VOICE_HIGH, "density": "sparse"} if lead_for == "voice" else {}
                 r = music_tools.write_melody(item_id=item["id"], chords=fill, key=sec_key, shape=p["shape"],
-                                             register_lift=p["register_lift"], seed=p["seed"], candidates=3, feel=played_as)
+                                             register_lift=p["register_lift"], seed=p["seed"], candidates=3,
+                                             feel=played_as, **voice)
                 report["parts"][part] = {"shape": p["shape"], "hook_score": (r.get("hook_score") or {}).get("score")}
             elif part == "counter" and "lead" in items:
                 r = music_tools.write_counter_melody(item_id=item["id"], melody_item_id=items["lead"],
@@ -520,12 +543,14 @@ def build_song(
                 report["parts"][part] = {"notes": r.get("notes_written")}
         written.append(report)
     mapped = song_map()
+    needs = [t["name"] for p, t in tracks.items() if t.get("created") and not (instruments or {}).get(p)]
     return {
+        **({"needs_sound": needs} if needs else {}),
         "genre": g.name, "key": k.name, "seed": seed, "bars": total, "sections": written,
         "tracks": {p: t["name"] + (" (new)" if t.get("created") else "") for p, t in tracks.items()},
         "song_map": {"findings": mapped["findings"],
                      "density": {s["section"]: s["notes_per_bar"] for s in mapped["sections"]}},
-        "next": ("Listen, then: sounds for any new track (audition_sounds), add_transitions(style), "
+        "next": ("Listen, then: a sound for each track in needs_sound (audition_sounds), add_transitions(style), "
                  "write_automation into the peaks, auto_mix(style), check_song. Re-write one section's part with "
                  "its tool (a new seed) rather than copying another section."),
     }

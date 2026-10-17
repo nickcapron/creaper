@@ -334,8 +334,16 @@ def _playing_lufs(audio: np.ndarray, fs: int) -> float | None:
 
 def _sections(regions: list[dict], start: float, end: float) -> list[dict]:
     """Regions inside [start, end) seconds, clipped to it, with unique names (a second
-    'Chorus' becomes 'Chorus (2)')."""
+    'Chorus' becomes 'Chorus (2)'). A region inside a longer one (a 'vocals in' region)
+    isn't a section, as for song_map and add_transitions."""
     out, seen = [], {}
+
+    def span(r: dict) -> tuple[float, float]:
+        return r["start"]["seconds"], r["end"]["seconds"]
+
+    regions = [r for r in regions if not any(
+        o is not r and span(o)[0] <= span(r)[0] and span(r)[1] <= span(o)[1]
+        and span(o)[1] - span(o)[0] > span(r)[1] - span(r)[0] for o in regions)]
     for r in sorted(regions, key=lambda r: r["start"]["seconds"]):
         a, b = max(r["start"]["seconds"], start), min(r["end"]["seconds"], end)
         if b - a < 0.4:
