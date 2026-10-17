@@ -1,6 +1,6 @@
 -- @description creaper bridge: lets Claude work in REAPER through the creaper MCP server
 -- @author nickcapron
--- @version 0.27.0
+-- @version 0.28.0
 -- @link https://github.com/nickcapron/creaper
 -- @provides
 --   [nomain] creaper_json.lua
@@ -13,7 +13,7 @@
 --   Every change it makes is a named undo point ("creaper: ..."), so Ctrl+Z
 --   reverts anything Claude did.
 
-local BRIDGE_VERSION = "0.27.0"
+local BRIDGE_VERSION = "0.28.0"
 local PROTOCOL = 2
 
 ----------------------------------------------------------------------- JSON
@@ -2484,7 +2484,9 @@ function commands.build_sampled_instrument(p)
   local zones = p.zones or {}
   if #zones == 0 then fail("give at least one sample") end
   for _, z in ipairs(zones) do
-    if type(z.path) ~= "string" or not reaper.file_exists(z.path) then fail("can't find the sample " .. tostring(z.path)) end
+    for _, f in ipairs(z.files or { z.path }) do
+      if type(f) ~= "string" or not reaper.file_exists(f) then fail("can't find the sample " .. tostring(f)) end
+    end
   end
   local function set(fx, name, value)
     local param = find_param(t, fx, name)
@@ -2495,7 +2497,8 @@ function commands.build_sampled_instrument(p)
     for _, z in ipairs(zones) do
       local fx = reaper.TrackFX_AddByName(t, "ReaSamplOmatic5000 (Cockos)", false, -1)
       if fx < 0 then fail("couldn't load ReaSamplOmatic5000") end
-      reaper.TrackFX_SetNamedConfigParm(t, fx, "FILE0", z.path)
+      -- Round robins: every take in one instance, played in turn.
+      for i, f in ipairs(z.files or { z.path }) do reaper.TrackFX_SetNamedConfigParm(t, fx, "FILE" .. (i - 1), f) end
       reaper.TrackFX_SetNamedConfigParm(t, fx, "DONE", "")
       reaper.TrackFX_SetNamedConfigParm(t, fx, "MODE", tostring(p.mode or RS5K_TRACKING_MODE))
       local lo, hi = int(z.lo), int(z.hi)
@@ -2511,6 +2514,17 @@ function commands.build_sampled_instrument(p)
       set(fx, "Use note-off release override", 1)
       set(fx, "Release (note-off)", (p.release_s or 0.3) * 1000)
       set(fx, "Max voices", p.voices or 16)
+      if z.files and #z.files > 1 then set(fx, "Round-robin mode", 1) end
+      if z.lovel then
+        set(fx, "Minimum velocity", z.lovel)
+        set(fx, "Maximum velocity", z.hivel or 127)
+      end
+      if z.loop then  -- loop from the loop start to the sample end offset while the key is held
+        set(fx, "Loop (requires note-offs)", 1)
+        set(fx, "Loop start offset", z.loop.start_ms)
+        set(fx, "Sample end offset", z.loop.end_frac)
+        set(fx, "Crossfade loop length", 10)
+      end
       if z.name then reaper.TrackFX_SetNamedConfigParm(t, fx, "renamed_name", z.name) end
       local _, mode = reaper.TrackFX_GetNamedConfigParm(t, fx, "MODE")
       loaded[#loaded + 1] = { fx = fx + 1, lo = lo, hi = hi, root = z.root, mode = mode, sample = z.path:match("[^\\/]+$") }

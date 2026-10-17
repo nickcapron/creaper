@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Annotated, Literal
 
 import numpy as np
+import soundfile as sf
 from pydantic import BaseModel, Field
 
 from . import harmony, samplelib, theory
@@ -396,12 +397,55 @@ def plan_zones(roots: list[tuple[str, float]], reach: int = 6, low: int | None =
     return [z for z in zones if z["lo"] <= z["hi"]]
 
 
+def _frames(path: str) -> tuple[int, int]:
+    info = sf.info(path)
+    return info.frames, info.samplerate
+
+
+def layered_zones(roots: list[tuple[str, float]], names: dict[str, tuple[str, int | None, int | None]],
+                  reach: int, low: int | None, high: int | None) -> list[dict]:
+    """Zones for samples whose names mark velocity layers (pp, mf, ff, soft, v2...) and
+    round robins (rr1, rr2...): the key ranges from one sample of each pitch, each of a
+    pitch's layers its share of the velocities, the round robins of a zone in turn."""
+    by_base: dict[str, list[tuple[str, float, int | None, int | None]]] = {}
+    for path, root in roots:
+        base, rank, rr = names[path]
+        by_base.setdefault(base, []).append((path, root, rank, rr))
+    reps = [(base, takes[0][1]) for base, takes in by_base.items()]
+    out = []
+    for zone in plan_zones(reps, reach, low, high):
+        takes = by_base[zone["path"]]
+        layers: dict[int | None, list] = {}
+        for t in takes:
+            layers.setdefault(t[2], []).append(t)
+        # Split among the layers this pitch has, so a note recorded soft only still plays loud.
+        ranges = velocity_ranges_for([r for r in layers if r is not None])
+        for rank, group in layers.items():
+            group.sort(key=lambda t: t[3] or 0)
+            z = {"path": group[0][0], "root": group[0][1], "lo": zone["lo"], "hi": zone["hi"]}
+            if rank is not None and len(ranges) > 1:
+                z["lovel"], z["hivel"] = ranges[rank]
+            if len(group) > 1:
+                z["files"] = [t[0] for t in group]
+            out.append(z)
+    return out
+
+
+def velocity_ranges_for(ranks: list[int]) -> dict[int, tuple[int, int]]:
+    from .sfz import velocity_ranges
+
+    return velocity_ranges(ranks) if ranks else {}
+
+
 @tool()
 def build_sampled_instrument(
     track: Annotated[str, Field(description="Track to put it on (created if there's none by that name)")],
-    samples: Annotated[list[str], Field(min_length=1, max_length=24, description=(
+    samples: Annotated[list[str] | None, Field(max_length=96, description=(
         "Pitched samples of one instrument and articulation, e.g. a multisample set from find_samples "
-        "(cello sustains at several pitches); one sample works too, over a smaller range"))],
+        "(cello sustains at several pitches); one sample works too, over a smaller range. Names marking "
+        "velocity layers (pp, mf, ff, soft, loud, v1-v4) and round robins (rr1, rr2) are layered"))] = None,
+    sfz_path: Annotated[str | None, Field(description=(
+        "Or an .sfz instrument file of the user's: its key and velocity zones, round robins and loops"))] = None,
     reach: Annotated[int, Field(ge=1, le=12, description="Semitones the lowest and highest samples stretch beyond their pitch (past ~6 they sound unnatural)")] = 6,
     low_note: Annotated[str | int | None, Field(description="Or the lowest note to cover, e.g. 'C2'")] = None,
     high_note: Annotated[str | int | None, Field(description="And the highest, e.g. 'G5'")] = None,
@@ -413,9 +457,20 @@ def build_sampled_instrument(
     follows the keyboard, tuned from the pitch it actually plays (measured by ear,
     with cents; sample file names are sometimes an octave off), with velocity
     response, note-offs and a release. Better than build_drum_kit for melodic parts,
-    which plays each sample on one key at its own pitch."""
+    which plays each sample on one key at its own pitch. An .sfz file (sfz_path) gives
+    its own zones; samples' names give velocity layers and round robins; WAV loop points
+    (the smpl chunk) keep sustains going while a note is held."""
+    from . import sfz
+
+    if sfz_path:
+        zones = sfz.load(sfz_path, _frames)
+        return _build(track, zones, release_s, velocity_db, [], source=Path(sfz_path).name)
+    if not samples:
+        raise ValueError("give the samples, or an .sfz file (sfz_path)")
     roots, report = [], []
+    names = {}
     for path in (_check_audio(p) for p in samples):
+        names[path] = sfz.name_layers(Path(path).name)
         measured = measure_root(path)
         named = note_from_name(path)
         entry: dict = {"sample": Path(path).name}
@@ -438,19 +493,53 @@ def build_sampled_instrument(
         raise ValueError("none of those samples has a pitch to build an instrument from")
     low = theory.note_to_midi(low_note) if low_note is not None else None
     high = theory.note_to_midi(high_note) if high_note is not None else None
-    zones = plan_zones(roots, reach, low, high)
+    if any(rank is not None or rr is not None for _, rank, rr in names.values()):
+        zones = layered_zones(roots, names, reach, low, high)
+    else:
+        zones = plan_zones(roots, reach, low, high)
+    for z in zones:
+        if z["path"].lower().endswith(".wav"):
+            found = sfz.wav_loop(z["path"])
+            if found and "start" in found:
+                z.update(sfz.loop_fields((found["start"], found["end"]), *_frames(z["path"])))
+    return _build(track, zones, release_s, velocity_db, report)
+
+
+def _build(track: str, zones: list[dict], release_s: float, velocity_db: float, report: list[dict],
+           source: str | None = None) -> dict:
     overview = call("get_project_overview")
     if not any(t["name"] == track for t in overview.get("tracks", [])):
         call("create_track", name=track)
     for z in zones:
-        z["name"] = f"{Path(z['path']).stem[:24]} {theory.midi_to_note(z['lo'])}-{theory.midi_to_note(z['hi'])}"
-    result = call("build_sampled_instrument", timeout=120.0, track=track, zones=zones,
+        z["name"] = f"{Path(z['path']).stem[:24]} {theory.midi_to_note(z['lo'])}-{theory.midi_to_note(z['hi'])}" + (
+            f" v{z['lovel']}-{z['hivel']}" if "lovel" in z else "")
+    result = call("build_sampled_instrument", timeout=180.0, track=track, zones=zones,
                   release_s=release_s, velocity_db=velocity_db)
     stretched = [z for z in zones if max(round(z["root"]) - z["lo"], z["hi"] - round(z["root"])) > 6]
-    out = {"track": result["track"], "plays": f"{theory.midi_to_note(zones[0]['lo'])} to {theory.midi_to_note(zones[-1]['hi'])}",
-           "zones": [{"keys": f"{theory.midi_to_note(z['lo'])}-{theory.midi_to_note(z['hi'])}",
-                      "root": theory.midi_to_note(round(z["root"])), "sample": Path(z["path"]).name} for z in zones],
-           "samples": report}
+    lo, hi = min(z["lo"] for z in zones), max(z["hi"] for z in zones)
+
+    def describe(z: dict) -> dict:
+        d = {"keys": f"{theory.midi_to_note(z['lo'])}-{theory.midi_to_note(z['hi'])}",
+             "root": theory.midi_to_note(round(z["root"])), "sample": Path(z["path"]).name}
+        if "lovel" in z:
+            d["velocity"] = f"{z['lovel']}-{z['hivel']}"
+        if z.get("files"):
+            d["round_robin"] = len(z["files"])
+        if z.get("loop"):
+            d["loops"] = True
+        return d
+
+    out = {"track": result["track"], "plays": f"{theory.midi_to_note(lo)} to {theory.midi_to_note(hi)}",
+           "zones": [describe(z) for z in zones][:48]}
+    if len(zones) > 48:
+        out["zones_shown"] = f"48 of {len(zones)}"
+    if source:
+        out["sfz"] = source
+    if report:
+        out["samples"] = report
+    layers = sorted({(z["lovel"], z["hivel"]) for z in zones if "lovel" in z})
+    if layers:
+        out["velocity_layers"] = len(layers)
     if stretched:
         out["note"] = ("some zones stretch a sample more than 6 semitones, which can sound unnatural: "
                        + ", ".join(Path(z["path"]).name for z in stretched) + ". More samples in between help.")

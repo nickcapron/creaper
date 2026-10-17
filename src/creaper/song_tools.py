@@ -120,6 +120,7 @@ class _Context:
                 audio, fs = sf.read(render["files"][0], always_2d=True)
             finally:
                 _cleanup(render["files"])
+            self.mono, self.fs = audio.mean(axis=1), int(fs)
             try:
                 shape = ear_tools.structure_of(audio, int(fs), render, self.overview, call("get_tempo_map"), self.genre)
             except ValueError as e:      # shorter than two bars
@@ -629,8 +630,10 @@ def check_song(
     limit and fix, and a score out of 10 (a warning counts half). The result is kept next
     to the saved project, so the next run reports what changed (score_change, and 'was'
     and 'change' per check). It also warns when the song sounds like the last song
-    checked (the same tempo and nearly the same tone curve). Changes nothing in the
-    project; writes its baseline file next to it."""
+    checked (the same tempo and nearly the same tone curve). With the optional music
+    model installed (creaper[ml]), a 'character' line says how it comes across
+    (realistic or synthetic, modern or dated). Changes nothing in the project; writes
+    its baseline file next to it."""
     paths = _song_paths()
     plan = jsonstore.read(paths[0], dict) if paths and paths[0].exists() else {}
     genre = genre or plan.get("genre")
@@ -664,6 +667,13 @@ def check_song(
                         "loudness_range_lu": (measured.get("loudness") or {}).get("loudness_range_lu"),
                         "true_peak_dbtp": (measured.get("levels") or {}).get("true_peak_dbtp"),
                         "copied_bars": shape.get("near_duplicate_share")}
+    from . import embeddings
+
+    if embeddings.available() and not measured.get("silent"):
+        try:  # one line from the opt-in model, never a check or a gate
+            card["character"] = embeddings.describe(ctx.mono, ctx.fs)
+        except Exception as e:  # noqa: BLE001
+            card["character"] = {"error": f"the music model couldn't run: {e}"}
     if paths:
         jsonstore.write(paths[1], {"at": time.strftime("%Y-%m-%d %H:%M"), "score": card["score"],
                                    "checks": [{k: v for k, v in r.items() if k in ("check", "status", "value", "track",
@@ -731,7 +741,22 @@ def _arc(mono: np.ndarray, fs: float, parts: int = 8) -> list[float]:
 def estimate_bars(mono: np.ndarray, fs: float, beats_per_bar: int = 4) -> tuple[list[float], float | None]:
     """Bar starts (s) for audio with no tempo map: the beat from the onset envelope's
     autocorrelation (60-180 BPM), the downbeat phase where onsets line up best. Returns
-    (starts, BPM); a track with no clear pulse gets 2 s windows and None."""
+    (starts, BPM); a track with no clear pulse gets 2 s windows and None. librosa's beat
+    tracker (creaper[analysis]) is used when it's installed."""
+    import importlib.util
+
+    if importlib.util.find_spec("librosa") is not None:
+        import librosa
+
+        y = mono.astype(np.float32)
+        env = librosa.onset.onset_strength(y=y, sr=fs)
+        tempo, beats = librosa.beat.beat_track(onset_envelope=env, sr=fs)
+        bpm = float(np.atleast_1d(tempo)[0])
+        if len(beats) >= beats_per_bar * 8 and 50 <= bpm <= 200:
+            # The downbeat: the beat of the bar where onsets are strongest.
+            phase = max(range(beats_per_bar), key=lambda k: float(env[beats[k::beats_per_bar]].sum()))
+            times = librosa.frames_to_time(beats[phase::beats_per_bar], sr=fs)
+            return [float(t) for t in times], round(bpm, 1)
     hop = int(fs * 0.01)
     frames = mono[: mono.size // hop * hop].reshape(-1, hop)
     energy = np.log10(np.mean(frames ** 2, axis=1) + 1e-10)
@@ -862,6 +887,14 @@ def compare_to_reference(
     out = {"reference": path.name, "differences": diff_table(ref, mix),
            "energy_arc": {"reference": ref["arc"], "mix": mix["arc"]},
            **({"reference_bpm_estimated": ref["estimated_bpm"]} if ref.get("estimated_bpm") else {})}
+    from . import embeddings
+
+    if embeddings.available():
+        try:  # how alike they sound to the opt-in music model
+            out["sounds_alike"] = embeddings.similarity(embeddings.audio_embedding(ref_audio.mean(axis=1), ref_fs),
+                                                        embeddings.audio_embedding(mix_audio.mean(axis=1), mix_fs))
+        except Exception as e:  # noqa: BLE001
+            out["sounds_alike"] = f"the music model couldn't run: {e}"
     gains = match_gains(ref, mix)
     out["suggested_eq"] = gains or "the tone is within 0.5 dB of the reference in every band"
     if apply and gains:

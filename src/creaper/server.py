@@ -186,9 +186,11 @@ Samples and vocals:
   turn sample files into instruments (when a plugin's browser blocks you from picking
   its samples, they're often files you can use this way).
 - Vocals, best source first, saying which you used: real vocals in the user's samples
-  (chop_vocal, place_loop); a singing synth for human-like sung words (export_vocal_midi);
-  add_robot_vocal for robot hooks (house, French touch, electro, synth-pop): a short hook,
-  at most one syllable per beat. Choir and vocal-pad instruments cover wordless vocals.
+  (find_samples role "vocal", then chop_vocal or place_loop); a singing synth for
+  human-like sung words (export_vocal_midi); add_robot_vocal(style="sung") for a sung
+  line or guide vocal; add_robot_vocal for robot hooks (house, French touch, electro,
+  synth-pop): a short hook, at most one syllable per beat. Wordless choirs and vocal
+  pads: build_sampled_instrument, from the user's samples or an .sfz file.
 
 Sound effects: one project per family of sounds, each sound and variation in its own
 region named as its file, then export_regions. Build by layers (transient, body, tail);

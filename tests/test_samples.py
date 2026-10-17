@@ -286,3 +286,11 @@ def test_a_loop_named_kick_cant_outrank_real_kicks(tmp_path, monkeypatch):
     monkeypatch.setattr(sample_tools, "library", lib)
     shown = sample_tools.find_samples(role="kick", style="house")["shown"]
     assert shown[0]["name"].startswith("b deep kick")
+
+
+def test_vocal_phrases_carry_their_tempo_and_key():
+    assert samplelib.bpm_from_name("Vox_Hook_124_Am") == 124
+    assert samplelib.key_from_name("Vox_Hook_124_Am") == "A minor"
+    assert samplelib.bpm_from_name("acapella 98 F#m") == 98
+    assert samplelib.bpm_from_name("Vocal Chop 03") is None          # a take number, not a tempo
+    assert samplelib.bpm_from_name("Female Vox C4 sustain") is None

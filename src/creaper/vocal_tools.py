@@ -10,9 +10,10 @@ import time
 from pathlib import Path
 from typing import Annotated, Callable, Literal
 
+import numpy as np
 from pydantic import Field
 
-from . import composer, harmony, samplelib, speech, talkbox
+from . import composer, harmony, samplelib, singing, speech, talkbox
 from . import sample_tools  # the module, not its names: it may still be loading (circular import)
 from .server import READ_ONLY, ItemId, call, tool
 
@@ -99,10 +100,12 @@ def _check_density(words: list[dict], max_per_beat: float) -> None:
         count = sum(1 for u in onsets[i:] if u < t + DENSITY_WINDOW_QN - 1e-6)
         if count > allowed:
             beat = t + 1
+            voice = "a robot voice" if max_per_beat <= 1 else "a sung voice"
             raise ValueError(
-                f"too many words for a robot voice: {count} syllables in the {DENSITY_WINDOW_QN:g} beats from beat "
-                f"{beat:g} of the melody (at most {allowed:g}: one per beat). Fast words turn to mush; use fewer "
-                "words (a short hook, repeated), hold words over notes with '_', or write longer notes")
+                f"too many words for {voice}: {count} syllables in the {DENSITY_WINDOW_QN:g} beats from beat "
+                f"{beat:g} of the melody (at most {allowed:g}: "
+                f"{'one per beat' if max_per_beat <= 1 else f'{max_per_beat:g} a beat'}). Fast words turn to mush; "
+                "use fewer words (a short hook, repeated), hold words over notes with '_', or write longer notes")
 
 
 @tool(annotations=READ_ONLY)
@@ -130,13 +133,19 @@ def add_robot_vocal(
         "The words, one per note of the melody: 'all night long _ to-night'. Hyphenate to spread a word over "
         "several notes; a lone '_' holds the previous word over the next note"))],
     voice: Annotated[str | None, Field(description="A voice from list_speech_voices (part of its name), or 'female'/'male'")] = None,
-    name: Annotated[str, Field(description="Name for the vocal track")] = "Robot Vocal",
-    style: Annotated[Literal["talkbox", "vocoder"], Field(description=(
+    name: Annotated[str | None, Field(description="Name for the vocal track; default: Robot Vocal (Sung Vocal)")] = None,
+    style: Annotated[Literal["talkbox", "vocoder", "sung"], Field(description=(
         "talkbox (default): a synth shaped by the speech's mouth shapes, the clearest words (Zapp, Chromeo, "
         "Daft Punk leads); one audio track. vocoder: ReaVocode over a synth you can change and play chords on; "
-        "more robotic and harder to understand"))] = "talkbox",
+        "more robotic and harder to understand. sung: the voice itself sings the melody (the whole line spoken "
+        "in one go, each word moved to its notes keeping the voice's character, vibrato on held notes, a "
+        "double); a guide vocal or a synthetic singer, not a robot. Up to two syllables a beat. Words are "
+        "clearest within about 7 semitones of the voice's speaking pitch (the result's shift_semitones)"))] = "talkbox",
     carrier: Annotated[str | None, Field(description="vocoder: synth that sings (default ReaSynth saw)")] = None,
     bands: Annotated[int, Field(ge=4, le=128, description="vocoder: bands; more = clearer words")] = 32,
+    double: Annotated[bool, Field(description=(
+        "sung: add a double (a second take 10 ms late, a few cents apart, left and right) for width; "
+        "off is a little clearer"))] = True,
 ) -> dict:
     """Makes a synth sing words: the computer's text-to-speech voice speaks each word
     under its note of a melody item (top note of each chord), each word's vowel held
@@ -145,6 +154,10 @@ def add_robot_vocal(
     with noise for the consonants, and puts the result on one audio track after the
     melody's track. vocoder builds three tracks (the vocal with ReaVocode, its voice,
     and a carrier synth that can play the melody's chords).
+    sung (style='sung') speaks the whole line once, so the words keep a sentence's
+    shape, finds each word in it (aligned against the words spoken alone), and sings
+    each on its notes holding its voiced part; one stereo audio track with a double,
+    its harmonics-to-noise ratio, clarity and pitch shift measured.
     Robot vocals are only understood when they're sparse: a short hook of a few words,
     repeated (think "one more time", "around the world"), at most one syllable per beat,
     on quarter notes or longer (denser lyrics are refused). Dense, fast verses turn to
@@ -160,17 +173,22 @@ def add_robot_vocal(
     line = melody_line(data.get("notes", []))
     if not line:
         raise ValueError("that MIDI item has no notes to sing")
-    words = assign_lyrics(lyrics, line)
+    name = name or ("Sung Vocal" if style == "sung" else "Robot Vocal")
+    words = assign_lyrics(lyrics, line, SUNG_MAX_PER_BEAT if style == "sung" else MAX_SYLLABLES_PER_BEAT)
     chosen = speech.choose_voice(voice)
     stamp = time.strftime("%Y%m%d-%H%M%S")
     slug = re.sub(r"[^\w-]+", "-", name).strip("-") or "vocal"
     folder = Path(call("project_paths")["default_folder"]) / "creaper vocals" / f"{slug}-{stamp}"
-    files = speech.speak([w["text"] for w in words], folder, chosen)
     base = data["start"]["qn"]
     qns = [q for w in words for q in (base + w["start"], base + w["end"])] + [base + n["start"] for n in line]
     times = call("qn_to_times", qns=qns)
     note_times = times[2 * len(words):]
-    clips, rushed = [], []
+    if style == "sung":
+        clips, rushed, sung = _sing(words, line, times, note_times, base, folder, chosen, double)
+        files = []
+    else:
+        files = speech.speak([w["text"] for w in words], folder, chosen)
+        clips, rushed, sung = [], [], {}
     for i, (f, w) in enumerate(zip(files, words)):
         # Hold the vowel over the notes; consonants keep their natural speed.
         start_s, end_s = times[2 * i], times[2 * i + 1]
@@ -185,17 +203,30 @@ def add_robot_vocal(
             speech._write(folder / "speech" / f.name, x, fs)  # the clean words, for check_vocal_clarity
             speech._write(f, talkbox.cross_synthesize(x, fs, pitches, seed=i), talkbox.RATE)
         clips.append({"path": str(f), "start_qn": base + w["start"], "end_qn": base + w["end"], "word": w["word"]})
-    if style == "talkbox":
+    if style in ("talkbox", "sung"):
         names = {t["name"] for t in call("get_project_overview").get("tracks", [])}
         track_name, k = name, 2
         while track_name in names:
             track_name, k = f"{name} {k}", k + 1
         call("create_track", name=track_name, position=int(data["track"]) + 1)
-        placed = call("place_audio_clips", timeout=120.0, track=track_name, clips=clips, name=f"talk box {track_name}")
-        high = sum(1 for n in line if talkbox.sub_octave_level(n["pitch"]) > 0)
-        result = {"vocal": placed["track"], "style": "talkbox", "words_placed": placed["placed"],
+        placed = call("place_audio_clips", timeout=120.0, track=track_name, clips=clips,
+                      name=f"{'sung' if style == 'sung' else 'talk box'} {track_name}")
+        high = sum(1 for n in line if talkbox.sub_octave_level(n["pitch"]) > 0) if style == "talkbox" else 0
+        result = {"vocal": placed["track"], "style": style, "words_placed": placed["placed"],
                   "next": ("Play it. It's audio now: add EQ, compression, chorus or reverb like any vocal. For "
                            "another melody or words, run it again. Mute the original melody track if it doubles it.")}
+        hnr, shift = sung.get("hnr"), sung.get("shift")
+        if hnr is not None:
+            result["harmonics_to_noise_db"] = hnr
+            result["hnr_verdict"] = ("clean tone" if hnr >= 15 else "a little rough" if hnr >= 8 else
+                                     "breathy or buzzy: another voice, or a lower melody")
+        if shift is not None:
+            result["shift_semitones"] = shift
+            if abs(shift) > singing.WIDE_SHIFT:
+                result["shift_note"] = (f"the melody sits {abs(shift):g} semitones {'above' if shift > 0 else 'below'} "
+                                        "the voice's own pitch, which blurs words: a voice nearer the melody "
+                                        f"({'a higher' if shift > 0 else 'a lower'} one, list_speech_voices), or "
+                                        "the melody an octave nearer the voice")
         if high:
             result["octave_doubled"] = (f"{high} of {len(line)} notes are above E4, where words blur, so they're "
                                         "doubled an octave down for clarity. Write the melody lower to avoid it.")
@@ -224,6 +255,53 @@ def add_robot_vocal(
                           "their notes, which blurs them: " + ", ".join(rushed[:12]) + (" ..." if len(rushed) > 12
                           else "") + ". Give them longer notes, or fewer words.")
     return result
+
+
+SUNG_MAX_PER_BEAT = 2.0   # a sung line keeps its words clear at up to two syllables a beat
+
+
+def _sing(words: list[dict], line: list[dict], times: list[float], note_times: list[float], base: float,
+          folder: Path, voice: str | None, doubled: bool = True) -> tuple[list[dict], list[str], dict]:
+    """The sung clips: the whole line spoken once, cut into words, each word sung on
+    its notes (singing.sing_word) with a double, and the clean word stretched the same
+    way kept in speech/ for check_vocal_clarity. Returns (clips, rushed words,
+    {'hnr': the median harmonics-to-noise ratio, 'shift': semitones from the voice's
+    own pitch to the melody's median})."""
+    import soundfile as sf
+
+    phrase = speech.speak_phrase(" ".join(w["text"] for w in words), folder / "phrase.wav", voice)
+    x, fs = speech._read(phrase)
+    spoken_at = singing.own_pitch(x, fs)
+    # Connected speech has no gaps to cut at: find the words by aligning the phrase with
+    # the same words spoken one at a time.
+    try:
+        alone = [speech._read(f) for f in speech.speak([w["text"] for w in words], folder / "words", voice)]
+        spans = singing.align_words(x, fs, [singing.resample(a, rate, fs) for a, rate in alone])
+    except (speech.SpeechError, ValueError):
+        spans = singing.split_phrase(x, fs, [0.6 * syllables(w["text"]) + 0.1 * len(w["text"]) for w in words])
+    (folder / "speech").mkdir(exist_ok=True)
+    clips, rushed, sung_all = [], [], []
+    for i, (w, (a, b)) in enumerate(zip(words, spans)):
+        seg = x[a:b]
+        start_s, end_s = times[2 * i], times[2 * i + 1]
+        seconds = max(0.05, end_s - start_s)
+        notes = [(max(0.0, t - start_s), n["pitch"]) for n, t in zip(line, note_times)
+                 if w["start"] - 1e-6 <= n["start"] < w["end"] - 1e-6] or [(0.0, line[0]["pitch"])]
+        # Hold the voiced part (a fricative held and pitched turns into a buzz).
+        vowel = singing.voiced_span(seg, fs) or speech.vowel_span(seg, fs)
+        sung = singing.sing_word(seg, fs, seconds, notes, vowel)
+        if len(seg) / fs / seconds > RUSHED:
+            rushed.append(w["word"])
+        f = folder / f"{i + 1:03d} {speech._safe(w['text'])}.wav"
+        clean = singing.psola(seg, fs, len(sung), singing.vowel_map(seg, fs, len(sung), vowel), lambda t: None)
+        speech._write(folder / "speech" / f.name, clean / max(1e-9, float(abs(clean).max())) * 0.8, fs)
+        sf.write(str(f), singing.double(sung, fs) if doubled else sung * 0.8 / max(1e-9, float(abs(sung).max())),
+                 fs, subtype="PCM_16")
+        sung_all.append(sung)
+        clips.append({"path": str(f), "start_qn": base + w["start"], "end_qn": base + w["end"], "word": w["word"]})
+    hnr = singing.hnr_db(np.concatenate(sung_all), fs) if sung_all else None
+    shift = round(float(np.median([n["pitch"] for n in line])) - spoken_at, 1) if spoken_at is not None else None
+    return clips, rushed, {"hnr": hnr, "shift": shift}
 
 
 # ---------------------------------------------------------------- vocal chops

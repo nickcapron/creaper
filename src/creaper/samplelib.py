@@ -64,7 +64,8 @@ def bpm_from_name(name: str) -> float | None:
     m = re.search(r"(?<!\d)(\d{2,3}(?:\.\d+)?)\s*-?\s*bpm", name, re.IGNORECASE)
     if m and 50 <= float(m.group(1)) <= 220:
         return float(m.group(1))
-    if re.search(r"loop|break|groove", name, re.IGNORECASE):
+    # Loops and vocal phrases often carry their tempo bare: 'Vox_Hook_124_Am', 'Break 92'.
+    if re.search(r"loop|break|groove|vocal|vox|chop|phrase|hook|acapella|acappella|adlib", name, re.IGNORECASE):
         for n in re.findall(r"(?<![\d.])(\d{2,3})(?![\d.])", name):
             if 60 <= int(n) <= 200:
                 return float(n)

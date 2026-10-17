@@ -221,6 +221,18 @@ creaper setup
 `creaper setup --dry-run` shows what it would do without changing anything. The
 individual steps are below if you'd rather do them yourself.
 
+**Optional extras** (never installed unless you ask for them):
+
+- `creaper[ml]`: a music model (LAION's CLAP, Apache-2.0) that adds a "how it comes
+  across" line to `check_song` (realistic or synthetic, modern or dated) and a
+  sounds-alike score to `compare_to_reference`. About 1 GB with the model, which
+  downloads the first time it's used.
+- `creaper[analysis]`: librosa's beat tracker, for finding the bars of reference tracks.
+
+```bash
+pip install "creaper[ml] @ https://github.com/nickcapron/creaper/archive/refs/heads/main.zip"
+```
+
 **1. Install creaper** (manual steps)
 
 ```bash

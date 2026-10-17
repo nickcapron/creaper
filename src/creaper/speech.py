@@ -266,6 +266,29 @@ def speak(texts: list[str], folder: Path, voice: str | None = None) -> list[Path
     return paths
 
 
+def speak_phrase(text: str, path: Path, voice: str | None = None) -> Path:
+    """Speaks a whole line into one trimmed WAV (singing.split_phrase cuts it into
+    words): spoken in one go, the words keep the shape of a sentence."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    piper = next((v for v in _piper_voices() if v["name"] == voice), None) if voice else None
+    if piper:
+        job = path.parent / "speech-job.json"
+        job.write_text(json.dumps({"model": piper["model"], "phrase": True,
+                                   "items": [{"text": text, "path": str(path)}]}), encoding="utf-8")
+        done = subprocess.run([sys.executable, "-c", _PIPER_RUNNER, str(job)], capture_output=True, text=True,
+                              timeout=TIMEOUT, creationflags=_NO_WINDOW)
+        job.unlink(missing_ok=True)
+        if done.returncode != 0:
+            raise SpeechError(f"Piper failed: {done.stderr.strip()[-300:]}")
+        if not path.exists():
+            raise SpeechError(f"Piper didn't write {path.name}")
+        trim_silence(path)
+        return path
+    spoken = speak([text], path.parent, voice)[0]
+    spoken.replace(path)
+    return path
+
+
 def trim_silence(path: Path, floor_db: float = -40.0, pad: float = 0.01) -> float:
     """Cuts the silence before and after the speech and evens out its level (peak at
     -3 dBFS). Returns the remaining length in seconds."""
@@ -428,6 +451,14 @@ def first_utterance(x, fs, gap=0.12, floor_db=-40):
 
 for item in job["items"]:
     text = item["text"]
+    if job.get("phrase"):  # a whole line in one go: its natural rise and fall, every pause kept
+        x, fs = render(text)
+        with wave.open(item["path"], "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(fs)
+            w.writeframes(x.astype("<i2").tobytes())
+        continue
     phonemes = sum(len([p for p in sent if p.strip() and p not in ".,!?"]) for sent in voice.phonemize(text))
     expected = 0.08 * phonemes + 0.15
     best = None
