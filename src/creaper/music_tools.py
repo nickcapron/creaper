@@ -871,7 +871,7 @@ def add_genre_groove(
         reps = repeats
     result = add_drum_pattern(item_id=item_id, pattern=pattern, step=step, repeats=reps,
                               swing=groove.get("swing", g.swing), humanize=humanize, start=start,
-                              replace=replace, feel=played_as)
+                              replace=replace, feel=played_as, seed=seed)
     result["genre"] = g.name
     result["feel"] = played_as
     result["bars"] = total_bars
@@ -880,6 +880,20 @@ def add_genre_groove(
         result["distinct_bars"] = grooves.distinct_bars(pattern, step, bar_qn)
     result["how_the_drums_work"] = g.drums
     return result
+
+
+def section_fill(row: dict, total_qn: float, chord_qn: float) -> list[dict]:
+    """A plan_harmony row's chords, timed and repeated to fill total_qn (a bridge whose
+    reharmonisation split chords keeps their timing). Pops the row's 'slots'."""
+    chords = row["chords"].split()
+    slots = row.pop("slots", None) or [1.0] * len(chords)
+    t, i, fill = 0.0, 0, []
+    while t < total_qn - 1e-6:
+        length = min(slots[i % len(chords)] * chord_qn, total_qn - t)
+        fill.append({"chord": chords[i % len(chords)], "length": round(length, 6)})
+        t += length
+        i += 1
+    return fill
 
 
 @tool(annotations=READ_ONLY)
@@ -918,15 +932,7 @@ def plan_harmony(
         bar_qn = composer._bar_len(overview.get("time_signature") or "4/4")
         chord_qn = round(bar_qn / g.harmonic_rhythm, 6)
         for row, (a, b) in zip(plan, spans):
-            chords = row["chords"].split()
-            slots = row.pop("slots", None) or [1.0] * len(chords)
-            total, t, i, fill = (b - a) * bar_qn, 0.0, 0, []
-            while t < total - 1e-6:
-                length = min(slots[i % len(chords)] * chord_qn, total - t)
-                fill.append({"chord": chords[i % len(chords)], "length": round(length, 6)})
-                t += length
-                i += 1
-            row.update({"start_bar": a, "bars": round(b - a, 2), "fill": fill})
+            row.update({"start_bar": a, "bars": round(b - a, 2), "fill": section_fill(row, (b - a) * bar_qn, chord_qn)})
     else:
         for row in plan:
             row.pop("slots", None)

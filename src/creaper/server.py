@@ -35,42 +35,44 @@ INSTRUCTIONS = """\
 creaper controls the user's open REAPER project.
 
 Making a song (a song request means a finished, full-length track; work through this
-in order and run the check named after each step before moving on):
+in order; finish_stage(stage) runs each stage's checks and refuses on a fail):
  1. Brief: find_notes (the user's taste), get_genre_profile (tempo, keys, form, sounds,
-    mix). Say the plan in a line: genre, tempo, key, length in bars.
+    mix), then start_song(brief, genre, length). Say the plan in a line: genre, tempo,
+    key, length in bars.
  2. Form: new_project_tab, set_tempo, then a named region for every section, bar for bar
     from the profile's form (club tracks 5-7 minutes with DJ intro and outro; pop and
-    hip-hop 3-4). Never shorten sections to save work. Check: get_project_overview.
+    hip-hop 3-4). Never shorten sections to save work. finish_stage("form").
  3. Sounds: for each part, on its own track, audition_sounds(candidates="arturia", role,
     style=<the genre>, character) chooses by listening among Arturia's factory presets
     (the track needs no instrument first); load_arturia_preset loads one you picked; the
     user's saved sounds for this song are candidates="library". Program a synth only to
     adjust a sound. Check: audition_instrument (in tune, right register, no arpeggio or
-    sequence of its own); save_sound the keepers.
- 4. Parts, section by section: plan_harmony gives each section its own chords (a
-    pre-chorus leaning into the chorus, a reharmonised bridge). Write every part per
-    section: add_genre_groove(bars, energy), write_bassline, add_chord_progression,
-    write_melody (shape verse or hook; candidates keeps the best hook), plus a contrasting
-    idea (write_counter_melody, write_answer, a breakdown with new chords or bass).
-    Check: analyze_harmony.
+    sequence of its own); save_sound the keepers. finish_stage("sounds").
+ 4. Parts, section by section: build_song(genre, key) writes every section as its own
+    variant on those tracks. Or by hand: plan_harmony (each section's chords), then per
+    section add_genre_groove(bars, energy), write_bassline, add_chord_progression,
+    write_melody (shape verse or hook; candidates), write_counter_melody, write_answer.
+    Rewrite what you'd change. Check: song_map; finish_stage("parts").
  5. Feel: generators play with a feel; apply_feel on parts written note by note.
-    Check: check_groove on the MIDI drums and bass.
- 6. Transitions and movement: add_transitions, then write_automation ramps across builds
-    and breakdowns. Check: measure_structure (copied sections, loops, energy arc, length).
- 7. Mix: auto_mix(style), then refine. Check: measure_tracks(per_section=True).
- 8. Mix checks: compare_mix_to_style (loudness range, harshness, mud, low end),
-    measure_structure again (mixing moves the energy arc), check_vocal_clarity for any
-    vocal.
- 9. Master: master_to_target(style). Check: true_peak_ok is true and
+    finish_stage("feel") (check_groove on drums and bass).
+ 6. Transitions and movement: add_transitions(style), then write_automation ramps across
+    builds and breakdowns. finish_stage("transitions") (measure_structure's checks).
+ 7. Mix: auto_mix(style), then refine. Check: measure_tracks(per_section=True);
+    check_vocal_clarity for any vocal. finish_stage("mix") (compare_mix_to_style).
+ 8. Master: master_to_target(style). Check: true_peak_ok is true and
     peak_to_loudness_db is 7 or more (else a lower target or less glue).
-10. Ending: check_ending with how it will be used (continuous, ending, stinger).
-11. Export: export_mix(style). Tell the user its length and loudness, what changes in
-    each section, and ask for their reaction to specific parts (the hook, the drop).
+    finish_stage("master").
+ 9. Ending: check_ending with how it will be used (continuous, ending, stinger).
+10. check_song: the scorecard (out of 10, what changed since the last run). With a
+    reference track from the user, compare_to_reference(file).
+11. Export: export_mix(style). Tell the user its length, loudness and score, what changes
+    in each section, and ask for their reaction to specific parts (the hook, the drop).
 Write a short sketch or loop only when the user asks for one.
 
 When the user complains, measure before changing anything:
-- boring, repetitive, dull, "just a loop": measure_structure; give each section new
-  material (another seed, rewritten bars, a new comping rhythm or bass line, drop-outs).
+- boring, repetitive, dull, "just a loop": song_map and measure_structure; give each
+  section new material (another seed, rewritten bars, a new comping rhythm, drop-outs).
+- doesn't sound like a reference ("like this song", a Suno render): compare_to_reference.
 - too short: measure_structure with the genre (its form length).
 - a part overpowering, weak or buried: measure_tracks(per_section=True) (per section
   when the sections are regions); on a one-track kit it also gives each drum's hit level.
@@ -619,6 +621,7 @@ def add_drum_pattern(
     feel: Annotated[Literal["none", "tight", "natural", "laid back", "pushed", "expressive"], Field(description=(
         "Play it like a drummer: the kick tight, the snare/clap laid back or pushed, hats accented on the beat "
         "and softer off it; none (default) keeps the steps exactly as written"))] = "none",
+    seed: Annotated[int | None, Field(description="Same seed, same humanized velocities and feel")] = None,
 ) -> dict:
     """Programs a drum pattern you write, step-sequencer style, on whatever drum
     instrument the track has. Use it for your own beats, fills and variations; for a
@@ -638,12 +641,12 @@ def add_drum_pattern(
         return found
 
     notes = theory.drum_pattern_notes(pattern, step=step, repeats=repeats, swing=swing, start=start,
-                                      channel=channel, humanize=humanize, resolve=resolve)
+                                      channel=channel, humanize=humanize, seed=seed, resolve=resolve)
     if feel != "none":
         overview = call("get_project_overview")
         jobs = {lane["pitch"]: job for name, lane in lanes.items() if (job := perform.drum_job(name))}
         notes = perform.apply(notes, "drums", feel, bpm=float(overview.get("tempo_bpm") or 120),
-                              meter=overview.get("time_signature") or "4/4", drum_jobs=jobs)
+                              meter=overview.get("time_signature") or "4/4", drum_jobs=jobs, seed=seed)
     result = call("add_midi_notes", item_id=item_id, notes=notes, replace=replace)
     result["instrument"] = instrument
     result["lanes"] = lanes
@@ -784,14 +787,15 @@ def update_fx(
     preset: Annotated[str | None, Field(description="Preset name to load (see list_fx_presets)")] = None,
     preset_index: Annotated[int | None, Field(ge=1, description="Preset number from list_fx_presets, instead of the name")] = None,
     show: Annotated[bool | None, Field(description="Open (true) or close (false) the plugin window")] = None,
+    rename: Annotated[str | None, Field(description="Show it under this name in the FX chain, e.g. 'Lead EQ'")] = None,
 ) -> dict:
     """Changes a plugin already on a track as a whole: bypasses or re-enables it,
-    loads one of its presets, or opens or closes its window so the user can click
-    something. Only the arguments given change. To change individual settings use
+    loads one of its presets, renames it in the chain, or opens or closes its window so
+    the user can click something. Only the arguments given change. To change individual settings use
     set_fx_parameter(s); to add or remove a plugin, add_fx/remove_fx. Returns the
     plugin's name, whether it's enabled and the preset loaded."""
     return call("update_fx", track=track, fx=fx, enabled=enabled, preset=preset,
-                preset_index=preset_index, show=show)
+                preset_index=preset_index, show=show, rename=rename)
 
 
 @tool()
@@ -1977,7 +1981,8 @@ def compose(genre: str, key: str = "", bars: str = "") -> str:
         "1. find_notes for my taste; get_genre_profile for the style; list_installed_fx for instruments that fit it.\n"
         "2. Choose tempo, key/mode and a progression from the profile (suggest_progressions can add options); "
         "reharmonize if the style calls for richer harmony.\n"
-        "3. Lay it down: sketch_song with my instruments, or build part by part section by section (plan_harmony, "
+        "3. Lay it down: build_song with my instruments (every section its own variant), or part by part section "
+        "by section (plan_harmony, "
         "add_genre_groove, write_bassline, add_chord_progression with the style's voicing and comping, write_melody "
         "with candidates, write_counter_melody). Then make "
         "it your own: a contrasting B idea, each section's own variation of the parts, something changing every "
@@ -2014,6 +2019,7 @@ from . import export_tools  # noqa: E402,F401  (saving and exporting)
 from . import record_tools  # noqa: E402,F401  (recording, takes, time selection, markers, templates)
 from . import vocal_tools  # noqa: E402,F401  (robot vocals: text-to-speech through a vocoder)
 from . import ear_tools  # noqa: E402,F401  (vocal clarity, tuning, spectrograms)
+from . import song_tools  # noqa: E402,F401  (whole songs: build, map, stages, scorecard, reference)
 from . import mix_tools  # noqa: E402,F401  (auto_mix)
 from . import motif_tools  # noqa: E402,F401  (motifs reused across songs)
 from . import sfx_tools  # noqa: E402,F401  (sound effects: one file per region)

@@ -268,8 +268,8 @@ def generate_progression(key: Key, length: int = 4, seed: int | None = None, sev
 
 # ------------------------------------------------------ harmony per section
 
-SECTION_KINDS = [  # in order: "pre-chorus" before "chorus"
-    (r"pre[- ]?chorus|build|lift", "pre"), (r"chorus|hook|refrain|drop", "chorus"), (r"bridge|middle 8", "bridge"),
+SECTION_KINDS = [  # in order: "pre-chorus" and "post-chorus" before "chorus"
+    (r"post[- ]?chorus", "post"), (r"pre[- ]?chorus|build|lift", "pre"), (r"chorus|hook|refrain|drop", "chorus"), (r"bridge|middle 8", "bridge"),
     (r"break", "breakdown"), (r"intro", "intro"), (r"outro|ending|coda", "outro"), (r"verse|main|groove|a section", "verse"),
 ]
 _PRE = {"major": ["ii", "IV", "vi", "V"], "minor": ["iv", "VI", "VII", "V"]}
@@ -355,7 +355,7 @@ def plan_harmony(progressions: list[str], key: Key, sections: list[str], lift_la
     for i, name in enumerate(sections):
         kind = section_kind(name)
         k, shown = home, key
-        if kind in ("chorus", "breakdown"):
+        if kind in ("chorus", "breakdown", "post"):
             numerals, mode = chorus, chorus_mode
         elif kind == "pre":
             numerals, mode, k = pre, None, key

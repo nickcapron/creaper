@@ -508,6 +508,13 @@ def measure_structure(
     overview = call("get_project_overview")
     tempo = call("get_tempo_map")
     audio, fs, render = _render("master", start_bar, end_bar)
+    return structure_of(audio, fs, render, overview, tempo, genre, start_bar, end_bar)
+
+
+def structure_of(audio: np.ndarray, fs: int, render: dict, overview: dict, tempo: dict, genre: str | None,
+                 start_bar: float | None = None, end_bar: float | None = None) -> dict:
+    """measure_structure's report from a master render already made (check_song renders
+    once); start_bar and end_bar as the render was asked for."""
     offset = render["start"]["seconds"]
     end = offset + audio.shape[0] / fs
     every = structure.bar_starts(tempo, end + 1e-3)

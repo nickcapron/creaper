@@ -45,7 +45,7 @@ MAX_BOOST_DB, MAX_BOOST_LOW_DB = 6.0, 2.0
 LOW_HEAVY_PCT = 50   # sub + bass share above which a part counts as low-heavy
 
 ROLE_WORDS = [
-    ("kick", r"\bkick|\bbd\b"),
+    ("kick", r"\bkick|\bbd\b|bass ?drum"),
     ("snare", r"snare|clap"),
     ("perc", r"hat|\bhh\b|cymbal|ride|crash|shaker|perc|conga|bongo|tamb|rim\b|tom"),
     ("bass", r"bass|\bsub\b|808 ?bass"),

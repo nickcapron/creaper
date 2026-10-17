@@ -1,6 +1,6 @@
 -- @description creaper bridge: lets Claude work in REAPER through the creaper MCP server
 -- @author nickcapron
--- @version 0.26.0
+-- @version 0.27.0
 -- @link https://github.com/nickcapron/creaper
 -- @provides
 --   [nomain] creaper_json.lua
@@ -13,7 +13,7 @@
 --   Every change it makes is a named undo point ("creaper: ..."), so Ctrl+Z
 --   reverts anything Claude did.
 
-local BRIDGE_VERSION = "0.26.0"
+local BRIDGE_VERSION = "0.27.0"
 local PROTOCOL = 2
 
 ----------------------------------------------------------------------- JSON
@@ -1403,6 +1403,7 @@ function commands.update_fx(p)
       reaper.TrackFX_SetPresetByIndex(t, fx, int(p.preset_index) - 1)
     end
     if p.show ~= nil then reaper.TrackFX_Show(t, fx, p.show and 3 or 2) end
+    if p.rename then reaper.TrackFX_SetNamedConfigParm(t, fx, "renamed_name", p.rename) end
     local _, preset = reaper.TrackFX_GetPreset(t, fx, "")
     result.fx = { index = fx + 1, name = fx_name(t, fx), enabled = reaper.TrackFX_GetEnabled(t, fx),
                   preset = preset ~= "" and preset or nil }

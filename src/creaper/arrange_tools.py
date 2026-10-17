@@ -19,8 +19,8 @@ from . import ear_candy, theory
 from .server import bridge, call, drum_maps, tool
 
 # How much energy a section name suggests (1 quiet .. 4 the peak).
-ENERGY = [  # in order: "pre-chorus" is a build, not a chorus
-    (r"pre[- ]?chorus|build|lift|rise|riser", 3),
+ENERGY = [  # in order: "pre-chorus" is a build and "post-chorus" a step down, not a chorus
+    (r"pre[- ]?chorus|post[- ]?chorus|build|lift|rise|riser", 3),
     (r"drop|chorus|hook|refrain|climax|final", 4),
     (r"verse|main|groove|a section|b section|solo", 2),
     (r"break|bridge|interlude|outro|intro|ending|calm|ambient", 1),
