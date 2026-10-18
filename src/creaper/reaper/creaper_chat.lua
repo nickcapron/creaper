@@ -1,6 +1,6 @@
 -- @description creaper chat: talk to Claude from a dockable panel inside REAPER
 -- @author nickcapron
--- @version 0.31.0
+-- @version 0.31.1
 -- @link https://github.com/nickcapron/creaper
 -- @about
 --   A chat panel for creaper. Messages go to your own Claude Code (your Claude
@@ -609,7 +609,12 @@ local function frame()
       if ImGui.Button(ctx, "Send") then send() focus_input = true end
     end
     ImGui.SameLine(ctx)
-    ImGui.TextDisabled(ctx, "Enter sends, Ctrl+Enter adds a line. Ctrl+Z undoes Claude's changes.")
+    if turn then
+      -- A render holds all of REAPER, this panel included: this line stays on screen while it does.
+      ImGui.TextDisabled(ctx, "REAPER pauses while it renders (mixing, mastering, exporting): typing and paste work again when it's done.")
+    else
+      ImGui.TextDisabled(ctx, "Enter sends, Ctrl+Enter adds a line. Ctrl+Z undoes Claude's changes.")
+    end
     ImGui.End(ctx)
   end
   pop_theme(ctx)

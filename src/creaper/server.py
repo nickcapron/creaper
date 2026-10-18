@@ -259,8 +259,54 @@ Bar = Annotated[float | None, Field(description="Bar number, 1-based. Fractions 
 Beat = Annotated[float | None, Field(description="Beat within the bar, 1-based (default 1)")]
 
 
+RENDERS = ("render_audio", "render_stems")
+MEDIA_ONLINE_ACTION = 40101   # Item: Set all media online
+MEDIA_RETRY_S = 600.0         # once tried, a silent render (a quiet tail, a muted part) is left alone this long
+_media_tried = [0.0]
+
+
 def call(cmd: str, timeout: float = 30.0, **params: Any) -> Any:
-    return bridge.call(cmd, params, timeout=timeout)
+    result = bridge.call(cmd, params, timeout=timeout)
+    if cmd in RENDERS and time.time() - _media_tried[0] > MEDIA_RETRY_S and _all_silent(result):
+        _media_tried[0] = time.time()
+        # Media REAPER took offline (a file a sync app like OneDrive held while uploading
+        # it) renders as silence. Bring it back online and render once more, only then:
+        # on a cloud-synced project the action can hold REAPER for minutes.
+        bridge.call("run_action", {"command": MEDIA_ONLINE_ACTION}, timeout=600.0)
+        _discard(result)
+        result = bridge.call(cmd, params, timeout=timeout)
+    return result
+
+
+def _render_files(result: Any) -> list[str]:
+    if not isinstance(result, dict):
+        return []
+    return list(result.get("files") or [s.get("file") for s in result.get("stems", []) if s.get("file")])
+
+
+def _all_silent(result: Any) -> bool:
+    """True when a render produced files and every one of them is silent."""
+    files = _render_files(result)
+    if not files:
+        return False
+    import soundfile as sf
+
+    for f in files:
+        try:
+            for block in sf.blocks(f, blocksize=1 << 16, dtype="float32", always_2d=True):
+                if block.size and float(abs(block).max()) > 1e-7:
+                    return False
+        except Exception:  # noqa: BLE001 - unreadable here: leave it to the caller
+            return False
+    return True
+
+
+def _discard(result: Any) -> None:
+    renders = (bridge.directory / "renders").resolve()
+    for f in _render_files(result):
+        p = Path(f)
+        if renders in p.resolve().parents and not os.environ.get("CREAPER_KEEP_RENDERS"):
+            p.unlink(missing_ok=True)
 
 
 # Set by the REAPER chat panel, which runs Claude without per-tool prompts.
