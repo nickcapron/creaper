@@ -66,6 +66,8 @@ def test_export_regions_writes_one_file_per_region(tmp_path, monkeypatch):
     def fake_call(cmd, **kw):
         if cmd == "get_project_overview":
             return {"regions": regions}
+        if cmd == "project_paths":
+            return {}
         assert cmd == "render_audio" and kw["start_seconds"] == 0.0 and kw["end_seconds"] == 6.0
         return {"files": [str(renders / "r.wav")]}
     monkeypatch.setattr(x, "call", fake_call)

@@ -150,7 +150,7 @@ def export_regions(
         names = ", ".join(r["name"] for r in all_regions) or "none"
         raise ValueError(f"no regions to export (regions in the project: {names})")
     missing = [n for n in regions or [] if not any(r["name"].lower() == n.lower() for r in all_regions)]
-    out_dir = export_tools.check_folder(folder)
+    out_dir = export_tools.check_folder(folder, call("project_paths"))
     targets = [(r, out_dir / f"{export_tools.safe_name(r['name'])}.wav") for r in chosen]
     by_file: dict[str, list[str]] = {}
     for r, dest in targets:

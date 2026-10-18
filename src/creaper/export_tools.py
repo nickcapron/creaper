@@ -118,12 +118,16 @@ def check_folder(folder: str | Path, info: dict | None = None) -> Path:
     Desktop/Downloads and creaper's own folder (then remembers it for ALLOW_HOURS). A
     network path is asked before anything touches it."""
     from . import samplelib
+    from .server import CONFIRM_FILE_ENV
 
+    path = Path(folder).expanduser()
+    if not os.environ.get(CONFIRM_FILE_ENV):
+        # Outside the chat panel the app asks before each tool runs: nothing to ask or remember here.
+        return path.resolve() if path.is_absolute() else (Path.cwd() / path).resolve()
     raw = str(folder)
     if raw.startswith(("\\\\", "//")) and raw.lower() not in _allowed():
         confirm_with_user(f"write files to the network location {raw}")
         _remember(raw)
-    path = Path(folder).expanduser()
     resolved = path.resolve() if path.is_absolute() else (Path.cwd() / path).resolve()
     info = info if info is not None else _project_info()
     roots = [Path.home() / d for d in USUAL_FOLDERS] + [bridge.directory]

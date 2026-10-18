@@ -17,6 +17,7 @@ def asked(monkeypatch):
     questions = []
     monkeypatch.setattr(export_tools, "confirm_with_user", questions.append)
     monkeypatch.setattr(export_tools, "_FOLDERS_ALLOWED", set())
+    monkeypatch.setenv(server.CONFIRM_FILE_ENV, "in the panel")     # the panel is where these ask
     return questions
 
 
