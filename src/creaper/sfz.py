@@ -41,18 +41,35 @@ def _strip_comments(text: str) -> str:
     return re.sub(r"//[^\n]*", "", text)
 
 
-def _expand(text: str, base: Path, depth: int = 0, defines: dict[str, str] | None = None) -> str:
+MAX_INCLUDES = 4096   # include expansions in all: a library includes one note file per key
+
+
+def _expand(text: str, base: Path, depth: int = 0, defines: dict[str, str] | None = None,
+            count: list | None = None) -> str:
     """#include (relative to the root .sfz's folder, as sfizz and ARIA read it) and
-    #define $NAME value (seen by the files included after it)."""
+    #define $NAME value (seen by the files included after it). Included files must be
+    .sfz/.sfzh files within two folders of the root (a library's Programs/ and its
+    shared folder); the same file may be included again (with other defines), up to
+    MAX_INCLUDES expansions in all, 8 deep."""
     if depth > 8:
         raise ValueError("#include nests too deep")
     defines = {} if defines is None else defines
+    count = [0] if count is None else count
     out = []
     for line in _strip_comments(text).splitlines():
         m = re.match(r'\s*#include\s+"([^"]+)"', line)
         if m:
             inc = (base / m.group(1).replace("\\", "/")).resolve()
-            out.append(_expand(inc.read_text(encoding="utf-8", errors="replace"), base, depth + 1, defines))
+            if inc.suffix.lower() not in (".sfz", ".sfzh", ".txt"):
+                raise ValueError(f"#include of a non-SFZ file: {inc.name}")
+            try:
+                inc.relative_to(base.resolve().parent.parent)
+            except ValueError:
+                raise ValueError(f"#include outside the instrument's library: {inc}") from None
+            count[0] += 1
+            if count[0] > MAX_INCLUDES:
+                raise ValueError(f"more than {MAX_INCLUDES} #include expansions")
+            out.append(_expand(inc.read_text(encoding="utf-8", errors="replace"), base, depth + 1, defines, count))
             continue
         m = re.match(r"\s*#define\s+(\$\w+)\s+(\S+)", line)
         if m:

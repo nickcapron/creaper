@@ -11,6 +11,9 @@
 # Running it again upgrades creaper.
 
 $ErrorActionPreference = 'Stop'
+# The creaper release this installs (a tag, so what's installed is what was released).
+$Release = 'v0.29.1'
+
 $ProgressPreference = 'SilentlyContinue'
 
 function Say($text) { Write-Host $text -ForegroundColor Cyan }
@@ -115,7 +118,7 @@ if (-not $venvWorks) {
 }
 Say "Installing creaper (this takes a minute)..."
 & $venvPython -m pip install --upgrade --quiet pip
-& $venvPython -m pip install --upgrade --quiet 'https://github.com/nickcapron/creaper/archive/refs/heads/main.zip'
+& $venvPython -m pip install --upgrade --quiet "https://github.com/nickcapron/creaper/archive/refs/tags/$Release.zip"
 if ($LASTEXITCODE -ne 0) {
     Warn "pip couldn't install creaper. Check your internet connection and run this again."
     return

@@ -104,11 +104,88 @@ def convert(src: str | Path, dest: Path, fmt: Format, bit_depth: int = 24, sampl
     return {"sample_rate": fs, "clipped_samples": clipped}
 
 
+# Folders a write goes to without asking: the user's usual places. Anywhere else (a game's
+# assets folder, a network share) is asked once per session in the chat panel, since text in
+# a project could steer Claude into writing files somewhere they shouldn't go.
+USUAL_FOLDERS = ("Music", "Documents", "Videos", "Desktop", "Downloads")
+_FOLDERS_ALLOWED: set[str] = set()
+ALLOW_HOURS = 12   # the panel starts a new server each turn: approvals are kept this long on disk
+
+
+def check_folder(folder: str | Path, info: dict | None = None) -> Path:
+    """The folder resolved; in the chat panel, asks before the first write into one outside
+    the project's folder, REAPER's project folder, the user's Music/Documents/Videos/
+    Desktop/Downloads and creaper's own folder (then remembers it for ALLOW_HOURS). A
+    network path is asked before anything touches it."""
+    from . import samplelib
+
+    raw = str(folder)
+    if raw.startswith(("\\\\", "//")) and raw.lower() not in _allowed():
+        confirm_with_user(f"write files to the network location {raw}")
+        _remember(raw)
+    path = Path(folder).expanduser()
+    resolved = path.resolve() if path.is_absolute() else (Path.cwd() / path).resolve()
+    info = info if info is not None else _project_info()
+    roots = [Path.home() / d for d in USUAL_FOLDERS] + [bridge.directory]
+    if info.get("project"):
+        roots.append(Path(info["project"]).parent)
+    if info.get("default_folder"):
+        roots.append(Path(info["default_folder"]))
+    # A project saved at the top of a drive (or in the home folder) doesn't make it all usual.
+    roots = [r for r in roots if samplelib.too_broad(r) is None]
+    usual = any(_inside(resolved, r) for r in roots)
+    if not usual and str(resolved).lower() not in _allowed():
+        confirm_with_user(f"write files into {resolved}, outside the project's and your usual folders")
+        _remember(str(resolved))
+    return resolved
+
+
+def _allowed_file() -> Path:
+    return bridge.directory / "allowed_folders.json"
+
+
+def _allowed() -> set[str]:
+    """Folders the user allowed writing to in the last ALLOW_HOURS."""
+    from . import jsonstore
+
+    now = time.time()
+    try:
+        saved = jsonstore.read(_allowed_file(), dict) if _allowed_file().exists() else {}
+    except ValueError:
+        saved = {}
+    return _FOLDERS_ALLOWED | {k for k, t in saved.items() if now - float(t) < ALLOW_HOURS * 3600}
+
+
+def _remember(folder: str) -> None:
+    from . import jsonstore
+
+    key = folder.lower()
+    _FOLDERS_ALLOWED.add(key)
+    try:
+        with jsonstore.updating(_allowed_file(), dict) as data:
+            now = time.time()
+            for k in [k for k, t in data.items() if now - float(t) >= ALLOW_HOURS * 3600]:
+                del data[k]
+            data[key] = now
+    except Exception:  # noqa: BLE001 - remembering is a convenience
+        pass
+
+
+def _inside(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root.resolve())
+        return True
+    except (ValueError, OSError):
+        return False
+
+
 def _destination(folder: str | None, name: str, fmt: Format, info: dict, overwrite: bool) -> Path:
-    base = Path(folder) if folder else _default_folder(info)
+    """Where an export goes. Replacing a file is always asked in the chat panel: overwrite
+    only says replacing is wanted (outside the panel, the app asks before the tool runs)."""
+    base = check_folder(folder, info) if folder else _default_folder(info)
     dest = base / (safe_name(name) + EXTENSIONS[fmt])
-    if dest.exists() and not overwrite:
-        confirm_with_user(f"overwrite the existing file {dest}")
+    if dest.exists():
+        confirm_with_user(f"replace the existing file {dest}")
     return dest
 
 
@@ -160,7 +237,7 @@ def save_project(
     name: Annotated[str | None, Field(description="Save as this name (first save or save-as); default: save in place")] = None,
     folder: Annotated[str | None, Field(description="Folder for a new file; default: REAPER's project folder")] = None,
     copy: Annotated[bool, Field(description="Save a copy (a snapshot) and keep working in the current project")] = False,
-    overwrite: Annotated[bool, Field(description="Replace an existing file of that name without asking")] = False,
+    overwrite: Annotated[bool, Field(description="Replace an existing file of that name (the chat panel still asks)")] = False,
 ) -> dict:
     """Saves the project: in place when it already has a file, as a new file the first
     time (or with a new name), or as a snapshot copy before big changes. A first save
@@ -176,8 +253,10 @@ def save_project(
     if not folder and not info.get("project") and not copy:
         base = base / stem  # a folder per project, as REAPER does
     path = base / (stem + ".rpp")
-    if path.exists() and not overwrite and not (info.get("project") and Path(info["project"]) == path):
-        confirm_with_user(f"overwrite the existing project file {path}")
+    if folder:
+        check_folder(folder, info)
+    if path.exists() and not (info.get("project") and Path(info["project"]) == path):
+        confirm_with_user(f"replace the existing project file {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
     result = call("save_project", timeout=120.0, mode="copy" if copy else "save_as", path=str(path))
     if not copy:
@@ -268,10 +347,10 @@ def export_stems(
     chosen = tracks or [t["number"] for t in overview["tracks"] if t.get("item_count", 0) > 0]
     if not chosen:
         raise ValueError("no tracks with items to export")
-    base = Path(folder) if folder else _default_folder(info) / f"{_stem_name(info)} stems"
+    base = check_folder(folder, info) if folder else _default_folder(info) / f"{_stem_name(info)} stems"
     existing = [p for p in base.glob("*") if p.suffix.lower() == EXTENSIONS[format]] if base.exists() else []
-    if existing and not overwrite:
-        confirm_with_user(f"overwrite stems in {base}")
+    if existing:
+        confirm_with_user(f"replace stems in {base}")
     render = call("render_stems", timeout=900.0, tracks=chosen, start_bar=start_bar, end_bar=end_bar,
                   tail_seconds=tail_seconds)
     _check_renders(render["files"])

@@ -14,6 +14,9 @@ from functools import lru_cache
 import numpy as np
 
 MODEL = "laion/larger_clap_music"
+# A fixed commit: a later change to the model repo isn't downloaded. It ships only
+# pytorch_model.bin, which torch 2.6+ loads with weights_only (no code runs from it).
+REVISION = "a0b4534a14f58e20944452dff00a22a06ce629d1"
 LICENSE = "Apache-2.0"
 RATE = 48000              # what CLAP's feature extractor expects
 WINDOW_S = 10.0           # CLAP hears 10 s at a time
@@ -35,7 +38,8 @@ def available() -> bool:
 def _model():
     from transformers import ClapModel, ClapProcessor  # the heavy import, only on first use
 
-    return ClapModel.from_pretrained(MODEL).eval(), ClapProcessor.from_pretrained(MODEL)
+    return (ClapModel.from_pretrained(MODEL, revision=REVISION).eval(),
+            ClapProcessor.from_pretrained(MODEL, revision=REVISION))
 
 
 def _windows(mono: np.ndarray, fs: int) -> list[np.ndarray]:

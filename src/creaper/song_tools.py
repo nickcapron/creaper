@@ -889,9 +889,9 @@ def compare_to_reference(
     the tone toward the reference; the loudness is master_to_target's job."""
     from .export_tools import _check_renders, _cleanup
 
-    path = Path(file).expanduser()
-    if not path.is_file():
-        raise ValueError(f"there's no file at {path}")
+    from .sample_tools import _check_audio
+
+    path = Path(_check_audio(str(Path(file).expanduser())))
     try:
         ref_audio, ref_fs = sf.read(str(path), always_2d=True)
     except Exception as e:  # noqa: BLE001

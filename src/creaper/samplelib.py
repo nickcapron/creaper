@@ -23,6 +23,7 @@ from scipy import signal
 from . import harmony, listen, theory
 
 AUDIO_EXTENSIONS = {".wav", ".aif", ".aiff", ".flac", ".ogg", ".mp3"}
+MAX_INDEX_S = 300   # seconds an index build may walk before it stops
 MAX_FILES = 60000
 
 ROLE_WORDS = {
@@ -58,6 +59,25 @@ def roles_from_name(name: str, folder: str = "") -> list[str]:
     if "open hat" in roles and "closed hat" in roles:
         roles.remove("closed hat")
     return roles
+
+
+def too_broad(folder: Path) -> str | None:
+    """Why a folder is too broad to index as samples (a drive, the home folder itself, a
+    system folder: walking it takes ages and shows every audio file's name), or None."""
+    p = folder.expanduser().resolve()
+    if p.parent == p:
+        return "that's a whole drive"
+    if p == Path.home().resolve():
+        return "that's your whole home folder"
+    system = [Path(os.environ.get(k, "")) for k in ("SystemRoot", "ProgramFiles", "ProgramFiles(x86)", "ProgramData")
+              if os.environ.get(k)] + [Path(x) for x in ("/System", "/usr", "/etc", "/bin", "/Library")]
+    for root in system:
+        try:
+            p.relative_to(root.resolve())
+            return "that's a system folder"
+        except (ValueError, OSError):
+            continue
+    return None
 
 
 def bpm_from_name(name: str) -> float | None:
@@ -413,12 +433,17 @@ class SampleLibrary:
     def _index(self, refresh: bool) -> dict:
         index = self._load_index()
         folders = self.folders()
-        if index and not refresh and index.get("folders") == folders:
+        if index and not refresh and index.get("folders") == folders and not index.get("partial"):
             return index
         old = {f["path"]: f for f in index.get("files", [])}
         files = []
+        started = time.time()
         for folder in folders:
+            if len(files) >= MAX_FILES or time.time() - started > MAX_INDEX_S:
+                break
             for root, _, names in os.walk(folder):
+                if len(files) >= MAX_FILES or time.time() - started > MAX_INDEX_S:
+                    break   # a huge tree stops here instead of walking on with nothing to add
                 for name in names:
                     if Path(name).suffix.lower() not in AUDIO_EXTENSIONS:
                         continue
@@ -449,6 +474,8 @@ class SampleLibrary:
                     if len(files) >= MAX_FILES:
                         break
         index = {"folders": folders, "built": time.strftime("%Y-%m-%d %H:%M"), "files": files}
+        if len(files) >= MAX_FILES or time.time() - started > MAX_INDEX_S:
+            index["partial"] = True   # cut short: the next call carries on (unchanged files are reused)
         self._save_index(index)
         return index
 

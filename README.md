@@ -339,6 +339,19 @@ shows **Allow / Deny** before anything riskier: running an arbitrary REAPER acti
   presets) reach Claude as text. Claude is told to treat them as data, never as
   instructions, and the riskier tools need your confirmation in the panel. In Claude
   Desktop, keep per-tool approval on for `run_action` and `delete_track`.
+- In the panel, replacing an existing file always asks, and so does the first write
+  into a folder outside the project's, REAPER's project folder and your Music,
+  Documents, Videos, Desktop and Downloads folders.
+- `run_action` won't run scripts or actions that save, close, quit, delete files or
+  open preferences; run those yourself from REAPER's action list.
+- Notes Claude saves (`save_note`) are shown in full in the panel and come back to
+  Claude marked as information, not instructions. They're in
+  `<REAPER resource folder>/creaper/knowledge.json`; delete any you don't recognise.
+- The installer installs a tagged release, and checks ReaImGui's plugin against its
+  recorded SHA-256 before REAPER can load it. The optional music model is pinned to one
+  commit.
+- The panel's Claude runs with your Claude Code user settings (so your sign-in works),
+  which includes any hooks you've set up there.
 
 ## Conventions Claude uses
 

@@ -85,14 +85,24 @@ SUMMARY_KEYS = (
 )
 
 
+def _one_line(text: Any) -> str:
+    """Text from a project (track names, errors) as one line: it can't add lines that
+    pose as the assistant's or the panel's own."""
+    return re.sub(r"\s+", " ", str(text)).strip()
+
+
 def describe_tool(name: str, args: dict[str, Any]) -> str:
     short = name.removeprefix(TOOL_PREFIX)
+    if short == "save_note" and args.get("text"):
+        # A note persists into every later session: show the user exactly what's saved.
+        text = f"save_note: {_one_line(args['text'])}"
+        return text if len(text) <= 240 else text[:237] + "..."
     parts = []
     for key in SUMMARY_KEYS:
         value = args.get(key)
         if value is None or isinstance(value, (dict, list)):
             continue
-        parts.append(f"{key}={value}")
+        parts.append(f"{key}={_one_line(value)}")
         if len(parts) == 3:
             break
     if "changes" in args:
@@ -148,7 +158,7 @@ class Translator:
                     content = block.get("content")
                     if isinstance(content, list):
                         content = " ".join(c.get("text", "") for c in content if isinstance(c, dict))
-                    message = str(content or "failed").removeprefix("Error executing tool ")
+                    message = _one_line(content or "failed").removeprefix("Error executing tool ")
                     self.emit(t="tool_error", id=block.get("tool_use_id"), message=message[:300])
         elif kind == "rate_limit_event":
             windows = event.get("rate_limit_info", {}).get("unifiedWindows", {})
@@ -325,7 +335,7 @@ def _turn(request: dict, workdir: Path, cancel_path: Path | None, emit: Callable
         env["CREAPER_REAPER_RESOURCE_PATH"] = request["resource_path"]
     if request.get("confirm"):
         env["CREAPER_CONFIRM_FILE"] = request["confirm"]  # risky tools ask in the panel
-    server: dict[str, Any] = {"command": str(python), "args": ["-m", "creaper"], "env": env}
+    server: dict[str, Any] = {"command": str(python), "args": ["-I", "-m", "creaper"], "env": env}
     # A relative name (claude runs in workdir) keeps user paths off the command line.
     (workdir / "mcp.json").write_text(json.dumps({"mcpServers": {"creaper": server}}), encoding="utf-8")
 

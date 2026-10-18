@@ -1,6 +1,6 @@
 -- @description creaper bridge: lets Claude work in REAPER through the creaper MCP server
 -- @author nickcapron
--- @version 0.29.0
+-- @version 0.29.1
 -- @link https://github.com/nickcapron/creaper
 -- @provides
 --   [nomain] creaper_json.lua
@@ -13,7 +13,7 @@
 --   Every change it makes is a named undo point ("creaper: ..."), so Ctrl+Z
 --   reverts anything Claude did.
 
-local BRIDGE_VERSION = "0.29.0"
+local BRIDGE_VERSION = "0.29.1"
 local PROTOCOL = 2
 
 ----------------------------------------------------------------------- JSON
@@ -2153,7 +2153,9 @@ function commands.save_track_template(p)
   end
   if #chunks == 0 then fail("give the tracks to save") end
   reaper.RecursiveCreateDirectory(template_dir(), 0)
-  local path = template_dir() .. "/" .. p.name .. ".RTrackTemplate"
+  local name = tostring(p.name or ""):gsub("[\\/:%*%?\"<>|%c]", " "):gsub("%.%.", " ")
+  if name:match("^%s*$") then fail("give the template a name") end
+  local path = template_dir() .. "/" .. name .. ".RTrackTemplate"
   local f = io.open(path, "wb")
   if not f then fail("couldn't write " .. path) end
   f:write(table.concat(chunks, "\n"))
@@ -2184,7 +2186,9 @@ function commands.list_track_templates()
 end
 
 function commands.apply_track_template(p)
-  local path = template_dir() .. "/" .. p.name .. ".RTrackTemplate"
+  local name = tostring(p.name or ""):gsub("[\\/:%*%?\"<>|%c]", " "):gsub("%.%.", " ")
+  if name:match("^%s*$") then fail("give the template a name") end
+  local path = template_dir() .. "/" .. name .. ".RTrackTemplate"
   if not reaper.file_exists(path) then fail("there's no track template called " .. p.name) end
   local before = reaper.CountTracks(0)
   -- Opening a track template adds its tracks to the project (after the selected track).

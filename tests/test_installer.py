@@ -23,7 +23,7 @@ def test_claude_desktop_config_is_merged_not_replaced(tmp_path):
     assert installer.add_to_claude_desktop(cfg, python="py.exe") == "updated"
     data = json.loads(cfg.read_text(encoding="utf-8"))
     assert data["theme"] == "dark" and data["mcpServers"]["other"] == {"command": "x"}
-    assert data["mcpServers"]["creaper"] == {"command": "py.exe", "args": ["-m", "creaper"]}
+    assert data["mcpServers"]["creaper"] == {"command": "py.exe", "args": ["-I", "-m", "creaper"]}
     assert cfg.with_suffix(".json.bak").exists()
     assert installer.add_to_claude_desktop(cfg, python="py.exe") == "already set up"
 
@@ -31,7 +31,7 @@ def test_claude_desktop_config_is_merged_not_replaced(tmp_path):
 def test_claude_desktop_config_created(tmp_path):
     cfg = tmp_path / "Claude" / "claude_desktop_config.json"
     assert installer.add_to_claude_desktop(cfg, python="py.exe") == "added"
-    assert json.loads(cfg.read_text(encoding="utf-8"))["mcpServers"]["creaper"]["args"] == ["-m", "creaper"]
+    assert json.loads(cfg.read_text(encoding="utf-8"))["mcpServers"]["creaper"]["args"] == ["-I", "-m", "creaper"]
 
 
 def test_install_reaimgui_writes_only_the_plugin(tmp_path, monkeypatch):
@@ -48,6 +48,9 @@ def test_install_reaimgui_writes_only_the_plugin(tmp_path, monkeypatch):
         return b"\0" * 200_000
 
     monkeypatch.setattr(installer, "_get", fake_get)
+    import hashlib
+    monkeypatch.setitem(installer.REAIMGUI_SHA256, installer.reaimgui_asset(),
+                        hashlib.sha256(b"\0" * 200_000).hexdigest())    # the file checks out
     assert installer.install_reaimgui(tmp_path, log=lambda *_: None) == "v9.9"
     assert (tmp_path / "UserPlugins" / installer.reaimgui_asset()).stat().st_size == 200_000
     assert not (tmp_path / "Scripts").exists() and len(fetched) == 2

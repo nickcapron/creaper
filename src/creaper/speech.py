@@ -206,7 +206,7 @@ def speak(texts: list[str], folder: Path, voice: str | None = None) -> list[Path
         job.write_text(json.dumps({"model": piper["model"], "items": [
             {"text": t, "path": str(p)} for t, p in zip(texts, paths)]}), encoding="utf-8")
         # Piper runs in its own process (its GPL code stays apart from creaper's).
-        done = subprocess.run([sys.executable, "-c", _PIPER_RUNNER, str(job)], capture_output=True, text=True,
+        done = subprocess.run([sys.executable, "-I", "-c", _PIPER_RUNNER, str(job)], capture_output=True, text=True,
                               timeout=TIMEOUT, creationflags=_NO_WINDOW)
         job.unlink(missing_ok=True)
         if done.returncode != 0:
@@ -275,7 +275,7 @@ def speak_phrase(text: str, path: Path, voice: str | None = None) -> Path:
         job = path.parent / "speech-job.json"
         job.write_text(json.dumps({"model": piper["model"], "phrase": True,
                                    "items": [{"text": text, "path": str(path)}]}), encoding="utf-8")
-        done = subprocess.run([sys.executable, "-c", _PIPER_RUNNER, str(job)], capture_output=True, text=True,
+        done = subprocess.run([sys.executable, "-I", "-c", _PIPER_RUNNER, str(job)], capture_output=True, text=True,
                               timeout=TIMEOUT, creationflags=_NO_WINDOW)
         job.unlink(missing_ok=True)
         if done.returncode != 0:

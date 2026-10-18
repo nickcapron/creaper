@@ -13,6 +13,8 @@ from pathlib import Path
 from . import jsonstore
 
 TOPICS = ("plugin", "preference", "mix", "sound", "project", "other")
+MAX_NOTE_CHARS = 600     # a lesson, not a document: a long note is more likely pasted-in text
+MAX_NOTES = 300          # the oldest go when there are more
 
 
 class Knowledge:
@@ -27,9 +29,11 @@ class Knowledge:
         return jsonstore.updating(self.path, lambda: {"version": 1, "notes": []}, indent=2)
 
     def add(self, text: str, topic: str = "other", subject: str | None = None) -> dict:
-        text = text.strip()
+        text = " ".join(text.split())   # one line: a note can't pose as several
         if not text:
             raise ValueError("the note is empty")
+        if len(text) > MAX_NOTE_CHARS:
+            raise ValueError(f"notes are lessons of up to {MAX_NOTE_CHARS} characters; this one is {len(text)}")
         topic = topic.strip().lower()
         if topic not in TOPICS:
             raise ValueError(f"topic must be one of {', '.join(TOPICS)}")
@@ -42,6 +46,7 @@ class Knowledge:
             note = {"id": uuid.uuid4().hex[:8], "topic": topic, "subject": (subject or "").strip() or None,
                     "text": text, "saved": dt.date.today().isoformat()}
             notes.append(note)
+            del notes[:-MAX_NOTES]
         return note
 
     def find(self, search: str | None = None, topic: str | None = None, subject: str | None = None) -> list[dict]:

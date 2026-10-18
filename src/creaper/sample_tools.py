@@ -15,7 +15,7 @@ import soundfile as sf
 from pydantic import BaseModel, Field
 
 from . import harmony, samplelib, theory
-from .server import READ_ONLY, bridge, call, tool
+from .server import READ_ONLY, bridge, call, confirm_with_user, tool
 
 library = samplelib.SampleLibrary(bridge.directory)
 
@@ -41,12 +41,23 @@ def sample_folders(
     folder list."""
     folders = library.folders()
     if add:
+        if str(add).startswith(("\\\\", "//")):
+            confirm_with_user(f"index samples from the network location {add}")
         if not Path(add).is_dir():
             raise ValueError(f"there's no folder at {add}")
+        why = samplelib.too_broad(Path(add))
+        if why:
+            raise ValueError(f"not added: {why}. Add the folder the samples are in, e.g. 'D:/Samples'")
+        confirm_with_user(f"index the audio files in {Path(add).resolve()} as samples (their names are shown to Claude)")
         folders = library.set_folders(folders + [str(Path(add))])
     if remove:
         folders = library.set_folders([f for f in folders if os.path.normcase(f) != os.path.normcase(str(Path(remove)))])
-    return {"folders": folders}
+    out = {"folders": folders}
+    index = library._load_index() or {}
+    if index.get("partial"):
+        out["note"] = (f"the last index stopped at {samplelib.MAX_FILES} files or {samplelib.MAX_INDEX_S // 60} "
+                       "minutes; it carries on with the next search")
+    return out
 
 
 @tool(annotations=READ_ONLY)

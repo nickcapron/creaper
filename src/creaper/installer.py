@@ -10,6 +10,7 @@ Nothing here handles a Claude login: signing in happens in Claude's own apps.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import platform
@@ -20,6 +21,17 @@ import urllib.request
 from pathlib import Path
 
 REAIMGUI_REPO = "cfillion/reaimgui"
+# The release creaper installs and its files' SHA-256 (from the GitHub release): REAPER loads
+# the plugin as native code, so a changed file is refused. Update both together.
+REAIMGUI_TAG = "v0.10.0.5"
+REAIMGUI_SHA256 = {
+    "reaper_imgui-x64.dll": "800b216e0937bf5bb6b08ba2767b7b974a746b3fc3b54943b4d3011da0a68f2a",
+    "reaper_imgui-x86.dll": "6840f7c76673018d9a42590f70c4c06ce8074b7c0f126c8deb6440a24c483082",
+    "reaper_imgui-arm64.dylib": "1f90cf004c0bbada45358609c943f601b2cb0e625ecf7739ae5df8708ab705ae",
+    "reaper_imgui-x86_64.dylib": "2209fec3eae03f22fe94b9d2681b04e21f41c7d4587cb0d69e4eb72e39a64e65",
+    "reaper_imgui-aarch64.so": "9b72753132a2ce96ae0405effaf9a8d8eeab9ab6d0f8c41ca7f62064333cdfc7",
+    "reaper_imgui-x86_64.so": "b967a30b356f1c689ab457f2ce393b936267e4287939ece616e10d74399e2997",
+}
 USER_AGENT = "creaper-setup"
 
 
@@ -48,8 +60,9 @@ def _get(url: str, timeout: float = 60.0) -> bytes:
 
 
 def install_reaimgui(resource_dir: Path, log=print) -> str:
-    """Downloads ReaImGui's plugin from its official release."""
-    release = json.loads(_get(f"https://api.github.com/repos/{REAIMGUI_REPO}/releases/latest"))
+    """Downloads ReaImGui's plugin from its official release (the pinned one) and checks
+    it against the SHA-256 recorded here before REAPER can load it."""
+    release = json.loads(_get(f"https://api.github.com/repos/{REAIMGUI_REPO}/releases/tags/{REAIMGUI_TAG}"))
     tag = release["tag_name"]
     name = reaimgui_asset()
     asset = next((a for a in release.get("assets", []) if a["name"] == name), None)
@@ -60,6 +73,10 @@ def install_reaimgui(resource_dir: Path, log=print) -> str:
     data = _get(asset["browser_download_url"], timeout=180.0)
     if len(data) < 100_000:
         raise RuntimeError("the ReaImGui download looks incomplete")
+    expected = REAIMGUI_SHA256.get(name)
+    if expected is None or hashlib.sha256(data).hexdigest() != expected:
+        raise RuntimeError(f"the ReaImGui download ({name}) doesn't match its recorded checksum, so it wasn't "
+                           "installed; install ReaImGui with ReaPack instead")
     part = plugins / (name + ".part")
     part.write_bytes(data)
     part.replace(plugins / name)
@@ -79,7 +96,7 @@ def claude_desktop_config() -> Path:
 
 
 def server_entry(python: str | None = None) -> dict:
-    return {"command": python or sys.executable, "args": ["-m", "creaper"]}
+    return {"command": python or sys.executable, "args": ["-I", "-m", "creaper"]}
 
 
 def add_to_claude_desktop(config_path: Path, python: str | None = None) -> str:
@@ -108,9 +125,13 @@ def add_to_claude_desktop(config_path: Path, python: str | None = None) -> str:
 def add_to_claude_code(claude: str, python: str | None = None) -> str:
     probe = subprocess.run([claude, "mcp", "get", "creaper"], capture_output=True, text=True, timeout=60)
     if probe.returncode == 0:
-        return "already set up"
+        if " -I " in f" {probe.stdout} " or "-I -m" in probe.stdout:
+            return "already set up"
+        # From before v0.29.1: started without isolated mode. Replace it.
+        subprocess.run([claude, "mcp", "remove", "--scope", "user", "creaper"], capture_output=True, text=True,
+                       timeout=60)
     done = subprocess.run([claude, "mcp", "add", "--scope", "user", "creaper", "--", python or sys.executable,
-                           "-m", "creaper"], capture_output=True, text=True, timeout=60)
+                           "-I", "-m", "creaper"], capture_output=True, text=True, timeout=60)
     if done.returncode != 0:
         raise RuntimeError((done.stderr or done.stdout).strip() or "claude mcp add failed")
     return "added"

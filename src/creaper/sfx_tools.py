@@ -150,7 +150,7 @@ def export_regions(
         names = ", ".join(r["name"] for r in all_regions) or "none"
         raise ValueError(f"no regions to export (regions in the project: {names})")
     missing = [n for n in regions or [] if not any(r["name"].lower() == n.lower() for r in all_regions)]
-    out_dir = Path(folder)
+    out_dir = export_tools.check_folder(folder)
     targets = [(r, out_dir / f"{export_tools.safe_name(r['name'])}.wav") for r in chosen]
     by_file: dict[str, list[str]] = {}
     for r, dest in targets:
@@ -160,8 +160,8 @@ def export_regions(
         raise ValueError("these regions would be saved to the same file; rename one of each: "
                          + "; ".join(" / ".join(f"'{n}'" for n in names) for names in clashes))
     existing = [p.name for _, p in targets if p.exists()]
-    if existing and not overwrite:
-        confirm_with_user(f"overwrite {len(existing)} existing file(s) in {out_dir} (e.g. {existing[0]})")
+    if existing:   # always asked in the chat panel; overwrite only says replacing is wanted
+        confirm_with_user(f"replace {len(existing)} existing file(s) in {out_dir} (e.g. {existing[0]})")
     start = min(r["start"]["seconds"] for r in chosen)
     end = max(r["end"]["seconds"] for r in chosen)
     extra = loop_crossfade_s + 0.5 if any(_matches(r["name"], loops) for r in chosen) else 0.5
