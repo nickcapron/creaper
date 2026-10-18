@@ -1348,6 +1348,73 @@ GENRES = [
         mix=Mix(lufs=(-9, -7), lra=(4, 7), low_end="heavy", tone="bright", width="wide"),
     ),
     Genre(
+        name="eurobeat",
+        family="electronic dance",
+        aliases=("euro beat", "super eurobeat", "initial d", "90s eurobeat", "para para"),
+        parent="italo disco",
+        description="Italian-made, Japan-loved high-speed dance-pop: a galloping octave bass, brass and supersaw "
+                    "stabs, a screaming synth riff and a melodramatic minor-key chorus, racing at 150-160 BPM.",
+        era="Italy (A-Beat C, Delta, Time, SCP) for Japan's Avex 'Super Eurobeat' series, 1990-2005",
+        touchstones=("Dave Rodgers", "Manuel", "Max Coveri", "Ken Blast", "Niko", "Super Eurobeat compilations",
+                     "Initial D soundtrack"),
+        tempo=(150, 160),
+        feel="four-on-the-floor, straight and driving, at a sprint",
+        swing=50,
+        modes=("minor",),
+        keys=("A minor", "E minor", "F# minor", "C# minor", "G minor"),
+        progressions=(
+            "i-VI-VII-i",
+            "i-VII-VI-VII",
+            "VI-VII-i-i",
+            "iv-V7/V-V-V",
+            "iv-VII-III-VI-ii°-V-i-i",
+            "i-VI-III-VII",
+        ),
+        harmonic_rhythm=1,
+        harmony="Natural-minor loops, one chord per bar: i-VI-VII-i in the verse, i-VII-VI-VII or VI-VII-i in the "
+                "chorus. The pre-chorus climbs iv-VI-VII to the major V (harmonic minor), often through V7/V, so the "
+                "chorus lands hard on i. The last chorus jumps up a tone or two (build_song lift_last_chorus) and "
+                "stays there; the drama is the point, so here it isn't cheesy, it's expected.",
+        voicing="close",
+        comping="stabs",
+        bass_style="octaves",
+        bass="The galloping octave bass: root on the beat, octave on the offbeat, 8ths all song, with 16th pickups "
+             "and octave flips into each chord; a punchy, slightly filtered saw or square bass, mid-forward, not a "
+             "sub, following every chord root.",
+        melody_density="busy",
+        melody_scale="harmonic minor",
+        melody="Two leads: the synth riff, a busy 16th-note hook high in the octave above C5, played in the intro, "
+               "between choruses and as the solo; and the sung chorus, a long, soaring, melodramatic line with big "
+               "leaps to the 5th and the raised 7th leaning into the tonic. The riff is the song's identity: catchy, "
+               "sequenced across the chords, repeated with small changes.",
+        groove={"step": 0.25, "swing": 50, "pattern": {
+            "kick":       "x... x... x... x...",
+            "snare":      ".... x... .... x...",
+            "clap":       ".... x... .... x...",
+            "closed hat": "xo.o xo.o xo.o xo.o",
+            "open hat":   "..x. ..x. ..x. ..x.",
+        }},
+        drums="Hard, short kick on every beat, snare and clap together on 2 and 4, open hats on every offbeat with "
+              "16th closed hats between; 16th snare rolls into every chorus, crashes on the downbeats; the kick "
+              "drops out for a bar before the last chorus.",
+        form=(("intro", 8), ("synth hook", 16), ("verse", 16), ("pre-chorus", 8), ("chorus", 16), ("synth hook", 8),
+              ("verse", 16), ("pre-chorus", 8), ("chorus", 16), ("synth hook", 16), ("break", 8), ("chorus", 16),
+              ("outro", 16)),
+        instruments=("synth lead", "brass synth", "supersaw stab synth", "octave bass synth", "drum machine",
+                     "vocals", "orchestra hit"),
+        sound_design="Bright, hard-edged 90s digital synths (JD-800, Nord Lead, JP-8000 supersaw): a detuned saw or "
+                     "square lead with portamento and delay, stacked brass and supersaw stabs, orchestra hits, a "
+                     "plucky saw bass; 909-style kick and a sharp clap-snare with short bright reverb.",
+        production="Bright and forward: the synth lead and brass sit on top, vocals right behind them, the bass "
+                   "punchy in the low mids rather than a deep sub; little sidechain pumping, bus compression for "
+                   "density and a crisp top end; 4-5 minute extended mixes.",
+        theory="Minor-key Hi-NRG at speed: diatonic natural-minor loops brightened by the harmonic-minor V and "
+               "secondary dominants at the pre-chorus; the relentless octave bass doubles the harmonic rhythm's "
+               "pulse, and the key change up into the last chorus is the climax.",
+        fill_style="snare_roll",
+        mix=Mix(lufs=(-9, -7), lra=(4, 7), low_end="moderate", tone="bright", width="wide"),
+    ),
+    Genre(
         name="edm",
         family="electronic dance",
         aliases=("edm pop", "festival edm"),

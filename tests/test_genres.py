@@ -1,6 +1,7 @@
 from collections import Counter
 
 import pytest
+from test_song import reaper  # noqa: F401  (the fixture; imports creaper.server first)
 
 from creaper import genres
 from creaper.genres import _template
@@ -40,6 +41,47 @@ def test_compose_prompt_defaults_to_full_length():
     from creaper import server
     assert "full-length" in server.compose("house")
     assert "a 16-bar piece" in server.compose("house", bars="16")
+
+
+# ------------------------------------------------------------- eurobeat
+
+def test_eurobeat_is_its_own_style_under_any_of_its_names():
+    from creaper import music_tools
+    g = genres.find("eurobeat")
+    assert genres.validate(g) == []
+    for name in ("Super Eurobeat", "Initial D", "initial d style", "euro beat", "90s Eurobeat"):
+        assert genres.find(name) is g, name
+    assert genres.find("eurodance").name == "eurodance"     # the slower 90s style stays separate
+    assert 150 <= g.tempo[0] <= g.tempo_default == 155 <= g.tempo[1] <= 160
+    assert g.bass_style == "octaves" and g.fill_style == "snare_roll" and g.melody_density == "busy"
+    assert "eurobeat" in [x["genre"] for x in music_tools.list_genres(search="initial d")["genres"]]
+
+
+def test_eurobeat_harmony_climbs_to_v_and_lifts_the_last_chorus():
+    from creaper import music_tools, song_tools
+    g = genres.find("eurobeat")
+    names = [n for n, _ in song_tools._numbered(list(g.form))]
+    plan = {r["section"]: r for r in music_tools.plan_harmony(genre="eurobeat", key="A minor", sections=names,
+                                                              lift_last_chorus=True)["sections"]}
+    assert plan["Verse 1"]["chords"] == "Am F G Am"
+    assert plan["Pre-chorus 1"]["chords"].split()[-1] == "E"     # the major V leans into the chorus
+    assert plan["Chorus 1"]["key"] == "A minor" and plan["Chorus 3"]["key"] == "B minor"
+
+
+def test_eurobeat_builds_a_song_at_its_tempo(reaper):
+    from creaper import song_tools
+    out = song_tools.build_song(genre="super eurobeat", seed=5, lift_last_chorus=True)
+    g = genres.find("eurobeat")
+    assert out["genre"] == "eurobeat" and 150 <= reaper.bpm <= 160 and reaper.meter == "4/4"
+    assert [r["name"] for r in reaper.regions] == [n for n, _ in song_tools._numbered(list(g.form))]
+    assert out["bars"] == sum(b for _, b in g.form)
+    assert {s["section"]: s["key"] for s in out["sections"]}["Chorus 3"] == "B minor"
+    # The galloping bass: an octave jump between most neighbouring 8ths.
+    bass = next(i for i in reaper.items.values() if i["track"]["name"] == "Bass" and "Verse 1" in i["name"])
+    pitches = [n["pitch"] for n in sorted(bass["notes"], key=lambda n: n["start"])]
+    jumps = sum(abs(a - b) == 12 for a, b in zip(pitches, pitches[1:]))
+    assert jumps > len(pitches) / 2
+    assert not [f for f in out["song_map"]["findings"] if f["status"] == "fail"], out["song_map"]["findings"]
 
 
 
