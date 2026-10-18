@@ -86,7 +86,7 @@ def test_master_to_target_refuses_before_changing_anything(monkeypatch):
     monkeypatch.setattr(server, "analyze_audio", lambda **a: song(lra=1.0))
     with pytest.raises(ValueError, match="nothing was changed"):
         server.master_to_target(style="house")
-    assert changed == [("get_track_details", None)]
+    assert {cmd for cmd, _ in changed} <= {"get_track_details", "render_audio"}   # looked and listened, changed nothing
 
 
 def test_master_to_target_checks_the_mix_with_an_earlier_limiter_bypassed(monkeypatch):

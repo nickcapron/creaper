@@ -15,6 +15,7 @@ import re
 from pathlib import Path
 from typing import Annotated
 
+import numpy as np
 from pydantic import Field
 
 from . import analysis, genres, plugin_profiles
@@ -471,7 +472,8 @@ DRUM_GLUE_DB = 1.5           # loud-vs-average drop on the drum bus (its 10 ms a
 DELAY_DB = {"vocal": -20, "lead": -18}   # send levels to the shared delay
 
 
-def _glue_drums(channels: list[dict], start_bar: float | None, end_bar: float | None) -> dict | None:
+def _glue_drums(channels: list[dict], start_bar: float | None, end_bar: float | None,
+                span: tuple[float, float] | None = None) -> dict | None:
     """Puts the drums through one compressor so they hit as a kit, calibrated by
     measurement to take about 1.5 dB off the hits (ReaComp at 4:1 with a 10 ms attack
     that lets them through). Where it goes:
@@ -535,7 +537,11 @@ def _glue_drums(channels: list[dict], start_bar: float | None, end_bar: float | 
     call("set_fx_parameters", track=target, fx=comp["index"], changes=changes)
     result = {"where": how, "compressor": comp["name"], "track": target}
     if profile and profile.drive:
-        result["calibration"] = _calibrate_compressor(target, comp["index"], profile, DRUM_GLUE_DB, start_bar, end_bar)
+        from . import batch
+
+        with batch.span_hints({target: span} if span and start_bar is None and end_bar is None else {}):
+            result["calibration"] = _calibrate_compressor(target, comp["index"], profile, DRUM_GLUE_DB, start_bar,
+                                                          end_bar)
     return result
 
 
@@ -559,13 +565,14 @@ def _shape_dynamics(channels: list[dict], actions: list[dict], family: str | Non
     DRUM_COMP_DB off, then a soft clipper that rounds the last DRUM_SHAVE_DB of peaks (the
     fader comes down by the clipper's boost, so the part's loudness stays); keys, pads
     and leads over TONAL_PLR_DB get 2:1 calibrated to TONAL_COMP_DB. Parts the user (or the plan)
-    already compresses are left alone. Skipped for genres that should breathe."""
-    from .server import _calibrate_compressor
+    already compresses are left alone. Skipped for genres that should breathe. Every
+    compressor is added first and they're calibrated together (shared renders)."""
+    from . import server
 
     if family in GENTLE_FAMILIES:
         return [{"skipped": f"{family} keeps its dynamics: no extra compression"}]
     planned = {a["ref"] for a in actions if "compress" in a or a.get("skipped")}
-    done = []
+    work = []
     for c in channels:
         if c.get("level") is None or c.get("has_comp") or c["ref"] in planned:
             continue
@@ -574,48 +581,78 @@ def _shape_dynamics(channels: list[dict], actions: list[dict], family: str | Non
         if plr is None or not ((drum and plr > DRUM_PLR_DB) or (c["role"] in TONAL_ROLES and plr > TONAL_PLR_DB)):
             continue
         entry: dict = {"track": c["name"], "peak_to_loudness_db": round(plr, 1)}
-        comp = None
         try:
             comp = call("add_fx", track=c["ref"], name="ReaComp")
             ratio, attack, release, target = (4, 15, 80, DRUM_COMP_DB) if drum else (2, 20, 150, TONAL_COMP_DB)
             call("set_fx_parameters", track=c["ref"], fx=comp["index"], changes=[
                 {"parameter": "Ratio", "display_value": ratio}, {"parameter": "Attack", "display_value": attack},
                 {"parameter": "Release", "display_value": release}])
-            profile = plugin_profiles.find_profile(comp["name"])
-            if profile and profile.drive:
-                cal = _calibrate_compressor(c["ref"], comp["index"], profile, target, start_bar, end_bar)
-                entry["compressor"] = {"ratio": ratio, "reduction_db": cal.get("loud_part_reduction_db"),
-                                       "threshold_db": cal.get("value")}
-            if drum:
-                entry["soft_clip"] = _soft_clip(c["ref"], start_bar, end_bar)
+            entry["compressor"] = {"ratio": ratio}
+            work.append({"c": c, "entry": entry, "comp": comp, "drum": drum, "target": target,
+                         "profile": plugin_profiles.find_profile(comp["name"])})
         except Exception as e:  # noqa: BLE001 - one part's trouble shouldn't stop the mix
             entry["error"] = str(e)
-            if comp and "compressor" not in entry:
-                # A half-calibrated compressor would squash at whatever step it stopped on.
-                try:
-                    call("remove_fx", track=c["ref"], fx=comp["index"])
-                    entry["removed"] = "its compressor, since calibration failed"
-                except Exception:  # noqa: BLE001
-                    pass
-        else:
-            ADDED_COMPRESSORS.add(str(c["ref"]))
-        done.append(entry)
+            work.append({"c": c, "entry": entry, "comp": None, "drum": drum})
+    jobs = [w for w in work if w.get("comp") and w["profile"] and w["profile"].drive]
+    results = server._calibrate_compressors([
+        {"track": w["c"]["ref"], "fx": w["comp"]["index"], "profile": w["profile"], "target": w["target"],
+         "span": None} for w in jobs], start_bar, end_bar)
+    for w, cal in zip(jobs, results):
+        if "error" in cal:
+            w["entry"]["error"] = cal["error"]
+            try:  # a half-calibrated compressor would squash at whatever step it stopped on
+                call("remove_fx", track=w["c"]["ref"], fx=w["comp"]["index"])
+                w["entry"]["removed"] = "its compressor, since calibration failed"
+            except Exception:  # noqa: BLE001
+                pass
+            w["comp"] = None
+            w["entry"].pop("compressor", None)
+            continue
+        w["entry"]["compressor"].update(reduction_db=cal.get("loud_part_reduction_db"), threshold_db=cal.get("value"))
+    clip_tracks = [w for w in work if w.get("comp") and w["drum"]]
+    peaks = _peaks_now([w["c"]["ref"] for w in clip_tracks], start_bar, end_bar) if len(clip_tracks) > 1 else {}
+    for w in clip_tracks:
+        try:
+            w["entry"]["soft_clip"] = _soft_clip(w["c"]["ref"], start_bar, end_bar, peaks.get(w["c"]["ref"]))
+        except Exception as e:  # noqa: BLE001
+            w["entry"]["error"] = str(e)
+    done = []
+    for w in work:
+        if w.get("comp"):
+            ADDED_COMPRESSORS.add(str(w["c"]["ref"]))
+        done.append(w["entry"])
     return done
+
+
+def _peaks_now(tracks: list, start_bar: float | None, end_bar: float | None) -> dict:
+    """Each track's sample peak (dBFS) over the range, from one render pass of them all."""
+    from . import batch
+
+    audio = batch.render_group(tracks, start_bar, end_bar)
+    out = {}
+    for t in tracks:
+        x = audio.get(t)
+        if x is not None and x.size:
+            peak = float(abs(x).max())
+            out[t] = analysis._db(peak) if peak > 0 else None
+    return out
 
 
 # Tracks whose compressor this run's dynamics stage added: the drum glue may reuse it.
 ADDED_COMPRESSORS: set[str] = set()
 
 
-def _soft_clip(track, start_bar: float | None, end_bar: float | None) -> dict:
+def _soft_clip(track, start_bar: float | None, end_bar: float | None, peak: float | None = None) -> dict:
     """The soft clipper after the track's compressor, its boost set so the peaks reach
-    DRUM_SHAVE_DB over its knee at 0 dBFS, and the fader down by the same boost."""
+    DRUM_SHAVE_DB over its knee at 0 dBFS, and the fader down by the same boost. peak:
+    the track's sample peak if it was just measured (else it's rendered here)."""
     from .server import analyze_audio
 
-    m = analyze_audio(track=track, start_bar=start_bar, end_bar=end_bar)
+    if peak is None:
+        m = analyze_audio(track=track, start_bar=start_bar, end_bar=end_bar)
+        peak = (m.get("levels") or {}).get("sample_peak_dbfs")
     details = call("get_track_details", track=track)
     fader = details.get("volume_db") or 0.0
-    peak = (m.get("levels") or {}).get("sample_peak_dbfs")
     if peak is None:
         return {"skipped": "silent in that range"}
     pre_fader_peak = peak - fader
@@ -699,6 +736,7 @@ SATURATION_FX, SATURATION_PARAM = "JS: Saturation", "Amount (%)"
 COLOUR_RISE_DB = (2.0, 4.0)     # how much the 2-8 kHz band should come up: audible grit, not fizz
 COLOUR_MAX_CREST_DROP_DB = 1.0  # more punch lost than this and it's distortion, not colour
 COLOUR_STEPS = (5, 15, 30, 45, 60, 80)
+COLOUR_HOPELESS_AT, COLOUR_HOPELESS_DB = 30, 0.5   # at 30% with under 0.5 dB of rise, more won't reach 2 dB
 
 
 def band_db(audio, fs: float, lo: float = 2000, hi: float = 8000) -> float:
@@ -725,66 +763,155 @@ def choose_colour(trials: list[dict]) -> dict | None:
     return max(ok, key=lambda t: t["rise_db"]) if ok and max(t["rise_db"] for t in ok) >= 0.5 else None
 
 
-def _add_colour(targets: list[tuple[str, object]], start_bar: float | None, end_bar: float | None) -> list[dict]:
+def _add_colour(targets: list[tuple[str, object]], start_bar: float | None, end_bar: float | None,
+                spans: dict | None = None) -> list[dict]:
     """Saturation on the bass and the drum bus, its amount found by measurement: raised
     until the 2-8 kHz band comes up COLOUR_RISE_DB (harmonics a small speaker can play)
     while the crest factor drops less than COLOUR_MAX_CREST_DROP_DB. Measured on the
-    loudest 16 bars. targets: [(label, track ref)]."""
-    from . import analysis
+    loudest 16 bars (spans: {track: (start_bar, end_bar)} when auto_mix already knows
+    them). Targets on the same span share their renders: one pass per trial amount for
+    all of them. targets: [(label, track ref)]."""
+    from . import batch
     from .server import _loudest_bars, _render_array
 
-    done = []
+    done: dict = {}
+    live = []
     for label, track in targets:
         entry: dict = {"track": label}
+        done[label] = entry
         try:
             fx = call("get_track_details", track=track).get("fx", [])
             if any("satur" in f["name"].lower() for f in fx):
                 entry["skipped"] = "it already has a saturator"
-                done.append(entry)
                 continue
-            sat = None
             sat = call("add_fx", track=track, name=SATURATION_FX)
-            call("update_fx", track=track, fx=sat["index"], enabled=False)
-            try:
-                dry, fs, render = _render_array(track, start_bar, end_bar)
-                span = _loudest_bars(track, dry, fs, render) if start_bar is None and end_bar is None else None
-                lo_bar, hi_bar = span or (start_bar, end_bar)
-                if span:
-                    dry, fs, render = _render_array(track, lo_bar, hi_bar)
-            finally:
-                call("update_fx", track=track, fx=sat["index"], enabled=True)
-            base_band = band_db(dry, fs)
-            base_crest = analysis.envelope_range(dry, fs) or 0.0
-            trials = []
-            for amount in COLOUR_STEPS:
-                call("set_fx_parameters", track=track, fx=sat["index"],
-                     changes=[{"parameter": SATURATION_PARAM, "display_value": amount}])
-                wet, _, _ = _render_array(track, lo_bar, hi_bar)
-                # Level-matched: the rise is the band's share going up, not the part getting louder.
-                level_change = 10 * math.log10(float((wet ** 2).mean() + 1e-20) / float((dry ** 2).mean() + 1e-20))
-                trials.append({"amount": amount, "rise_db": round(band_db(wet, fs) - base_band - level_change, 2),
-                               "crest_drop_db": round(base_crest - (analysis.envelope_range(wet, fs) or 0.0), 2)})
-                if trials[-1]["rise_db"] >= COLOUR_RISE_DB[0] or trials[-1]["crest_drop_db"] > COLOUR_MAX_CREST_DROP_DB:
-                    break
-            pick = choose_colour(trials)
-            entry["trials"] = trials
-            if pick is None:
-                call("remove_fx", track=track, fx=sat["index"])
-                entry["skipped"] = "saturation added no useful harmonics here (already rich, or it cost punch)"
-            else:
-                call("set_fx_parameters", track=track, fx=sat["index"],
-                     changes=[{"parameter": SATURATION_PARAM, "display_value": pick["amount"]}])
-                entry.update(amount_pct=pick["amount"], presence_rise_db=pick["rise_db"],
-                             crest_drop_db=pick["crest_drop_db"])
+            span = (spans or {}).get(track) if start_bar is None and end_bar is None else None
+            if span is None and start_bar is None and end_bar is None:
+                call("update_fx", track=track, fx=sat["index"], enabled=False)
+                try:
+                    full, fs, render = _render_array(track, None, None)
+                    span = _loudest_bars(track, full, fs, render)
+                finally:
+                    call("update_fx", track=track, fx=sat["index"], enabled=True)
+            live.append({"label": label, "track": track, "sat": sat, "span": span or (start_bar, end_bar),
+                         "entry": entry, "trials": []})
         except Exception as e:  # noqa: BLE001
             entry["error"] = str(e)
-            if locals().get("sat") and "amount_pct" not in entry:
+    groups: dict = {}
+    for t in live:
+        groups.setdefault(tuple(t["span"]), []).append(t)
+    for (lo_bar, hi_bar), group in groups.items():
+        try:
+            for t in group:
+                call("update_fx", track=t["track"], fx=t["sat"]["index"], enabled=False)
+            try:
+                dry = batch.render_group([t["track"] for t in group], lo_bar, hi_bar)
+            finally:
+                for t in group:
+                    call("update_fx", track=t["track"], fx=t["sat"]["index"], enabled=True)
+            fs = dry["_fs"]
+            for t in group:
+                t["dry"] = dry[t["track"]]
+                t["base_band"] = band_db(t["dry"], fs)
+                t["base_crest"] = analysis.envelope_range(t["dry"], fs) or 0.0
+            for amount in COLOUR_STEPS:
+                searching = [t for t in group if not t.get("finished")]
+                if not searching:
+                    break
+                for t in searching:
+                    call("set_fx_parameters", track=t["track"], fx=t["sat"]["index"],
+                         changes=[{"parameter": SATURATION_PARAM, "display_value": amount}])
+                wet = batch.render_group([t["track"] for t in searching], lo_bar, hi_bar)
+                for t in searching:
+                    w, d = wet[t["track"]], t["dry"]
+                    # Level-matched: the rise is the band's share going up, not the part getting louder.
+                    level_change = 10 * math.log10(float((w ** 2).mean() + 1e-20) / float((d ** 2).mean() + 1e-20))
+                    t["trials"].append({"amount": amount,
+                                        "rise_db": round(band_db(w, fs) - t["base_band"] - level_change, 2),
+                                        "crest_drop_db": round(t["base_crest"] - (analysis.envelope_range(w, fs) or 0.0), 2)})
+                    last = t["trials"][-1]
+                    if last["rise_db"] >= COLOUR_RISE_DB[0] or last["crest_drop_db"] > COLOUR_MAX_CREST_DROP_DB:
+                        t["finished"] = True
+                    elif amount >= COLOUR_HOPELESS_AT and last["rise_db"] < COLOUR_HOPELESS_DB:
+                        t["finished"] = True   # a third of the way up and barely a change: it won't get there
+            for t in group:
+                pick = choose_colour(t["trials"])
+                t["entry"]["trials"] = t["trials"]
+                if pick is None:
+                    call("remove_fx", track=t["track"], fx=t["sat"]["index"])
+                    t["entry"]["skipped"] = "saturation added no useful harmonics here (already rich, or it cost punch)"
+                else:
+                    call("set_fx_parameters", track=t["track"], fx=t["sat"]["index"],
+                         changes=[{"parameter": SATURATION_PARAM, "display_value": pick["amount"]}])
+                    t["entry"].update(amount_pct=pick["amount"], presence_rise_db=pick["rise_db"],
+                                      crest_drop_db=pick["crest_drop_db"])
+        except Exception as e:  # noqa: BLE001
+            for t in group:
+                if "amount_pct" in t["entry"]:
+                    continue
+                t["entry"]["error"] = str(e)
                 try:  # don't leave it driven at a trial setting
-                    call("remove_fx", track=track, fx=sat["index"])
+                    call("remove_fx", track=t["track"], fx=t["sat"]["index"])
                 except Exception:  # noqa: BLE001
                     pass
-        done.append(entry)
-    return done
+    return [done[label] for label, _ in targets]
+
+
+def _loud_spans(channels: list[dict], envelopes: dict, offset_s: float) -> dict:
+    """Where each stage calibrates, from auto_mix's first pass: the mix's loudest
+    CALIBRATE_BARS bars ('_mix', from the parts' summed power) for every part that plays
+    there (within 6 dB of its own loudest), so their calibrations share renders; a
+    part's own loudest bars when it sits out the mix's peak; the drums' ('_drums') for
+    the drum bus. {ref (and name): (start_bar, end_bar)}."""
+    from . import batch
+    from .server import CALIBRATE_BARS
+
+    if not envelopes:
+        return {}
+    overview = call("get_project_overview")
+    bpm = float(overview.get("tempo_bpm") or 120)
+    num, den = (int(x) for x in (overview.get("time_signature") or "4/4").split("/"))
+    span_s = CALIBRATE_BARS * num * 4 / den * 60 / bpm
+    width = max(1, int(round(span_s / batch.ENV_HOP_S)))
+    size = max(e.size for e in envelopes.values())
+    mix = np.zeros(size)
+    drums = np.zeros(size)
+    by_ref = {c["ref"]: c for c in channels}
+    for ref, e in envelopes.items():
+        mix[: e.size] += e
+        if by_ref.get(ref, {}).get("role") in DRUM_ROLES:
+            drums[: e.size] += e
+    starts = {}
+    mix_start = batch.loudest_start_s(mix, span_s)
+    if mix_start is None:
+        return {}
+    starts["_mix"] = mix_start
+    i0 = int(round(mix_start / batch.ENV_HOP_S))
+
+    def plays_at_mix_peak(e: np.ndarray, own: float) -> bool:
+        at_mix = e[i0: i0 + width].mean() if e[i0: i0 + width].size else 0.0
+        o = int(round(own / batch.ENV_HOP_S))
+        at_own = e[o: o + width].mean()
+        return at_own > 0 and at_mix >= at_own * 10 ** (-6 / 10)
+
+    if drums.any():
+        own = batch.loudest_start_s(drums, span_s)
+        starts["_drums"] = mix_start if own is not None and plays_at_mix_peak(drums, own) else own
+    for ref, e in envelopes.items():
+        own = batch.loudest_start_s(e, span_s)
+        if own is not None:
+            starts[ref] = mix_start if plays_at_mix_peak(e, own) else own
+    keys = [k for k, v in starts.items() if v is not None]
+    positions = call("time_to_positions", times=[offset_s + starts[k] for k in keys])
+    out = {}
+    for k, pos in zip(keys, positions):
+        first = max(1, int(pos["bar"]))
+        span = (float(first), float(first + CALIBRATE_BARS))
+        out[k] = span
+        c = by_ref.get(k)
+        if c:  # by name too; never by number: a sidechain's Duck bus shifts the numbers after it
+            out[c["name"]] = span
+    return out
 
 
 def _delay_return(bpm: float) -> dict:
@@ -834,7 +961,8 @@ def _drum_room() -> dict:
     return {"track": ref, "name": "Drum Room", "reused": False}
 
 
-def _mix_bus_glue(start_bar: float | None, end_bar: float | None) -> dict | None:
+def _mix_bus_glue(start_bar: float | None, end_bar: float | None,
+                  span: tuple[float, float] | None = None) -> dict | None:
     """Gentle glue on the whole mix: ReaComp on the master (before any limiter) at its
     glue settings (2:1, slow attack), calibrated to take about 1 dB off. master_to_target
     reuses and recalibrates it when mastering."""
@@ -851,7 +979,11 @@ def _mix_bus_glue(start_bar: float | None, end_bar: float | None) -> dict | None
         call("set_fx_parameters", track="master", fx=comp["index"], changes=changes)
     result = {"compressor": comp["name"]}
     if profile and profile.drive:
-        result["calibration"] = _calibrate_compressor("master", comp["index"], profile, MIX_GLUE_DB, start_bar, end_bar)
+        from . import batch
+
+        with batch.span_hints({"master": span} if span and start_bar is None and end_bar is None else {}):
+            result["calibration"] = _calibrate_compressor("master", comp["index"], profile, MIX_GLUE_DB, start_bar,
+                                                          end_bar)
     return result
 
 
@@ -944,14 +1076,25 @@ def auto_mix(
     stems = call("render_stems", timeout=900.0, tracks=[c["track"] for c in channels],
                  start_bar=start_bar, end_bar=end_bar)
     by_track = {s["track"]["number"]: s["file"] for s in stems.get("stems", [])}
+    envelopes: dict = {}
     try:
         for c in channels:
             f = by_track.get(c["track"])
             if not f:
                 continue
-            m = analysis.analyze_file(f)
+            m = analysis.analyze_file(f, detail=False)
             if m.get("silent"):
                 continue
+            try:  # each part's loudness over time: where every later stage calibrates
+                import soundfile as sf
+
+                from . import batch
+
+                audio, fs_ = sf.read(f, always_2d=True)
+                envelopes[c["ref"]] = batch.track_envelope(audio, int(fs_))
+                del audio
+            except Exception:  # noqa: BLE001
+                pass
             c["level"] = m["loudness"].get("max_short_term_lufs") or m["loudness"].get("integrated_lufs")
             c["peak_db"] = m["levels"]["sample_peak_dbfs"]
             c["crest_db"] = m["levels"]["crest_factor_db"]
@@ -963,6 +1106,8 @@ def auto_mix(
             Path(f).unlink(missing_ok=True)
     for c in channels:
         c.setdefault("role", role_of(c["name"]))
+    spans = _loud_spans(channels, envelopes, stems.get("start", {}).get("seconds", 0.0)) \
+        if start_bar is None and end_bar is None else {}
     plan = plan_mix(channels, profile)
     report = {"style": (profile or {}).get("name"), "plan": plan["channels"], "sidechains": plan["sidechains"]}
     if dry_run:
@@ -1049,6 +1194,19 @@ def auto_mix(
                 report["delay_return"] = {**delay, "fed_by": [a["name"] for a in senders]}
             except Exception as e:  # noqa: BLE001
                 report.setdefault("warnings", []).append(f"delay return: {e}")
+    from . import batch
+
+    with batch.span_hints({k: v for k, v in spans.items() if not str(k).startswith("_")}):
+        return _mix_stages(report, plan, channels, profile, spans, room, verb, start_bar, end_bar, dynamics,
+                           sidechain, glue, colour, section_moves)
+
+
+def _mix_stages(report: dict, plan: dict, channels: list[dict], profile: dict | None, spans: dict, room, verb,
+                start_bar, end_bar, dynamics: bool, sidechain: bool, glue: bool, colour: bool,
+                section_moves: bool) -> dict:
+    """auto_mix after the levels, EQ and sends: the measured stages, with the loud
+    spans from its first pass. The master is rendered for the headroom and once at the
+    end; the stages in between measure their own tracks."""
     # Before the sidechain: the soft clipper's boost changes the kick's level into the
     # sidechain send, which is calibrated next.
     if dynamics:
@@ -1067,7 +1225,9 @@ def auto_mix(
                           if k in done_sc})
             except Exception as e:  # noqa: BLE001
                 report.setdefault("warnings", []).append(f"sidechain {d['source']} -> {d['target']}: {e}")
-    # Headroom: move every fader together so the mix peaks around -6 dBFS.
+    # Headroom: move every fader together so the mix peaks around -6 dBFS. No master
+    # effects yet and post-fader sends, so the mix moves by exactly the shift: no second
+    # render to confirm it.
     master = analyze_audio(track="master", start_bar=start_bar, end_bar=end_bar)
     peak = master.get("levels", {}).get("sample_peak_dbfs")
     if peak is not None and abs(peak - HEADROOM_PEAK_DB) > 1.0:
@@ -1078,13 +1238,14 @@ def auto_mix(
         # The reverb and delay returns stay put: their sends follow the track faders
         # (post-fader), so moving the returns too shifted the effects twice.
         report["headroom_shift_db"] = shift
-        master = analyze_audio(track="master", start_bar=start_bar, end_bar=end_bar)
+    changed = False
     if glue:
         # The drums compressed together as a kit. After the headroom move: the drum bus
         # is fed after the drum faders, so moving them later would undo the calibration.
         try:
-            drum_glue = _glue_drums(channels, start_bar, end_bar)
+            drum_glue = _glue_drums(channels, start_bar, end_bar, spans.get("_drums"))
             if drum_glue:
+                changed = True
                 report["drum_glue"] = drum_glue
                 drum_glue["_track"] = drum_glue.pop("track", None)
                 if dynamics and drum_glue.get("_track") and (profile or {}).get("family") not in GENTLE_FAMILIES:
@@ -1094,14 +1255,13 @@ def auto_mix(
                         drum_glue["parallel"] = add_parallel_compression(track=drum_glue["_track"], blend_db=-10)
                     except Exception as e:  # noqa: BLE001
                         report.setdefault("warnings", []).append(f"drum parallel compression: {e}")
-                master = analyze_audio(track="master", start_bar=start_bar, end_bar=end_bar)
         except Exception as e:  # noqa: BLE001
             report.setdefault("warnings", []).append(f"drum bus: {e}")
         try:
-            mix_glue = _mix_bus_glue(start_bar, end_bar)
+            mix_glue = _mix_bus_glue(start_bar, end_bar, spans.get("_mix"))
             if mix_glue:
                 report["mix_bus_glue"] = mix_glue
-                master = analyze_audio(track="master", start_bar=start_bar, end_bar=end_bar)
+                changed = True
         except Exception as e:  # noqa: BLE001
             report.setdefault("warnings", []).append(f"mix bus glue: {e}")
     if colour and (profile or {}).get("family") not in GENTLE_FAMILIES:
@@ -1109,10 +1269,13 @@ def auto_mix(
         glue_track = (report.get("drum_glue") or {}).get("_track")
         if glue_track:
             targets.append(("drum bus", glue_track))
+        colour_spans = {ref: spans[ref] for _, ref in targets if ref in spans}
+        if glue_track and spans.get("_drums"):
+            colour_spans[glue_track] = spans["_drums"]
         if targets:
             try:
-                report["colour"] = _add_colour(targets, start_bar, end_bar)
-                master = analyze_audio(track="master", start_bar=start_bar, end_bar=end_bar)
+                report["colour"] = _add_colour(targets, start_bar, end_bar, colour_spans)
+                changed = True
             except Exception as e:  # noqa: BLE001
                 report.setdefault("warnings", []).append(f"saturation: {e}")
     if report.get("drum_glue"):
@@ -1124,13 +1287,15 @@ def auto_mix(
             moves = _section_moves(start_bar, end_bar)
             if moves:
                 report["section_moves"] = moves
-                master = analyze_audio(track="master", start_bar=start_bar, end_bar=end_bar)
+                changed = True
         except Exception as e:  # noqa: BLE001
             report.setdefault("warnings", []).append(f"section moves: {e}")
     vocal_fixes = _clear_robot_vocals(plan["channels"], start_bar, end_bar)
     if vocal_fixes:
         report["vocal_clarity"] = vocal_fixes
-        master = analyze_audio(track="master", start_bar=start_bar, end_bar=end_bar)
+        changed = True
+    if changed or "headroom_shift_db" in report or dynamics or sidechain:
+        master = analyze_audio(track="master", start_bar=start_bar, end_bar=end_bar)   # the mix as it now stands
     peak = master.get("levels", {}).get("sample_peak_dbfs")
     lufs = master.get("loudness", {}).get("integrated_lufs")
     report["result"] = {"peak_dbfs": peak, "integrated_lufs": lufs,

@@ -148,8 +148,8 @@ def _window_db(mono: np.ndarray, n: int) -> np.ndarray:
 
 def align(dry: np.ndarray, wet: np.ndarray, fs: float, max_lag_s: float = 0.05) -> int:
     """Samples the wet signal lags the dry one (a plugin's lookahead or latency), found
-    by cross-correlating the first 20 seconds; 0 when they're already aligned."""
-    n = min(dry.size, wet.size, int(20 * fs))
+    by cross-correlating the first 6 seconds; 0 when they're already aligned."""
+    n = min(dry.size, wet.size, int(6 * fs))
     if n < 1024:
         return 0
     a, b = dry[:n] - dry[:n].mean(), wet[:n] - wet[:n].mean()
@@ -165,7 +165,7 @@ GR_WINDOW_S = 0.05
 GR_LOUD_DB = 12.0   # gain reduction is read where the dry signal is within this of its loudest
 
 
-def gain_reduction(dry: np.ndarray, wet: np.ndarray, fs: float) -> dict:
+def gain_reduction(dry: np.ndarray, wet: np.ndarray, fs: float, lag: int | None = None) -> dict:
     """How much a compressor or limiter turns the loud moments down: the level difference
     between the dry and processed renders in 50 ms windows (aligned first), relative to
     the quietest 5% of windows (which carry only make-up gain or a level change), read
@@ -175,7 +175,8 @@ def gain_reduction(dry: np.ndarray, wet: np.ndarray, fs: float) -> dict:
     down. Returns p95 and median gain reduction in dB."""
     d = dry.mean(axis=1) if dry.ndim > 1 else dry
     w = wet.mean(axis=1) if wet.ndim > 1 else wet
-    lag = align(d.astype(np.float64), w.astype(np.float64), fs)
+    if lag is None:   # known already for a model's output (0) or a plugin measured before
+        lag = align(d.astype(np.float64), w.astype(np.float64), fs)
     if lag > 0:
         w = w[lag:]
     elif lag < 0:
@@ -415,7 +416,7 @@ def stereo(audio: np.ndarray, fs: float) -> dict:
     return result
 
 
-def analyze_file(path: str | Path, timeline_points: int = 32) -> dict:
+def analyze_file(path: str | Path, timeline_points: int = 32, detail: bool = True) -> dict:
     audio, fs = sf.read(str(path), dtype="float32", always_2d=True)
     duration = audio.shape[0] / fs
     peak = float(np.max(np.abs(audio))) if audio.size else 0.0
@@ -423,12 +424,14 @@ def analyze_file(path: str | Path, timeline_points: int = 32) -> dict:
         return {"duration_seconds": round(duration, 2), "silent": True}
 
     rms = math.sqrt(float(np.mean(np.square(audio, dtype=np.float64))))
-    tp = max(true_peak(audio[:, ch], fs) for ch in range(audio.shape[1]))
+    # detail=False (auto_mix's pass over every track): the sample peak stands in for the
+    # true peak, and tone over time and resonances are left out.
+    tp = max(true_peak(audio[:, ch], fs) for ch in range(audio.shape[1])) if detail else peak
     loud = loudness(audio, fs)
     short_term = loud.pop("_short_term", None)
 
     mono = audio.mean(axis=1, dtype=np.float64)
-    tone = tone_over_time(mono, fs)
+    tone = tone_over_time(mono, fs) if detail else {}
     if tone:
         tone["resonances"] = resonances(mono, fs)
     result: dict = {
