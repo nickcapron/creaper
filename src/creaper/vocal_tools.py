@@ -13,7 +13,7 @@ from typing import Annotated, Callable, Literal
 import numpy as np
 from pydantic import Field
 
-from . import composer, harmony, samplelib, singing, speech, talkbox
+from . import asr, composer, harmony, samplelib, singing, speech, talkbox
 from . import sample_tools  # the module, not its names: it may still be loading (circular import)
 from .server import READ_ONLY, ItemId, call, tool
 
@@ -181,10 +181,12 @@ def add_robot_vocal(
     copy of the melody (edit_midi_notes add_harmony with chords_item); for the vocoder,
     add_harmony with chords_item on its Carrier track's item. It speaks with the user's
     default voice (set_default_voice), else the best from list_speech_voices. The result
-    includes a measured clarity score (alone and in the mix). It can't tell which lines
+    includes a measured clarity score (alone and in the mix). That can't tell which lines
     a listener will mishear (a robot voice keeps the words' shape while they still
-    sound like other words), so write them to be heard, ask the user what they hear,
-    and sing new takes with replace=True.
+    sound like other words); with the optional creaper[asr] extra installed, a speech
+    recogniser transcribes each line (talkbox and sung) and the result's heard and
+    unclear_lines name the lines to rewrite. Otherwise ask the user what they hear.
+    Sing new takes with replace=True.
     Writing words a voice can carry: common, predictable words with open vowels ('into
     the night', 'down the mountain road', 'all night long'); short lines of 3-6
     syllables; few consonant clusters ('street lights', 'wheels', 'motor' smear) and no
@@ -286,6 +288,11 @@ def add_robot_vocal(
         result["clarity"] = measure_vocal_clarity(result["vocal"]["name"], in_mix=others)
     except Exception as e:  # noqa: BLE001  (a failed measurement mustn't undo the vocal)
         result["clarity"] = {"error": f"couldn't measure clarity: {e}"}
+    if style in ("talkbox", "sung") and asr.available():
+        try:  # which lines a listener would mishear, from a speech recogniser (creaper[asr])
+            result.update(asr.check_lines(clips, [(times[2 * i], times[2 * i + 1]) for i in range(len(clips))]))
+        except Exception as e:  # noqa: BLE001  (nor a failed check)
+            result["heard"] = {"error": f"couldn't check the words: {e}"}
     if rushed:
         result["note"] = (f"{len(rushed)} of {len(words)} words had to be sped up more than {RUSHED:g}x to fit "
                           "their notes, which blurs them: " + ", ".join(rushed[:12]) + (" ..." if len(rushed) > 12

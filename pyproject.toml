@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "creaper"
-version = "0.30.0"
+version = "0.31.0"
 description = "Let Claude compose, mix and analyze in REAPER: an MCP server plus a REAPER bridge script"
 readme = "README.md"
 license = "MIT"
@@ -27,6 +27,9 @@ dependencies = [
 dev = ["pytest>=8", "luaparser>=3"]
 # Opt-in, heavy (about 1 GB with the model): a music model's view of a mix (embeddings.py).
 ml = ["transformers>=4.45", "torch>=2.6"]
+# Opt-in (about 300 MB with the model): a speech recogniser that names the robot-vocal
+# lines a listener would mishear (asr.py).
+asr = ["faster-whisper>=1.1", "huggingface-hub>=0.21"]
 # Opt-in: librosa's beat tracker for reference tracks (compare_to_reference).
 analysis = ["librosa>=0.11"]
 

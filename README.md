@@ -227,6 +227,10 @@ individual steps are below if you'd rather do them yourself.
   across" line to `check_song` (realistic or synthetic, modern or dated) and a
   sounds-alike score to `compare_to_reference`. About 1 GB with the model, which
   downloads the first time it's used.
+- `creaper[asr]`: a speech recogniser (faster-whisper with Whisper's base.en model, MIT)
+  that transcribes each line of a robot vocal after `add_robot_vocal` and names the
+  lines a listener would mishear, so Claude can rewrite them before you listen. About
+  300 MB with the model, which downloads the first time it's used.
 - `creaper[analysis]`: librosa's beat tracker, for finding the bars of reference tracks.
 
 ```bash
@@ -348,8 +352,8 @@ shows **Allow / Deny** before anything riskier: running an arbitrary REAPER acti
   Claude marked as information, not instructions. They're in
   `<REAPER resource folder>/creaper/knowledge.json`; delete any you don't recognise.
 - The installer installs a tagged release, and checks ReaImGui's plugin against its
-  recorded SHA-256 before REAPER can load it. The optional music model is pinned to one
-  commit.
+  recorded SHA-256 before REAPER can load it. The optional music and speech models are each
+  pinned to one commit.
 - The panel's Claude runs with your Claude Code user settings (so your sign-in works),
   which includes any hooks you've set up there.
 
