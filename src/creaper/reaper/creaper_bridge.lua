@@ -1,6 +1,6 @@
 -- @description creaper bridge: lets Claude work in REAPER through the creaper MCP server
 -- @author nickcapron
--- @version 0.29.2
+-- @version 0.30.0
 -- @link https://github.com/nickcapron/creaper
 -- @provides
 --   [nomain] creaper_json.lua
@@ -13,7 +13,7 @@
 --   Every change it makes is a named undo point ("creaper: ..."), so Ctrl+Z
 --   reverts anything Claude did.
 
-local BRIDGE_VERSION = "0.29.2"
+local BRIDGE_VERSION = "0.30.0"
 local PROTOCOL = 2
 
 ----------------------------------------------------------------------- JSON
@@ -1741,6 +1741,9 @@ local function render_range(t, master, start_t, end_t)
       reaper.GetSetProjectInfo(0, "RENDER_SETTINGS", 3, true) -- stems (selected tracks) only
     end
     local _, targets = reaper.GetSetProjectInfo_String(0, "RENDER_TARGETS", "", false)
+    -- Media REAPER took offline (a file a sync app like OneDrive held while uploading it)
+    -- renders as silence: bring it back online first.
+    reaper.Main_OnCommand(40101, 0) -- Item: Set all media online
     reaper.Main_OnCommand(42230, 0) -- File: Render project, using the most recent render settings, auto-close
     return targets
   end)

@@ -168,7 +168,12 @@ def test_add_robot_vocal_sings_a_line(monkeypatch, tmp_path):
     for d in tmp_path.glob("creaper vocals/*"):
         import shutil
         shutil.rmtree(d)
-    out = vocal_tools.add_robot_vocal(item_id="{M}", lyrics="we sing all night _", style="sung")
+    auto = vocal_tools.add_robot_vocal(item_id="{M}", lyrics="we sing all night _", style="sung", double=False)
+    assert "octave down" in auto["sung_octave"] and abs(auto["shift_semitones"]) < 4   # nearer the voice
+    for d in tmp_path.glob("creaper vocals/*"):
+        import shutil
+        shutil.rmtree(d)
+    out = vocal_tools.add_robot_vocal(item_id="{M}", lyrics="we sing all night _", style="sung", octave="as written")
     assert out["style"] == "sung" and out["words_placed"] == 4 and out["vocal"]["name"] == "Sung Vocal"
     assert out["harmonics_to_noise_db"] > 10
     assert 8 < out["shift_semitones"] < 12                      # words at 130-160 Hz, the melody around C4

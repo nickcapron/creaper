@@ -45,6 +45,10 @@ def syllables(word: str) -> int:
     groups = len(re.findall(r"[aeiouy]+", w))
     if w.endswith("e") and not w.endswith(("le", "ee", "ye")) and groups > 1:
         groups -= 1  # a silent final e
+    elif re.search(r"[^aeiouysxzcgh]es$", w) and groups > 1:
+        groups -= 1  # lines, tires, times (but places, roses, changes keep theirs)
+    elif re.search(r"[^aeiouytd]ed$", w) and groups > 1:
+        groups -= 1  # burned, turned (but waited, faded keep theirs)
     return max(1, groups)
 
 
@@ -146,6 +150,16 @@ def add_robot_vocal(
     double: Annotated[bool, Field(description=(
         "sung: add a double (a second take 10 ms late, a few cents apart, left and right) for width; "
         "off is a little clearer"))] = True,
+    tuning: Annotated[Literal["natural", "hard"], Field(description=(
+        "sung: natural (glides into notes, vibrato on long ones) or hard: snapped dead onto each note like a "
+        "hard pitch corrector, the Daft Punk / T-Pain sound"))] = "natural",
+    octave: Annotated[Literal["auto", "as written"], Field(description=(
+        "sung: auto sings the line an octave nearer the voice when the melody sits more than 7 semitones from "
+        "its speaking pitch (much clearer words, like a lower or higher singer); as written keeps the notes"))]
+    = "auto",
+    replace: Annotated[bool, Field(description=(
+        "Re-sing onto the existing vocal track of that name: its clips are swapped and its effects, sends and "
+        "ducking stay (talkbox and sung). Use it for every new take of the same part"))] = False,
 ) -> dict:
     """Makes a synth sing words: the computer's text-to-speech voice speaks each word
     under its note of a melody item (top note of each chord), each word's vowel held
@@ -167,8 +181,17 @@ def add_robot_vocal(
     copy of the melody (edit_midi_notes add_harmony with chords_item); for the vocoder,
     add_harmony with chords_item on its Carrier track's item. It speaks with the user's
     default voice (set_default_voice), else the best from list_speech_voices. The result
-    includes a measured clarity score (alone and in the mix): act on it rather than
-    guessing."""
+    includes a measured clarity score (alone and in the mix). It can't tell which lines
+    a listener will mishear (a robot voice keeps the words' shape while they still
+    sound like other words), so write them to be heard, ask the user what they hear,
+    and sing new takes with replace=True.
+    Writing words a voice can carry: common, predictable words with open vowels ('into
+    the night', 'down the mountain road', 'all night long'); short lines of 3-6
+    syllables; few consonant clusters ('street lights', 'wheels', 'motor' smear) and no
+    key word that starts on a soft h or l ('downhill' came out 'ground'). Put words in
+    speech rhythm: notes about 0.9 of their slot long (a breath before each word), only
+    the last word of a phrase held; unstressed syllables ('-ing', 'the') on short
+    notes."""
     data = call("get_midi_notes", item_id=item_id)
     line = melody_line(data.get("notes", []))
     if not line:
@@ -184,7 +207,8 @@ def add_robot_vocal(
     times = call("qn_to_times", qns=qns)
     note_times = times[2 * len(words):]
     if style == "sung":
-        clips, rushed, sung = _sing(words, line, times, note_times, base, folder, chosen, double)
+        clips, rushed, sung = _sing(words, line, times, note_times, base, folder, chosen, double,
+                                    hard=tuning == "hard", auto_octave=octave == "auto")
         files = []
     else:
         files = speech.speak([w["text"] for w in words], folder, chosen)
@@ -204,17 +228,29 @@ def add_robot_vocal(
             speech._write(f, talkbox.cross_synthesize(x, fs, pitches, seed=i), talkbox.RATE)
         clips.append({"path": str(f), "start_qn": base + w["start"], "end_qn": base + w["end"], "word": w["word"]})
     if style in ("talkbox", "sung"):
-        names = {t["name"] for t in call("get_project_overview").get("tracks", [])}
+        tracks = call("get_project_overview").get("tracks", [])
+        names = {t["name"] for t in tracks}
         track_name, k = name, 2
-        while track_name in names:
-            track_name, k = f"{name} {k}", k + 1
-        call("create_track", name=track_name, position=int(data["track"]) + 1)
+        if replace and name in names:
+            # A new take onto the same track: its effects, sends and ducking stay.
+            target = next(t for t in tracks if t["name"] == name)
+            for item in call("get_track_details", track=target.get("guid") or name).get("items", []):
+                call("delete_item", item_id=item["id"])
+        else:
+            while track_name in names:
+                track_name, k = f"{name} {k}", k + 1
+            call("create_track", name=track_name, position=int(data["track"]) + 1)
         placed = call("place_audio_clips", timeout=120.0, track=track_name, clips=clips,
                       name=f"{'sung' if style == 'sung' else 'talk box'} {track_name}")
         high = sum(1 for n in line if talkbox.sub_octave_level(n["pitch"]) > 0) if style == "talkbox" else 0
         result = {"vocal": placed["track"], "style": style, "words_placed": placed["placed"],
                   "next": ("Play it. It's audio now: add EQ, compression, chorus or reverb like any vocal. For "
                            "another melody or words, run it again. Mute the original melody track if it doubles it.")}
+        if replace and name in names:
+            result["replaced"] = f"the clips on '{name}' (its effects and sends kept)"
+        if sung.get("octave"):
+            result["sung_octave"] = (f"sung an octave {'down' if sung['octave'] < 0 else 'up'}, nearer the voice's "
+                                     "own pitch, so the words stay clear (octave='as written' keeps the notes)")
         hnr, shift = sung.get("hnr"), sung.get("shift")
         if hnr is not None:
             result["harmonics_to_noise_db"] = hnr
@@ -261,7 +297,8 @@ SUNG_MAX_PER_BEAT = 2.0   # a sung line keeps its words clear at up to two sylla
 
 
 def _sing(words: list[dict], line: list[dict], times: list[float], note_times: list[float], base: float,
-          folder: Path, voice: str | None, doubled: bool = True) -> tuple[list[dict], list[str], dict]:
+          folder: Path, voice: str | None, doubled: bool = True, hard: bool = False,
+          auto_octave: bool = True) -> tuple[list[dict], list[str], dict]:
     """The sung clips: the whole line spoken once, cut into words, each word sung on
     its notes (singing.sing_word) with a double, and the clean word stretched the same
     way kept in speech/ for check_vocal_clarity. Returns (clips, rushed words,
@@ -280,16 +317,20 @@ def _sing(words: list[dict], line: list[dict], times: list[float], note_times: l
     except (speech.SpeechError, ValueError):
         spans = singing.split_phrase(x, fs, [0.6 * syllables(w["text"]) + 0.1 * len(w["text"]) for w in words])
     (folder / "speech").mkdir(exist_ok=True)
+    median = float(np.median([n["pitch"] for n in line]))
+    octave = 0
+    if auto_octave and spoken_at is not None and abs(median - spoken_at) > singing.WIDE_SHIFT:
+        octave = -int(round((median - spoken_at) / 12)) or (-1 if median > spoken_at else 1)
     clips, rushed, sung_all = [], [], []
     for i, (w, (a, b)) in enumerate(zip(words, spans)):
         seg = x[a:b]
         start_s, end_s = times[2 * i], times[2 * i + 1]
         seconds = max(0.05, end_s - start_s)
-        notes = [(max(0.0, t - start_s), n["pitch"]) for n, t in zip(line, note_times)
-                 if w["start"] - 1e-6 <= n["start"] < w["end"] - 1e-6] or [(0.0, line[0]["pitch"])]
+        notes = [(max(0.0, t - start_s), n["pitch"] + 12 * octave) for n, t in zip(line, note_times)
+                 if w["start"] - 1e-6 <= n["start"] < w["end"] - 1e-6] or [(0.0, line[0]["pitch"] + 12 * octave)]
         # Hold the voiced part (a fricative held and pitched turns into a buzz).
         vowel = singing.voiced_span(seg, fs) or speech.vowel_span(seg, fs)
-        sung = singing.sing_word(seg, fs, seconds, notes, vowel)
+        sung = singing.voice_eq(singing.sing_word(seg, fs, seconds, notes, vowel, hard=hard), fs)
         if len(seg) / fs / seconds > RUSHED:
             rushed.append(w["word"])
         f = folder / f"{i + 1:03d} {speech._safe(w['text'])}.wav"
@@ -300,8 +341,8 @@ def _sing(words: list[dict], line: list[dict], times: list[float], note_times: l
         sung_all.append(sung)
         clips.append({"path": str(f), "start_qn": base + w["start"], "end_qn": base + w["end"], "word": w["word"]})
     hnr = singing.hnr_db(np.concatenate(sung_all), fs) if sung_all else None
-    shift = round(float(np.median([n["pitch"] for n in line])) - spoken_at, 1) if spoken_at is not None else None
-    return clips, rushed, {"hnr": hnr, "shift": shift}
+    shift = round(median + 12 * octave - spoken_at, 1) if spoken_at is not None else None
+    return clips, rushed, {"hnr": hnr, "shift": shift, "octave": octave}
 
 
 # ---------------------------------------------------------------- vocal chops

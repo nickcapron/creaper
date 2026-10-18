@@ -199,7 +199,7 @@ def vowel_map(x: np.ndarray, fs: int, out_len: int, vowel: tuple[int, int]):
     return m
 
 
-def contour(notes: list[tuple[float, float]], length_s: float, vibrato: bool = True):
+def contour(notes: list[tuple[float, float]], length_s: float, vibrato: bool = True, glide_s: float = GLIDE_S):
     """target_hz(t) for a word sung over notes [(start_s within the word, MIDI pitch)]:
     a GLIDE_S slide into each new note, vibrato on notes held VIBRATO['min_note_s'] or
     longer, easing in after VIBRATO['after_s']."""
@@ -209,9 +209,9 @@ def contour(notes: list[tuple[float, float]], length_s: float, vibrato: bool = T
     def at(t_s: float) -> float:
         i = max(0, sum(1 for s, _ in notes if s <= t_s) - 1)
         start, pitch = notes[i]
-        if i > 0 and t_s - start < GLIDE_S:
+        if i > 0 and glide_s > 0 and t_s - start < glide_s:
             prev = notes[i - 1][1]
-            pitch = prev + (pitch - prev) * (t_s - start) / GLIDE_S
+            pitch = prev + (pitch - prev) * (t_s - start) / glide_s
         held = ends[i] - start
         if vibrato and held >= VIBRATO["min_note_s"] and t_s - start > VIBRATO["after_s"]:
             depth = VIBRATO["depth_semitones"] * min(1.0, (t_s - start - VIBRATO["after_s"]) / VIBRATO["ramp_s"])
@@ -251,10 +251,12 @@ def own_pitch(x: np.ndarray, fs: int) -> float | None:
 
 
 def sing_word(x: np.ndarray, fs: int, seconds: float, notes: list[tuple[float, float]],
-              vowel: tuple[int, int], vibrato: bool = True) -> np.ndarray:
-    """One spoken word sung: stretched to `seconds`, on the notes' pitches."""
+              vowel: tuple[int, int], vibrato: bool = True, hard: bool = False) -> np.ndarray:
+    """One spoken word sung: stretched to `seconds`, on the notes' pitches. hard: tuned
+    like a hard pitch corrector (Daft Punk, T-Pain): each note dead on its pitch, no
+    glide into it and no vibrato, so the steps between notes are heard."""
     out_len = max(1, int(round(seconds * fs)))
-    pitch = contour(notes, seconds, vibrato)
+    pitch = contour(notes, seconds, vibrato and not hard, 0.0 if hard else GLIDE_S)
     y = psola(x, fs, out_len, vowel_map(x, fs, out_len, vowel), lambda t: midi_hz(pitch(t / fs)))
     fade = min(len(y) // 4, int(0.006 * fs))
     if fade:
@@ -263,6 +265,44 @@ def sing_word(x: np.ndarray, fs: int, seconds: float, notes: list[tuple[float, f
         y[-fade:] *= ramp[::-1]
     peak = float(np.max(np.abs(y))) if y.size else 0.0
     return y / peak * 0.8 if peak > 0 else y
+
+
+def _biquad(kind: str, f0: float, fs: int, gain_db: float = 0.0, q: float = 0.707):
+    """RBJ cookbook coefficients (b, a) for a peak, high shelf or high-pass."""
+    a_ = 10 ** (gain_db / 40)
+    w = 2 * math.pi * f0 / fs
+    cos, alpha = math.cos(w), math.sin(w) / (2 * q)
+    if kind == "peak":
+        b = [1 + alpha * a_, -2 * cos, 1 - alpha * a_]
+        a = [1 + alpha / a_, -2 * cos, 1 - alpha / a_]
+    elif kind == "highshelf":
+        sq = 2 * math.sqrt(a_) * alpha
+        b = [a_ * ((a_ + 1) + (a_ - 1) * cos + sq), -2 * a_ * ((a_ - 1) + (a_ + 1) * cos),
+             a_ * ((a_ + 1) + (a_ - 1) * cos - sq)]
+        a = [(a_ + 1) - (a_ - 1) * cos + sq, 2 * ((a_ - 1) - (a_ + 1) * cos), (a_ + 1) - (a_ - 1) * cos - sq]
+    else:  # highpass
+        b = [(1 + cos) / 2, -(1 + cos), (1 + cos) / 2]
+        a = [1 + alpha, -2 * cos, 1 - alpha]
+    return np.array(b) / a[0], np.array(a) / a[0]
+
+
+VOICE_EQ = (("highpass", 90, 0.0, 0.707), ("peak", 450, -3.0, 1.0), ("peak", 2500, 5.0, 0.9),
+            ("highshelf", 5000, 4.0, 0.707))
+
+
+def voice_eq(y: np.ndarray, fs: int) -> np.ndarray:
+    """The speech voices are dark (about 1% of their energy at 2-4 kHz, where a singer's
+    presence is): a high-pass, a dip in the boxy 450 Hz, presence at 2.5 kHz and air,
+    so the sung line starts out sounding like a vocal instead of needing an EQ first."""
+    from scipy import signal
+
+    out = y.astype(np.float64)
+    for kind, f0, gain, q in VOICE_EQ:
+        if f0 < fs / 2 - 100:
+            b, a = _biquad(kind, f0, fs, gain, q)
+            out = signal.lfilter(b, a, out, axis=0)
+    peak = float(np.max(np.abs(out))) if out.size else 0.0
+    return out / peak * 0.8 if peak > 0 else out
 
 
 def double(y: np.ndarray, fs: int) -> np.ndarray:

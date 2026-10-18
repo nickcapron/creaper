@@ -77,6 +77,8 @@ _SESSION_ID = re.compile(r"^[0-9a-fA-F-]{8,64}$")
 _MODEL = re.compile(r"^[A-Za-z0-9._\-\[\]]{1,80}$")
 
 TOOL_PREFIX = "mcp__creaper__"
+TOOL_TIMEOUT_MS = 3 * 3600 * 1000
+
 # Arguments worth showing in the one-line description of a tool call.
 SUMMARY_KEYS = (
     "track", "source", "destination", "name", "instrument", "fx_name", "fx", "parameter",
@@ -335,7 +337,10 @@ def _turn(request: dict, workdir: Path, cancel_path: Path | None, emit: Callable
         env["CREAPER_REAPER_RESOURCE_PATH"] = request["resource_path"]
     if request.get("confirm"):
         env["CREAPER_CONFIRM_FILE"] = request["confirm"]  # risky tools ask in the panel
-    server: dict[str, Any] = {"command": str(python), "args": ["-I", "-m", "creaper"], "env": env}
+    # A whole-song mix or master renders for many minutes without a word to Claude Code,
+    # which gives up on a silent tool after 30 minutes by default: allow three hours.
+    server: dict[str, Any] = {"command": str(python), "args": ["-I", "-m", "creaper"], "env": env,
+                              "timeout": TOOL_TIMEOUT_MS}
     # A relative name (claude runs in workdir) keeps user paths off the command line.
     (workdir / "mcp.json").write_text(json.dumps({"mcpServers": {"creaper": server}}), encoding="utf-8")
 
