@@ -1663,7 +1663,8 @@ def melody(events: list[ChordEvent], key: Key, density: str = "medium", low: int
         # Near the edge of the range, move the whole contour inside it: clamping each note
         # flattened the cell onto one note (a low verse line circled C#4 over and over).
         offset = start_index - middle
-        offset -= min(0, offset + min(path)) + max(0, offset + max(path) - (len(pool) - 1))
+        if max(path) - min(path) <= len(pool) - 1:   # a contour wider than the range stays centred
+            offset -= min(0, offset + min(path)) + max(0, offset + max(path) - (len(pool) - 1))
         bar_notes = []
         for j, x in enumerate(onsets):
             t = bar_start + x

@@ -271,16 +271,21 @@ _notices: list[str] = []      # to say on the next tool result
 _noticed: set[str] = set()    # said already this session
 
 
+_notice_lock = threading.Lock()  # tools run in threads, several at once
+
+
 def notice(text: str) -> None:
     """Something the user should hear once a session; it rides on the next tool result as 'notice'."""
-    if text not in _noticed:
-        _noticed.add(text)
-        _notices.append(text)
+    with _notice_lock:
+        if text not in _noticed:
+            _noticed.add(text)
+            _notices.append(text)
 
 
 def _pending_notices(prefix: str = "") -> str:
-    said = " ".join(_notices)
-    _notices.clear()
+    with _notice_lock:
+        said = " ".join(_notices)
+        _notices.clear()
     return prefix + said if said else ""
 
 
@@ -662,7 +667,7 @@ def run_action(
         # Renders already bring offline audio back online, item by item and without asking:
         # the whole-project action needed the user's yes and could hold REAPER for minutes.
         try:
-            status = call("media_online", fix=True)
+            status = call("media_online", timeout=600.0, fix=True)
         except BridgeError:
             status = None  # an older bridge: run the action as asked
         if isinstance(status, dict):
@@ -1659,6 +1664,7 @@ def master_to_target(
                        glue_compressor or "ReaComp").lower() in f["name"].lower())]
         for f in earlier:
             call("update_fx", track="master", fx=f["index"], enabled=False)
+        _master_checks_paused[0] += 1   # measured with the master's limiter and glue off
         try:
             take = _master_take(start_bar, end_bar)
             before = take[0] if take else analyze_audio(track="master", start_bar=start_bar, end_bar=end_bar)
@@ -1668,6 +1674,7 @@ def master_to_target(
                     glue_span = loud
             take = None
         finally:
+            _master_checks_paused[0] -= 1
             for f in earlier:
                 call("update_fx", track="master", fx=f["index"], enabled=True)
         problems = styles.gate_problems(before, profile_style, whole_song=(start_bar or 1) <= 1 and end_bar is None)
@@ -1714,12 +1721,14 @@ def master_to_target(
             limiter = find_fx("ReaLimit")
             # Calibrate without the limiter in the way.
             call("update_fx", track="master", fx=limiter["index"], enabled=False)
+            _master_checks_paused[0] += 1
             try:
                 with batch.span_hints({"master": glue_span} if glue_span else {}):
                     result["glue"] = {"plugin": comp["name"],
                                       **_calibrate_compressor("master", comp["index"], profile, glue_db, start_bar,
                                                               end_bar)}
             finally:
+                _master_checks_paused[0] -= 1
                 call("update_fx", track="master", fx=limiter["index"], enabled=True)
         else:
             result["glue"] = {"plugin": comp["name"],
@@ -1732,10 +1741,12 @@ def master_to_target(
     # What reaches the limiter (after the EQ and glue): ReaLimit's threshold is the gain
     # into its ceiling, so its gain reduction on the peaks is about pre_peak - threshold.
     call("update_fx", track="master", fx=lim, enabled=False)
+    _master_checks_paused[0] += 1
     try:
         pre_take = _master_take(start_bar, end_bar)
         pre = pre_take[0] if pre_take else analyze_audio(track="master", start_bar=start_bar, end_bar=end_bar)
     finally:
+        _master_checks_paused[0] -= 1
         call("update_fx", track="master", fx=lim, enabled=True)
     start_fader = call("describe_track", track="master").get("volume_db") or 0.0
     pre_peak = (pre.get("levels") or {}).get("sample_peak_dbfs")
@@ -1863,11 +1874,15 @@ def master_to_target(
 # The last whole-song measurement of the master (analyze_audio, master_to_target), so an
 # export can tell when its own render came out different: a part that didn't play.
 _master_check: dict[str, float] = {}
+_master_checks_paused = [0]   # while master effects are bypassed for a measurement, it isn't one
 EXPORT_MISMATCH_LU = 0.5
+MISMATCH_MIN_SECONDS = 60.0   # a short cue's reverb tail alone can move its loudness by more
 
 
 def _remember_master(measured: dict, track: Any, start_bar: float | None, end_bar: float | None) -> None:
     lufs = (measured.get("loudness") or {}).get("integrated_lufs")
+    if _master_checks_paused[0]:
+        return
     if str(track).lower() == "master" and (start_bar or 1) <= 1 and end_bar is None and lufs is not None:
         _master_check.clear()
         _master_check.update(lufs=lufs, seconds=measured.get("duration_seconds") or 0.0)
@@ -1878,7 +1893,8 @@ def master_mismatch(measured: dict, tail_seconds: float) -> str | None:
     master check of the same length (nothing changed in between, yet something didn't play)."""
     lufs = (measured.get("loudness") or {}).get("integrated_lufs")
     seconds = (measured.get("duration_seconds") or 0.0) - tail_seconds
-    if lufs is None or not _master_check or abs(seconds - _master_check["seconds"]) > 0.5:
+    if (lufs is None or not _master_check or seconds < MISMATCH_MIN_SECONDS
+            or abs(seconds - _master_check["seconds"]) > 0.5):
         return None
     if abs(lufs - _master_check["lufs"]) <= EXPORT_MISMATCH_LU:
         return None

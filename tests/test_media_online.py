@@ -22,7 +22,7 @@ class FakeBridge:
         (tmp_path / "renders").mkdir(exist_ok=True)
         self.renders, self.actions, self.silent_until = 0, [], silent_until
         self.offline, self.pref, self.still_offline, self.knows_media = offline, pref, still_offline, knows_media
-        self.checks = []
+        self.checks, self.timeouts = [], []
 
     def call(self, cmd, params=None, timeout=30.0):
         params = params or {}
@@ -30,6 +30,7 @@ class FakeBridge:
             if not self.knows_media:
                 raise server.BridgeError("this bridge (v0.31.1) doesn't know 'media_online'; update creaper_bridge.lua")
             self.checks.append(params.get("fix"))
+            self.timeouts.append(timeout)
             out = {"offline": self.offline, "tracks": ["City Bed", "Traffic"] if self.offline else [], "missing": []}
             if self.offline:
                 out["offline_when_inactive"] = self.pref or None
@@ -119,6 +120,7 @@ def test_run_action_set_all_media_online_does_the_quick_fix_without_asking(monke
     out = server.run_action(40101)
     assert asked == [] and fake.actions == [] and fake.offline == 0
     assert "no need" in out["note"]
+    assert fake.timeouts == [600.0]  # a slow fix mustn't time out into the whole-project action
 
 
 def test_export_says_when_its_render_differs_from_the_master_check(monkeypatch):
@@ -156,3 +158,19 @@ def test_a_truly_silent_range_is_left_alone_after_one_try(monkeypatch, tmp_path)
     server.call("render_audio", track="master")
     server.call("render_audio", track="master")          # a quiet tail measured again
     assert fake.actions == [server.MEDIA_ONLINE_ACTION]  # tried once, not every time
+
+
+def test_measurements_with_the_master_chain_bypassed_are_not_master_checks(monkeypatch):
+    """master_to_target measures the mix with its limiter and glue off; when it then
+    refuses, that measurement mustn't be what an export is compared with."""
+    monkeypatch.setattr(server, "_master_check", {})
+    monkeypatch.setattr(server, "_master_checks_paused", [1])
+    server._remember_master({"loudness": {"integrated_lufs": -26.0}, "duration_seconds": 297.9}, "master", None, None)
+    assert server._master_check == {}
+
+
+def test_a_short_cue_is_not_compared(monkeypatch):
+    monkeypatch.setattr(server, "_master_check", {})
+    server._remember_master({"loudness": {"integrated_lufs": -20.0}, "duration_seconds": 12.0}, "master", None, None)
+    with_tail = {"loudness": {"integrated_lufs": -19.2}, "duration_seconds": 14.0}  # its reverb tail is loud
+    assert server.master_mismatch(with_tail, tail_seconds=2.0) is None
