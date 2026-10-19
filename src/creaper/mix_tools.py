@@ -58,6 +58,8 @@ ROLE_WORDS = [
     ("fx", r"\bfx\b|riser|sweep|impact|noise|downlifter|uplifter|whoosh|transition"),
 ]
 DANCE_FAMILIES = {"electronic dance"}
+MELODY_OVER_BED_FAMILIES = {"film and games", "ambient and experimental", "classical"}
+BED_UNDER_LEAD_LU = 3
 
 
 def role_of(name: str, spectrum: dict | None = None) -> str:
@@ -281,6 +283,10 @@ def plan_mix(channels: list[dict], style: dict | None = None) -> dict:
         offsets["bass"] -= 2
     if style.get("family") in ("pop", "hip-hop", "r&b and soul", "country and folk"):
         offsets["vocal"] += 2
+    if style.get("family") in MELODY_OVER_BED_FAMILIES:
+        # A cue's solo melody leads over its drone: the dance-music bass level (3 LU over
+        # the lead) put a solo flute under the drone in an ambient game cue.
+        offsets["bass"] = min(offsets["bass"], offsets["lead"] - BED_UNDER_LEAD_LU)
     playing = [c for c in channels if c.get("level") is not None]
     carve = _kick_bass_carve(playing)
     anchors = [c for c in playing if c["role"] in ("kick", "drums")]

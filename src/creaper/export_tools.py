@@ -20,7 +20,7 @@ from pydantic import Field
 from scipy import signal
 
 from . import analysis, styles
-from .server import BridgeError, bridge, call, confirm_with_user, tool
+from .server import BridgeError, bridge, call, confirm_with_user, master_mismatch, tool
 
 Format = Literal["wav", "flac", "mp3", "ogg"]
 EXTENSIONS = {"wav": ".wav", "flac": ".flac", "mp3": ".mp3", "ogg": ".ogg"}
@@ -321,6 +321,9 @@ def export_mix(
                        ogg_quality=ogg_quality, measured=measured)
     finally:
         _cleanup(render["files"])
+    mismatch = master_mismatch(measured, tail_seconds) if whole else None
+    if mismatch:
+        out.setdefault("notes", []).append(mismatch)
     if force:
         skipped = styles.gate_problems(measured, profile, whole_song=whole)
         if skipped:

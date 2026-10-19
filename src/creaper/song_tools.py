@@ -189,7 +189,10 @@ def _sounds_rows(ctx: _Context) -> list[dict]:
     rows = []
     for t in ctx.overview.get("tracks", []):
         details = call("get_track_details", track=t.get("guid") or t["name"])
-        midi = [i for i in details.get("items", []) if i.get("type") == "midi" and not i.get("muted")]
+        # An empty MIDI item plays nothing, so it needs no instrument (one on a noise
+        # generator's track failed this check though the generator sounded fine).
+        midi = [i for i in details.get("items", []) if i.get("type") == "midi" and not i.get("muted")
+                and i.get("note_count", 1) > 0]
         has = details.get("instrument_fx") is not None
         if midi or has:
             rows.append(songmap.row("instrument", "pass" if has else "fail", None, None,

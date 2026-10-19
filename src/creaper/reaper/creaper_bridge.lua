@@ -1,6 +1,6 @@
 -- @description creaper bridge: lets Claude work in REAPER through the creaper MCP server
 -- @author nickcapron
--- @version 0.31.1
+-- @version 0.32.0
 -- @link https://github.com/nickcapron/creaper
 -- @provides
 --   [nomain] creaper_json.lua
@@ -13,7 +13,7 @@
 --   Every change it makes is a named undo point ("creaper: ..."), so Ctrl+Z
 --   reverts anything Claude did.
 
-local BRIDGE_VERSION = "0.31.1"
+local BRIDGE_VERSION = "0.32.0"
 local PROTOCOL = 2
 
 ----------------------------------------------------------------------- JSON
@@ -481,14 +481,30 @@ end
 -- display is monotonic.
 local function solve_display_value(t, fx, param, target)
   local function display_at(v) return parse_display_number(display_string_at(t, fx, param, v)) end
+  local lo_v, hi_v = 0.0, 1.0
   local at_min, at_max = display_at(0), display_at(1)
   if not at_min or not at_max then
-    fail("this parameter doesn't show a number; use display_text (e.g. 'Saw') or value (0 to 1)")
+    -- One end can show a word ("Off") with numbers in between: search the numeric span.
+    local numeric, shown, seen = {}, {}, {}
+    for k = 0, 16 do
+      local s = display_string_at(t, fx, param, k / 16)
+      if parse_display_number(s) then numeric[#numeric + 1] = k / 16 end
+      if s and s ~= "" and not seen[s] and k % 4 == 0 then
+        seen[s] = true
+        shown[#shown + 1] = string.format("'%s' at value %g", s, k / 16)
+      end
+    end
+    if #numeric < 2 then
+      fail("this parameter doesn't show a number (it shows " .. table.concat(shown, ", ")
+        .. "); use display_text with what it shows, or value (0 to 1)")
+    end
+    lo_v, hi_v = numeric[1], numeric[#numeric]
+    at_min, at_max = display_at(lo_v), display_at(hi_v)
   end
   local rising = at_max >= at_min
-  if (rising and target <= at_min) or (not rising and target >= at_min) then return 0.0, true end
-  if (rising and target >= at_max) or (not rising and target <= at_max) then return 1.0, true end
-  local lo, hi = 0.0, 1.0
+  if (rising and target <= at_min) or (not rising and target >= at_min) then return lo_v, true end
+  if (rising and target >= at_max) or (not rising and target <= at_max) then return hi_v, true end
+  local lo, hi = lo_v, hi_v
   for _ = 1, 40 do
     local mid = (lo + hi) / 2
     local d = display_at(mid)
@@ -2050,6 +2066,51 @@ local function with_items_selected(items, fn)
   reaper.SelectAllMediaItems(0, false)
   for _, it in ipairs(before) do if reaper.ValidatePtr(it, "MediaItem*") then reaper.SetMediaItemSelected(it, true) end end
   if not ok then error(err, 0) end
+end
+
+-- Audio items REAPER has taken offline: with "Set media items offline when application
+-- is not active" (Preferences > Media, on by default) it does that whenever the user
+-- switches to another app, and an offline item renders as silence. An offline source
+-- reports a sample rate of 0. With fix, only those items are brought back online
+-- (40439 on them), never "Set all media online", which can hold REAPER for minutes.
+local NOT_AUDIO = { MIDI = true, MIDIPOOL = true, EMPTY = true, VIDEO = true, VIDEOEFFECT = true,
+                    CLICK = true, LTC = true, RPP_PROJECT = true }
+local SELECTED_MEDIA_ONLINE = 40439 -- Item: Set selected media online
+
+local function offline_items()
+  local offline, missing, tracks, seen = {}, {}, {}, {}
+  for i = 0, reaper.CountMediaItems(0) - 1 do
+    local item = reaper.GetMediaItem(0, i)
+    local take = reaper.GetActiveTake(item)
+    local src = take and reaper.GetMediaItemTake_Source(take)
+    while src and reaper.GetMediaSourceParent(src) do src = reaper.GetMediaSourceParent(src) end
+    if src and reaper.GetMediaItemInfo_Value(item, "B_MUTE") == 0 and not NOT_AUDIO[reaper.GetMediaSourceType(src, "")]
+        and reaper.GetMediaSourceSampleRate(src) == 0 then
+      local file = reaper.GetMediaSourceFileName(src, "")
+      if file ~= "" and not reaper.file_exists(file) then
+        missing[#missing + 1] = file
+      else
+        offline[#offline + 1] = item
+        local _, name = reaper.GetTrackName(reaper.GetMediaItem_Track(item))
+        if not seen[name] then seen[name] = true tracks[#tracks + 1] = name end
+      end
+    end
+  end
+  return offline, missing, tracks
+end
+
+function commands.media_online(p)
+  local offline, missing, tracks = offline_items()
+  local out = { offline = #offline, tracks = tracks, missing = missing }
+  if #offline > 0 then
+    local ok, value = reaper.get_config_var_string("offlineinact")
+    out.offline_when_inactive = ok and (tonumber(value) or 0) ~= 0 or nil
+    if p.fix then
+      with_items_selected(offline, function() reaper.Main_OnCommand(SELECTED_MEDIA_ONLINE, 0) end)
+      out.still_offline = #(offline_items())
+    end
+  end
+  return out
 end
 
 function commands.explode_takes(p)

@@ -427,6 +427,7 @@ HFC) are for non-commercial use only.
 | `claude` or `creaper` "is not recognized" | Open a new PowerShell window (PATH changes only reach new ones). Still not found? Run the installer again: it adds both to your PATH. |
 | The chat panel says Claude Code wasn't found | Install Claude Code, run `claude` once to sign in, then `creaper install-bridge` again. |
 | An analysis of a hardware/Overbridge track is silent | Real-time-only plugins can't render offline. Record their output to an audio track first. |
+| Audio items go offline while you're in another app | That's REAPER's "Set media items offline when application is not active" (Options > Preferences > Media, on by default). creaper brings them back online before every render; untick the setting to stop it. |
 
 ## Development
 

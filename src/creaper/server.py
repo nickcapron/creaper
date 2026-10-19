@@ -19,7 +19,7 @@ from pydantic import BaseModel, Field
 from . import analysis, composer, harmony, plugin_profiles, styles, theory
 from . import feel as perform  # `feel` is also a tool argument
 from .bridge import Bridge, BridgeError
-from .knowledge import Knowledge
+from .knowledge import MAX_NOTE_CHARS, Knowledge
 from .drums import BUILTIN_DRUM_MAPS, DrumMaps, builtin_entries
 from .pluginscan import PluginCatalog
 from .sounds import SoundLibrary, describe as describe_sound
@@ -242,9 +242,12 @@ def tool(annotations: ToolAnnotations | None = None):
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
             try:
-                return fn(*args, **kwargs)
+                result = fn(*args, **kwargs)
             except (BridgeError, ValueError) as e:
-                raise ToolError(str(e)) from e
+                raise ToolError(str(e) + _pending_notices(" ")) from e
+            if _notices and isinstance(result, dict):
+                result = {**result, "notice": _pending_notices().strip()}
+            return result
 
         mcp.tool(annotations=annotations)(wrapper)
         return fn
@@ -263,9 +266,56 @@ RENDERS = ("render_audio", "render_stems")
 MEDIA_ONLINE_ACTION = 40101   # Item: Set all media online
 MEDIA_RETRY_S = 600.0         # once tried, a silent render (a quiet tail, a muted part) is left alone this long
 _media_tried = [0.0]
+_media_explained = [False]    # the "why your media went offline" notice is given once per session
+_notices: list[str] = []      # to say on the next tool result
+_noticed: set[str] = set()    # said already this session
+
+
+def notice(text: str) -> None:
+    """Something the user should hear once a session; it rides on the next tool result as 'notice'."""
+    if text not in _noticed:
+        _noticed.add(text)
+        _notices.append(text)
+
+
+def _pending_notices(prefix: str = "") -> str:
+    said = " ".join(_notices)
+    _notices.clear()
+    return prefix + said if said else ""
+
+
+def _bring_media_online() -> None:
+    """Before a render: audio items REAPER took offline (it does when the user switches to
+    another app, with 'Set media items offline when application is not active' on) render
+    as silence while the MIDI parts still play. Finding them is a quick look at each
+    item; only when there are some does REAPER bring those items, and no others, online."""
+    try:
+        status = bridge.call("media_online", {"fix": True}, timeout=600.0)
+    except BridgeError:
+        return  # a bridge older than 0.32 doesn't know the command; the silent-render check still runs
+    if not isinstance(status, dict):
+        return
+    if status.get("missing"):
+        notice(f"{len(status['missing'])} audio file(s) used in the project are missing from disk, so they're "
+               f"silent in every render: {', '.join(status['missing'][:5])}. Relink or re-insert them.")
+    if not status.get("offline"):
+        return
+    tracks = ", ".join(status.get("tracks") or [])
+    if status.get("still_offline"):
+        notice(f"{status['still_offline']} audio item(s) on {tracks} are offline and REAPER couldn't bring them "
+               "back online, so renders miss them. Is the file open in another program, or still syncing?")
+    elif status.get("offline_when_inactive") and not _media_explained[0]:
+        _media_explained[0] = True
+        notice(f"REAPER had taken {status['offline']} audio item(s) offline (on {tracks}) because its setting "
+               "'Set media items offline when application is not active' is on (REAPER: Options > Preferences > "
+               "Media), and you were in another app. creaper brings them back online before every render "
+               "itself, so renders and exports are complete; nobody needs to run 'Set all media online'. To stop "
+               "REAPER doing it, untick that setting.")
 
 
 def call(cmd: str, timeout: float = 30.0, **params: Any) -> Any:
+    if cmd in RENDERS:
+        _bring_media_online()
     result = bridge.call(cmd, params, timeout=timeout)
     if cmd in RENDERS and time.time() - _media_tried[0] > MEDIA_RETRY_S and _all_silent(result):
         _media_tried[0] = time.time()
@@ -608,6 +658,18 @@ def run_action(
     if refusal:
         raise ValueError(f"not run: \"{info.get('name')}\" {refusal}. The user can run it from REAPER's action "
                          "list if they want it.")
+    if info.get("command_id") == MEDIA_ONLINE_ACTION or re.fullmatch(r"item: set all media online", info.get("name") or "", re.I):
+        # Renders already bring offline audio back online, item by item and without asking:
+        # the whole-project action needed the user's yes and could hold REAPER for minutes.
+        try:
+            status = call("media_online", fix=True)
+        except BridgeError:
+            status = None  # an older bridge: run the action as asked
+        if isinstance(status, dict):
+            return {"ran": f"brought {status.get('offline', 0)} offline audio item(s) back online instead of "
+                           "'Set all media online'",
+                    "note": "every render (analyze_audio, measure_tracks, master_to_target, export_mix) does this "
+                            "itself first, so there's no need to run it before renders"}
     confirm_with_user(f"run the REAPER action \"{info['name']}\"")
     return call("run_action", command=info["command_id"])
 
@@ -651,7 +713,7 @@ def create_midi_item(
     name: str | None = None,
 ) -> dict:
     """Creates an empty MIDI item (default 4 bars) and returns its item_id for adding
-    notes, chords or drums."""
+    notes, chords or drums. A generator plugin (noise, a test tone) sounds without one."""
     return call("create_midi_item", track=track, start_bar=start_bar, start_beat=start_beat,
                 length_bars=length_bars, length_qn=length_qn, name=name)
 
@@ -1055,6 +1117,7 @@ def analyze_audio(
         if not os.environ.get("CREAPER_KEEP_RENDERS"):
             for f in render["files"]:
                 Path(f).unlink(missing_ok=True)
+    _remember_master(result, track, start_bar, end_bar)
     offset = render["start"]["seconds"]
     timeline = result.get("short_term_timeline")
     if timeline:
@@ -1797,6 +1860,34 @@ def master_to_target(
     return result
 
 
+# The last whole-song measurement of the master (analyze_audio, master_to_target), so an
+# export can tell when its own render came out different: a part that didn't play.
+_master_check: dict[str, float] = {}
+EXPORT_MISMATCH_LU = 0.5
+
+
+def _remember_master(measured: dict, track: Any, start_bar: float | None, end_bar: float | None) -> None:
+    lufs = (measured.get("loudness") or {}).get("integrated_lufs")
+    if str(track).lower() == "master" and (start_bar or 1) <= 1 and end_bar is None and lufs is not None:
+        _master_check.clear()
+        _master_check.update(lufs=lufs, seconds=measured.get("duration_seconds") or 0.0)
+
+
+def master_mismatch(measured: dict, tail_seconds: float) -> str | None:
+    """A note when a whole-song export's render measures differently from the last
+    master check of the same length (nothing changed in between, yet something didn't play)."""
+    lufs = (measured.get("loudness") or {}).get("integrated_lufs")
+    seconds = (measured.get("duration_seconds") or 0.0) - tail_seconds
+    if lufs is None or not _master_check or abs(seconds - _master_check["seconds"]) > 0.5:
+        return None
+    if abs(lufs - _master_check["lufs"]) <= EXPORT_MISMATCH_LU:
+        return None
+    return (f"this export's mix measured {lufs:.1f} LUFS before any gain, but the last master check measured "
+            f"{_master_check['lufs']:.1f}. If nothing changed since that check, part of the mix didn't play in "
+            "this render (an offline or missing audio file, a real-time-only plugin): find out why, then export "
+            "again")
+
+
 def _master_take(start_bar: float | None, end_bar: float | None):
     """One master render: (analyze_audio-style measurements, audio, sample rate, render
     info), or None when it can't be rendered here (then analyze_audio is used)."""
@@ -1814,6 +1905,7 @@ def _master_take(start_bar: float | None, end_bar: float | None):
 
         measured = analysis.analyze_file(files[0])
         audio, fs = sf.read(files[0], always_2d=True)
+        _remember_master(measured, "master", start_bar, end_bar)
     finally:
         if not os.environ.get("CREAPER_KEEP_RENDERS"):
             for f in files:
@@ -2037,7 +2129,9 @@ NoteTopic = Literal["plugin", "preference", "mix", "sound", "project", "other"]
 
 @tool()
 def save_note(
-    text: Annotated[str, Field(description="One durable lesson, e.g. 'Prefers dark, warm pads; dislikes bright hats'")],
+    text: Annotated[str, Field(description=(
+        f"One durable lesson of up to {MAX_NOTE_CHARS} characters (two or three sentences), e.g. "
+        "'Prefers dark, warm pads; dislikes bright hats'"))],
     topic: Annotated[NoteTopic, Field(description="plugin (quirks/settings), preference (the user's taste), mix (lessons), sound, project, other")],
     subject: Annotated[str | None, Field(description="What it's about, e.g. a plugin name 'Jup-8 V4', or 'drums'")] = None,
 ) -> dict:

@@ -30,6 +30,15 @@ def test_plan_sets_levels_relative_to_the_drums_for_the_genre():
     assert {a["name"]: a["gain_db"] for a in pop["channels"]}["Vocal"] == 6.0 and not pop["sidechains"]
 
 
+def test_a_cue_keeps_its_drone_under_the_solo_melody():
+    chans = [channel("Heartbeat Drums", "drums", -12), channel("Drone Bass", "bass", -16),
+             channel("Flute Lead", "lead", -10)]
+    gains = {a["name"]: a["gain_db"] for a in plan_mix(chans, {"family": "film and games"})["channels"]}
+    assert -16 + gains["Drone Bass"] < -10 + gains["Flute Lead"] - 2   # the flute leads, the drone sits under it
+    dance = {a["name"]: a["gain_db"] for a in plan_mix(chans, {"family": "electronic dance"})["channels"]}
+    assert -16 + dance["Drone Bass"] > -10 + dance["Flute Lead"]       # dance music keeps its loud bass
+
+
 def test_plan_cleans_up_without_touching_what_the_user_set():
     chans = [channel("Kick", "kick", -10),
              channel("Keys", "keys", -15, spectrum={"bands": {"low mids (250-500 Hz)": {"share_pct": 40}}}),

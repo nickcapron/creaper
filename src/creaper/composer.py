@@ -1660,12 +1660,16 @@ def melody(events: list[ChordEvent], key: Key, density: str = "medium", low: int
         for j in range(1, len(onsets)):
             path.append(path[-1] + (moves[j] if j < len(moves) else rng.choice((-1, 1))))
         middle = round((max(path) + min(path)) / 2)
+        # Near the edge of the range, move the whole contour inside it: clamping each note
+        # flattened the cell onto one note (a low verse line circled C#4 over and over).
+        offset = start_index - middle
+        offset -= min(0, offset + min(path)) + max(0, offset + max(path) - (len(pool) - 1))
         bar_notes = []
         for j, x in enumerate(onsets):
             t = bar_start + x
             if t >= total_end - 0.1:
                 break
-            idx = start_index + path[j] - middle
+            idx = offset + path[j]
             idx = max(0, min(len(pool) - 1, idx))
             strong = abs(x % 1) < 1e-6
             ec = chord_at(events, t)

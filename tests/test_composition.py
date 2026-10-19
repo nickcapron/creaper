@@ -423,3 +423,17 @@ def test_counter_melody_edges():
     low = C.answer([{"pitch": 3, "start": 0.0, "length": 1.0}, {"pitch": 5, "start": 1.0, "length": 1.0}],
                    H.parse_key("C major"))
     assert all(0 <= n["pitch"] <= 127 for n in low)
+
+
+def test_a_low_line_in_a_narrow_range_keeps_its_contour():
+    """Deep Cover's flute (C# dorian, C#4-C#5, a low verse line) circled C#4: every note
+    of a cell under the range was clamped onto the bottom note."""
+    key = H.parse_key("C# dorian")
+    chords = [r.chord for r in H.parse_progression("i-IV-i-bVI", key)]
+    for seed in range(50, 66):
+        notes = C.melody(C.timeline(chords * 4, 16.0), key, density="sparse", low=61, high=73, shape="verse",
+                         seed=seed)
+        pitches = [n["pitch"] for n in notes]
+        bottom = sum(p == 61 for p in pitches) / len(pitches)
+        assert bottom < 0.35, (seed, bottom)
+        assert len(set(pitches)) >= 4, (seed, sorted(set(pitches)))

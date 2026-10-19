@@ -533,3 +533,13 @@ def test_a_silent_reference_is_refused(reaper, tmp_path):
     reaper.render_audio = (_noise(32000, 4), 32000)
     with pytest.raises(ValueError, match="couldn't measure"):
         song_tools.compare_to_reference(file=str(path))
+
+
+def test_an_empty_midi_item_needs_no_instrument(monkeypatch):
+    """A noise generator's track with an empty MIDI item on it isn't a part missing its sound."""
+    items = {"Room Tone": [{"type": "midi", "muted": False, "note_count": 0}],
+             "Lead": [{"type": "midi", "muted": False, "note_count": 12}]}
+    monkeypatch.setattr(song_tools, "call", lambda cmd, **kw: {"items": items[kw["track"]]})
+    ctx = type("Ctx", (), {"overview": {"tracks": [{"name": "Room Tone"}, {"name": "Lead"}]}})()
+    rows = song_tools._sounds_rows(ctx)
+    assert [(r["track"], r["status"]) for r in rows] == [("Lead", "fail")]
