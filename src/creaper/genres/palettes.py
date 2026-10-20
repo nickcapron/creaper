@@ -63,6 +63,37 @@ PALETTES: dict[str, Palette] = {
                "snare": Drum(decay_s=(0.25, 0.9), brightness_hz=(900, 6000)),  # big gated/roomy snares
                "hat": Drum(decay_s=(0.02, 0.25), brightness_hz=(4000, 12000))},
         notes="LinnDrum/707-style machine drums with a gated-reverb snare; analog polysynths, wide chorus"),
+    # Synthwave's harder, instrumental side: grit and drive in place of chorus and gloss.
+    "outrun": Palette(
+        sounds={
+            "bass": Sound("Bass", "Hard Bass", ("Dirty",), "Synthwave",
+                          "the 16th motor, saturated and sidechained, with " + SUB_LAYER),
+            "sub": Sound("Bass", "Sub Bass", (), "Synthwave"),
+            "lead": Sound("Lead", "Dirty Lead", (), "Synthwave", "an octave-down double 8 dB under it, short delay"),
+            "pad": Sound("Pad", "Classic Synth Pad", ("Dark",), "Synthwave",
+                         "sidechained to the kick, high-passed at 200 Hz"),
+            "arp": Sound("Lead", "Plucked Lead", (), "Synthwave"),
+            "brass": Sound("Brass & Winds", "Brass Synth", (), "Synthwave"),
+        },
+        drums={"kick": Drum(sub_share=(0.6, 1.0), decay_s=(0.12, 0.45), punch_db=(2, 60)),
+               "snare": Drum(decay_s=(0.12, 0.45), brightness_hz=(1200, 6000)),  # punchy, not a long gated tail
+               "clap": Drum(decay_s=(0.1, 0.4), brightness_hz=(800, 4000)),
+               "hat": Drum(decay_s=(0.02, 0.2), brightness_hz=(4000, 12000))},
+        notes="punchy machine drums; saturated saw bass and gritty leads; no bells, sax or glossy FM"),
+    "darksynth": Palette(
+        sounds={
+            "bass": Sound("Bass", "Hard Bass", ("Distorted",), "Synthwave",
+                          "distorted mid layer over a clean mono sub, sidechained hard"),
+            "sub": Sound("Bass", "Sub Bass", (), "Synthwave"),
+            "lead": Sound("Lead", "Dirty Lead", ("Dark",), None, "an octave-down double 6 dB under it"),
+            "pad": Sound("Pad", None, ("Dark",), "Cinematic", "layered octaves and fifths, sidechained"),
+            "arp": Sound("Lead", "Plucked Lead", (), "Synthwave"),
+            "brass": Sound("Brass & Winds", "Brass Synth", ("Dark",), "80s"),
+        },
+        drums={"kick": Drum(sub_share=(0.6, 1.0), decay_s=(0.1, 0.4), punch_db=(3, 60)),
+               "snare": Drum(decay_s=(0.12, 0.5), brightness_hz=(1200, 6000)),
+               "hat": Drum(decay_s=(0.02, 0.2), brightness_hz=(4000, 12000))},
+        notes="drums driven hard and clipped; distorted bass, dark brass and choir pads"),
     "house": Palette(
         sounds={
             "bass": Sound("Bass", "Bass Line", (), "House", "a short plucky bass with " + SUB_LAYER),

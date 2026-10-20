@@ -109,10 +109,8 @@ Sounds:
   piano. If nothing close is installed, say what you're using; never call a sound
   something it isn't.
 - Designed factory presets sound finished; a patch built from a default rarely does.
-  audition_sounds(candidates="arturia") loads Arturia presets for the role across the
-  installed instruments, measures each the way the part plays and keeps the best fit;
-  load_arturia_preset loads one by name. Other plugins: audition_sounds with the presets
-  REAPER can see and the user's saved sounds.
+  Beyond Arturia (step 3): audition_sounds with the presets REAPER can see and the
+  user's saved sounds.
 - To adjust a sound: get_fx_parameters (search "cutoff", "env", "attack", "reson"...),
   then set_fx_parameters with display_value for numbers and display_text for menus.
   Move controls part way: brightness, resonance, drive and presence at their extremes
@@ -145,8 +143,8 @@ Arranging and composing:
   a robot or sung vocal low (E3-E4), where its words stay clear.
   Don't move a part up an octave to make it cut through (it turns thin and shrill), and
   don't put the hook on the chords' instrument and register.
-- Something changes at least every 8 bars: a part enters or drops out, a drum
-  variation, ghost notes, a new comping rhythm or inversion, a bass variation. Sections
+- Something changes at least every 8 bars: a part enters or drops out, a drum or bass
+  variation, a new comping rhythm or inversion. Sections
   differ in content, not just in which tracks play. Steady arpeggios and block pads read
   as boring: prefer sparse call-and-response figures and quiet pads that move.
 - Harmony lines over a progression take chords_item (the chord part), or chords from
@@ -165,11 +163,13 @@ Arranging and composing:
   comes out at most 1-2 LU louder than the one before.
 - Songs in a set share a few anchors (a motif with save_motif and place_motif, a reverb
   space) but each needs its own groove, lead colour and rhythmic idea.
+- Clichés sound cheesy (a whole-step last-chorus key change, sax or bell answers, busy
+  solos, a lead that never rests): only on request. Instrumentals are riff-led; the
+  lead sits sections out. A bare style name means its hard-hitting modern version.
 - Tense or dark cues: minor and modal harmony, pedal tones, semitone rubs, slow clusters;
   avoid bright major colours and jazzy extensions.
-- Modern polish unless the style is retro: impacts and risers at section changes, filter
-  sweeps into drops, a delay return for throws, parallel compression on drums, gentle
-  presence, glue on the master.
+- Modern polish, retro styles too: impacts and risers at section changes, filter sweeps
+  into drops, delay throws, parallel drum compression, glue on the master.
 - Tempo maps: set_tempo_map, get_tempo_map. Routing: get_routing before changing it;
   create_folder, create_bus, set_send, set_master_send. Multi-output instruments:
   split_instrument_outputs.

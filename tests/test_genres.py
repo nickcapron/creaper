@@ -122,3 +122,20 @@ def test_get_genre_profile_shows_the_palette():
     profile = music_tools.get_genre_profile("synthwave")
     assert profile["sound_palette"]["by_role"]["bass"]["genre_tag"] == "Synthwave"
     assert "sound_palette" not in music_tools.get_genre_profile("bebop")
+
+
+def test_outrun_is_its_own_driving_style_not_pop_synthwave():
+    from creaper import composer
+    from creaper.genres import palettes
+    outrun = genres.find("outrun")
+    assert outrun.name == "outrun" and outrun.parent == "synthwave"
+    assert genres.find("cyberpunk").name == "darksynth"
+    # Its peaks are sections build_song writes a hook into, and nothing tells it to lift the key.
+    assert "chorus" in {composer.section_kind(name) for name, _ in outrun.form}
+    assert "chorus" in {composer.section_kind(name) for name, _ in genres.find("darksynth").form}
+    assert "no step-up key change" in outrun.harmony
+    synthwave = genres.find("synthwave")
+    assert "without shame" not in synthwave.theory and "Lift the last chorus" not in synthwave.harmony
+    # Grit in place of the synthwave gloss, and no bells.
+    assert palettes.sound_for(outrun, "bass").subtype == "Hard Bass"
+    assert palettes.sound_for(outrun, "bell") is None

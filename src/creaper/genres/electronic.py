@@ -7,7 +7,7 @@ GENRES = [
     Genre(
         name="synthwave",
         family="electronic",
-        aliases=("retrowave", "80s", "outrun"),
+        aliases=("retrowave", "80s"),
         parent="synth-pop",
         description="A nostalgic re-imagining of 1980s film, TV and video-game soundtracks: driving octave basslines, "
                     "gated-reverb snares, lush analog pads and soaring saw or sax leads under neon-lit night-drive "
@@ -29,7 +29,7 @@ GENRES = [
         ),
         harmonic_rhythm=1,
         harmony="Plain triads and add9s in natural minor, one chord per bar; the i-VI-III-VII and VI-VII-i loops are "
-                "the backbone. Lift the last chorus a whole step, or borrow the major V from harmonic minor for a "
+                "the backbone, and most tracks stay in one key. Borrow the major V from harmonic minor for a "
                 "cinematic pull back to i. Pads double the chords an octave up with sus2 and add9 colour.",
         voicing="open",
         comping="sustain",
@@ -39,9 +39,10 @@ GENRES = [
              "rarely syncopates. Sidechained a touch to the kick.",
         melody_density="medium",
         melody_scale="natural minor",
-        melody="Big, singable lead lines in the upper-middle register on a detuned saw or square lead, often "
-               "doubled by a sax or a glassy DX7 bell; stepwise hooks that land on chord tones, long held notes "
-               "with slow vibrato, and a 16th-note arpeggio running underneath. Choruses repeat a four-bar hook.",
+        melody="Big, singable lead lines in the upper-middle register on a detuned saw or square lead; stepwise "
+               "hooks that land on chord tones, long held notes with slow vibrato, and a 16th-note arpeggio running "
+               "underneath. Choruses repeat a four-bar hook; the lead rests between phrases and sits out a verse "
+               "while the arp and bass carry it. The last chorus gets an octave double, not a sax or bell answer.",
         groove={"step": 0.25, "swing": 50, "pattern": {
             "kick":       "x.......x.x.....|x.......x.......",
             "snare":      "....X.......X...|....X.......X...",
@@ -67,13 +68,75 @@ GENRES = [
                    "subtle tape/VHS character on the master.",
         theory="Aeolian loops with the bVI-bVII-i ascent give the 'heroic sadness' sound; the steady 8th-note bass "
                "turns even slow tempos into motion. Melodies outline triads and suspensions (9-8, 4-3) over "
-               "static pads, and modulation up a whole step for the final chorus is a cliché used without shame.",
+               "static pads. The whole-step key change into the last chorus, sax solos and bell answers are the "
+               "style's clichés: they read as parody unless the user asks for that retro-pop side.",
         mix=Mix(lufs=(-11, -8), lra=(4, 7), low_end="moderate", tone="bright", width="wide"),
+    ),
+    Genre(
+        name="outrun",
+        family="electronic",
+        aliases=("outrun synthwave", "night drive"),
+        parent="synthwave",
+        description="Synthwave's driving instrumental core: a pumping saw-bass motor, punchy machine drums and "
+                    "gritty, saturated synths playing short repeated riffs, built for speed and menace on a night "
+                    "highway rather than pop nostalgia. Its darker, heavier side is darksynth.",
+        era="France, mid-2000s to early 2010s (Kavinsky's OutRun, Lazerhawk's Redline, Carpenter Brut's Trilogy)",
+        touchstones=("Kavinsky", "Lazerhawk", "Carpenter Brut", "Dance with the Dead", "Power Glove",
+                     "Mitch Murder", "Miami Nights 1984"),
+        tempo=(105, 128),
+        feel="straight and driving: four-on-the-floor or a rock kick, everything pumping from the kick's sidechain",
+        swing=50,
+        modes=("minor", "phrygian", "dorian"),
+        keys=("E minor", "A minor", "F minor", "C minor", "D minor"),
+        progressions=(
+            "i-VI-VII-i",
+            "i-i-VI-VII",
+            "i-VII-VI-VII",
+            "i-bII-i-VII",
+            "i-iv-VI-V",
+        ),
+        harmonic_rhythm=0.5,
+        harmony="Few chords, held long: minor triads, fifths and power chords, a chord every two bars or one "
+                "chord pedalled under a riff. Tension comes from the phrygian bII, the harmonic-minor V and "
+                "semitone rubs, not from pop cadences. It stays in one key: no step-up key change.",
+        voicing="open",
+        comping="sustain",
+        bass_style="sixteenths",
+        bass="The engine: a saturated saw bass on driving 16ths or galloping octaves on the root, with octave and "
+             "minor-2nd pickups, sidechained hard to the kick and doubled by a clean mono sub.",
+        melody_density="medium",
+        melody_scale="natural minor",
+        melody="Short 2-4 bar riffs on a gritty saw or square lead that repeat and mutate rather than a singable "
+               "pop hook; the lead rests between phrases and sits out whole sections while the bass, arp and drums "
+               "drive. Climaxes double the riff an octave down or add a second lead in fifths: no noodling solo.",
+        groove={"step": 0.25, "swing": 50, "pattern": {
+            "kick":       "x...x...x...x...|x...x...x...x...",
+            "snare":      "....X.......X...|....X.......X...",
+            "closed hat": "x.x.x.x.x.x.x.x.|x.x.x.x.x.x.x.x.",
+            "open hat":   "..............x.|......x.......x.",
+            "crash":      "x...............|................",
+        }},
+        drums="Punchy machine drums driven hard: four-on-the-floor or a rock kick, a big compressed snare or clap "
+              "on 2 and 4 (short, not a long gated tail), steady 8th hats; snare rolls and drop-outs into the "
+              "drops, not tom cascades.",
+        fill_style="snare_roll",
+        form=(("intro", 16), ("riff", 16), ("build", 8), ("drop", 16), ("break", 8), ("riff", 16), ("build", 8),
+              ("drop", 16), ("outro", 8)),
+        instruments=("saturated saw bass", "drum machine", "gritty saw or square lead", "16th-note arpeggiator",
+                     "dark analog pad", "synth brass stabs", "impacts and risers"),
+        sound_design="Saws and squares through saturation or tape drive; a filter-swept 16th arp; dark, "
+                     "sidechained pads; brass stabs; no bells, sax or glossy FM.",
+        production="Loud and pumping: heavy sidechain on bass, pads and arps; parallel saturation on drums and "
+                   "bass; mono low end; leads wide with a short delay rather than a long hall.",
+        theory="Riff over pedal: the bass ostinato and the lead riff carry the track, and the harmony barely moves "
+               "(bII-i and VI-VII-i). Energy comes from layering in and stripping out, drops and breaks, not "
+               "from modulation.",
+        mix=Mix(lufs=(-9, -7), lra=(3, 6), low_end="heavy", tone="neutral", width="wide"),
     ),
     Genre(
         name="darksynth",
         family="electronic",
-        aliases=("dark synthwave",),
+        aliases=("dark synthwave", "cyberpunk", "horror synth", "dark outrun"),
         parent="synthwave",
         description="Synthwave's horror-movie side: distorted saw basses, pounding drums and menacing minor and "
                     "phrygian riffs borrowed from John Carpenter scores and metal, built for aggression rather "
@@ -115,8 +178,8 @@ GENRES = [
         drums="Heavily processed acoustic-style samples or 80s drum machines driven hard: punchy, clipped kicks, "
               "huge compressed snares on 2 and 4, rock-style kick syncopation and double-kick fills; "
               "breakdowns drop to toms and impacts.",
-        form=(("intro", 16), ("riff A", 16), ("build", 8), ("main", 16), ("break", 8), ("riff B", 16),
-              ("main", 16), ("climax", 16), ("outro", 8)),
+        form=(("intro", 16), ("riff A", 16), ("build", 8), ("drop", 16), ("break", 8), ("riff B", 16),
+              ("drop", 16), ("final drop", 16), ("outro", 8)),
         instruments=("distorted saw bass", "drum machine and rock drum samples", "detuned lead synth",
                      "brass and choir pads", "arpeggiator", "impacts and risers"),
         sound_design="Saws through distortion, bitcrushing and amp sims; reese basses; dark brass stabs and "

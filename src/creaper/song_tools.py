@@ -411,7 +411,8 @@ def build_song(
         "Plugin for parts whose track doesn't exist yet: {'drums', 'bass', 'chords', 'lead', 'counter'}. Tracks "
         "already named Drums/Kit, Bass, Chords/Pad/Keys, Lead/Melody, Counter (with the sounds chosen) are reused"))] = None,
     tempo: Annotated[float | None, Field(gt=20, le=400, description="BPM; default: the genre's when the project is empty")] = None,
-    lift_last_chorus: Annotated[bool, Field(description="The last chorus a whole step up")] = False,
+    lift_last_chorus: Annotated[bool, Field(description=(
+        "The last chorus a whole step up: cheesy outside ballads, gospel and musicals, so only when the user asks"))] = False,
     seed: Annotated[int | None, Field(description="Same seed, same song; default: a new one (returned)")] = None,
     replace: Annotated[bool, Field(description=(
         "Delete MIDI items already on those tracks inside the song first (asks the user); without it, refuses"))] = False,

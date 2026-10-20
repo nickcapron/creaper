@@ -903,7 +903,8 @@ def plan_harmony(
     sections: Annotated[list[str] | None, Field(description=(
         "Section names in order, e.g. ['Intro', 'Verse 1', 'Pre-Chorus', 'Chorus', ...]; default: the project's regions"))] = None,
     lift_last_chorus: Annotated[bool, Field(description=(
-        "Put the last chorus a whole step up (the classic pop lift); needs two or more choruses"))] = False,
+        "Put the last chorus a whole step up (the classic pop lift: cheesy outside ballads, gospel and musicals, "
+        "so only when the user asks); needs two or more choruses"))] = False,
     seed: Annotated[int | None, Field(description="Varies the bridge's reharmonisation")] = None,
 ) -> dict:
     """Plans the harmony section by section so the song doesn't loop one progression:
