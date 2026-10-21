@@ -434,7 +434,7 @@ def test_vocalvst_state_is_read_and_rewritten_in_place():
         vocalvst_state(base64.b64encode(b"something else").decode())
 
 
-def _vocalvst_bridge(tmp_path, monkeypatch, log_on_render=True, sounds_after=None):
+def _vocalvst_bridge(tmp_path, monkeypatch, log_on_render=True, sounds_after=None, takes_switch=True):
     """A fake bridge with VocalVST on track 1 and a six-note item; returns the call log."""
     from creaper import vocal_tools
 
@@ -459,6 +459,9 @@ def _vocalvst_bridge(tmp_path, monkeypatch, log_on_render=True, sounds_after=Non
         if cmd == "apply_fx_state":
             state["chunk"] = kw["state"]["chunk"]
             return {}
+        if cmd == "get_fx_parameters":
+            return {"parameters": [{"name": "Render", "display": "On" if not takes_switch else "Off",
+                                    "value": 0 if takes_switch else 1}]}
         if cmd == "set_fx_parameter":
             if kw["parameter"] == "Render" and log_on_render:
                 with log.open("a") as f:
@@ -482,6 +485,10 @@ def _vocalvst_bridge(tmp_path, monkeypatch, log_on_render=True, sounds_after=Non
     monkeypatch.setattr(vocal_tools, "call", fake_call)
     monkeypatch.setattr(vocal_tools, "VOCALVST_LOG", log)
     monkeypatch.setattr(vocal_tools, "_sleep", lambda s: None)
+    banks = tmp_path / "voicebanks"
+    (banks / "Canary_DS").mkdir(parents=True)
+    (banks / "Canary_DS" / "dsconfig.yaml").write_text("acoustic: dsacoustic/acoustic.onnx\n")
+    monkeypatch.setattr(vocal_tools, "VOICEBANK_ROOT", banks)
     monkeypatch.setattr(vocal_tools, "bridge", type("B", (), {
         "directory": tmp_path,
         "call": lambda self, cmd, params=None, timeout=30.0: fake_call(cmd, **(params or {}))})())
@@ -496,6 +503,7 @@ def test_render_vocalvst_sets_lyrics_plays_the_pass_then_renders(tmp_path, monke
     cmds = [c for c, _ in calls]
     assert cmds.index("apply_fx_state") < cmds.index("transport") < cmds.index("recording_status")
     assert vocal_tools.vocalvst_lyrics(state["chunk"]) == "we ride at dawn to night"
+    assert vocal_tools.vocalvst_bank(state["chunk"]).endswith("Canary_DS") and out["voicebank"] == "Canary_DS"
     params = [(kw["parameter"], kw["display_text"]) for c, kw in calls if c == "set_fx_parameter"]
     assert params == [("Mode", "Rap"), ("Render", "On")]
     play = next(kw for c, kw in calls if c == "transport")
@@ -547,6 +555,25 @@ def test_render_vocalvst_needs_the_plugin_and_notes(monkeypatch):
     monkeypatch.setattr(vocal_tools, "call", lambda cmd, **kw: {"number": 2, "name": "Lead", "fx": [], "items": []})
     with pytest.raises(ValueError, match="no VocalVST"):
         vocal_tools.render_vocalvst(track="Lead")
+
+
+def test_render_vocalvst_refuses_fast_without_a_voicebank(tmp_path, monkeypatch):
+    from creaper import vocal_tools
+
+    calls, _ = _vocalvst_bridge(tmp_path, monkeypatch)
+    monkeypatch.setattr(vocal_tools, "VOICEBANK_ROOT", tmp_path / "nowhere")
+    with pytest.raises(ValueError, match="no voicebank"):
+        vocal_tools.render_vocalvst(track=1)
+    assert "transport" not in [c for c, _ in calls]      # no ten-minute wait for nothing
+
+
+def test_render_vocalvst_gives_up_when_the_switch_stays_on(tmp_path, monkeypatch):
+    from creaper import vocal_tools
+
+    _vocalvst_bridge(tmp_path, monkeypatch, log_on_render=False, takes_switch=False)
+    monkeypatch.setattr(vocal_tools.time, "monotonic", _FakeClock())
+    with pytest.raises(ValueError, match="stays On"):
+        vocal_tools.render_vocalvst(track=1)
 
 
 def test_vocalvst_counts_as_an_installed_singer(monkeypatch):

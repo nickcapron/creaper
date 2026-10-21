@@ -692,16 +692,17 @@ def vocalvst_state(chunk: str) -> tuple[bytes, int, int, str]:
     return raw, at, n, xml
 
 
-def vocalvst_state_with_lyrics(chunk: str, lyrics: str) -> str:
-    """The same state with its lyrics replaced; everything else (the captured notes,
-    the voicebank, the parameters) stays. REAPER's leading length word covers the
-    XML block, so it grows or shrinks with it."""
+def vocalvst_state_with(chunk: str, **attrs: str) -> str:
+    """The same state with its top-level attributes (lyrics, bank) replaced; everything
+    else (the captured notes, the parameters) stays. REAPER's leading length word
+    covers the XML block, so it grows or shrinks with it."""
     raw, at, n, xml = vocalvst_state(chunk)
-    if not re.search(r'<VocalVST[^>]*\slyrics="', xml):
-        raise ValueError("VocalVST's state has no lyrics field; is this a newer plugin?")
-    new_xml = re.sub(r'(<VocalVST[^>]*\slyrics=)"[^"]*"', lambda m: m.group(1) + '"' + _xml_attr(lyrics) + '"',
-                     xml, count=1)
-    block = new_xml.encode("utf-8") + b"\x00"
+    for name, value in attrs.items():
+        pattern = r'(<VocalVST[^>]*\s' + name + r'=)"[^"]*"'
+        if not re.search(pattern, xml):
+            raise ValueError(f"VocalVST's state has no {name} field; is this a newer plugin?")
+        xml = re.sub(pattern, lambda m: m.group(1) + '"' + _xml_attr(value) + '"', xml, count=1)
+    block = xml.encode("utf-8") + b"\x00"
     out = bytearray(raw[: at + 4])
     out += struct.pack("<I", len(block)) + block + raw[at + 8 + n:]
     if at >= 4:
@@ -711,10 +712,42 @@ def vocalvst_state_with_lyrics(chunk: str, lyrics: str) -> str:
     return base64.b64encode(bytes(out)).decode("ascii")
 
 
-def vocalvst_lyrics(chunk: str) -> str:
-    m = re.search(r'<VocalVST[^>]*\slyrics="([^"]*)"', vocalvst_state(chunk)[3])
+def vocalvst_state_with_lyrics(chunk: str, lyrics: str) -> str:
+    return vocalvst_state_with(chunk, lyrics=lyrics)
+
+
+def vocalvst_attr(chunk: str, name: str) -> str:
+    m = re.search(r'<VocalVST[^>]*\s' + name + r'="([^"]*)"', vocalvst_state(chunk)[3])
     text = m.group(1) if m else ""
     return text.replace("&quot;", '"').replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
+
+
+def vocalvst_lyrics(chunk: str) -> str:
+    return vocalvst_attr(chunk, "lyrics")
+
+
+def vocalvst_bank(chunk: str) -> str:
+    """The voicebank folder the plugin instance uses ("" when it has none: then Render
+    does nothing and says so only in its window)."""
+    return vocalvst_attr(chunk, "bank")
+
+
+VOICEBANK_ROOT = Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData/Local")) / "VocalVST" / "voicebanks"
+
+
+def find_voicebank() -> Path | None:
+    """The first DiffSinger voicebank where VocalVST's setup script installs them: a
+    folder whose dsconfig.yaml names an acoustic model."""
+    if not VOICEBANK_ROOT.is_dir():
+        return None
+    for folder in [VOICEBANK_ROOT, *sorted(VOICEBANK_ROOT.iterdir())]:
+        cfg = folder / "dsconfig.yaml"
+        try:
+            if cfg.is_file() and "acoustic" in cfg.read_text(encoding="utf-8", errors="replace"):
+                return folder
+        except OSError:
+            continue
+    return None
 
 
 def vocalvst_captured(chunk: str) -> dict:
@@ -790,6 +823,21 @@ def _new_log_line(log_size: int) -> str | None:
     return None
 
 
+def _wait_for_render_switch(track: str | int, fx: int, seconds: float = 10.0) -> None:
+    """The plugin's Render switch resets itself the moment its timer sees it; one that
+    stays on isn't running, and waiting for its result would be a waste."""
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        _sleep(1.0)
+        params = call("get_fx_parameters", track=track, fx=fx, search="Render").get("parameters", [])
+        render = next((p for p in params if p.get("name") == "Render"), None)
+        if render is None or str(render.get("display", "")).lower() == "off" or float(render.get("value") or 0) < 0.5:
+            return
+    raise ValueError("VocalVST never took its Render switch (it stays On), so the plugin isn't running its timer "
+                     "in this REAPER and no render will come. Open its window (update_fx with show=True) and press "
+                     "Render there, or restart REAPER; its own host.log says whether a render happened")
+
+
 def _wait_for_render(log_size: int, timeout: float, before: tuple[bool, bytes], audio) -> str:
     """The plugin's result line from its log; failing that, the track's audio changing
     (a plugin that can't write its log still plays what it rendered)."""
@@ -809,7 +857,7 @@ def _wait_for_render(log_size: int, timeout: float, before: tuple[bool, bytes], 
                      "window (update_fx with show=True) to read its status: 'No voicebank' means its Voicebank "
                      "button needs the voicebank folder (under %LOCALAPPDATA%\\VocalVST\\voicebanks); "
                      "'Rendering...' or 'Loading voicebank...' means it needs longer (timeout_seconds, more on the "
-                     "first render)")
+                     "first render). Calling again without changing anything only waits again")
 
 
 @tool()
@@ -840,13 +888,30 @@ def render_vocalvst(
     state = call("capture_fx_state", track=track, fx=fx["index"])
     if not state.get("chunk"):
         raise ValueError("REAPER gave no state for VocalVST, so its lyrics can't be set")
+    changes: dict[str, str] = {}
     if vocalvst_lyrics(state["chunk"]) != text:
-        call("apply_fx_state", track=track, fx=fx["index"], sound_name="VocalVST lyrics",
+        changes["lyrics"] = text
+    bank = vocalvst_bank(state["chunk"])
+    if not bank or not (Path(bank) / "dsconfig.yaml").is_file():
+        # Without a voicebank Render does nothing, and the plugin says so only in its
+        # window; it takes the folder from its state, like the lyrics.
+        found = find_voicebank()
+        if found is None:
+            raise ValueError(f"VocalVST has no voicebank, so it can't render: none found under {VOICEBANK_ROOT} "
+                             "(the plugin's setup script installs Canary there), and its window's Voicebank "
+                             "button is the other way to choose one. Don't call again until one is in place")
+        bank = changes["bank"] = str(found)
+    if changes:
+        call("apply_fx_state", track=track, fx=fx["index"], sound_name="VocalVST " + " and ".join(changes),
              state={"plugin": state.get("plugin"), "file": state.get("file"),
-                    "chunk": vocalvst_state_with_lyrics(state["chunk"], text)})
-        if vocalvst_lyrics(call("capture_fx_state", track=track, fx=fx["index"])["chunk"]) != text:
+                    "chunk": vocalvst_state_with(state["chunk"], **changes)})
+        after = call("capture_fx_state", track=track, fx=fx["index"])["chunk"]
+        if vocalvst_lyrics(after) != text:
             raise ValueError("VocalVST didn't take the lyrics; type them in its window (update_fx show=True) "
                              "and call again without lyrics")
+        if "bank" in changes and not vocalvst_bank(after):
+            raise ValueError(f"VocalVST didn't accept the voicebank {bank}: choose it with the Voicebank button "
+                             "in its window (update_fx with show=True), then call again")
     call("set_fx_parameter", track=track, fx=fx["index"], parameter="Mode", display_text=mode.capitalize())
 
     # The pass: the plugin records only what the transport plays through it, by position.
@@ -863,9 +928,10 @@ def render_vocalvst(
     span = (captured["from_seconds"], captured["to_seconds"] + 1.0)
     before = _track_audio(track, *span)
     call("set_fx_parameter", track=track, fx=fx["index"], parameter="Render", display_text="On")
+    _wait_for_render_switch(track, fx["index"])
     report = _wait_for_render(log_size, timeout_seconds, before, lambda: _track_audio(track, *span))
     out = {"track": track, "mode": mode, "lyrics": text or None, "written_notes": len(line), "captured": captured,
-           "result": report,
+           "voicebank": Path(bank).name, "result": report,
            "plays": "in sync with the transport over the captured region, and in offline renders (analyze_audio, "
                     "measure_tracks, export_mix); not in audition_instrument",
            "next": "check it with analyze_audio(track) or check_vocal_clarity; render again after any change "
