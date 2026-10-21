@@ -13,7 +13,7 @@ from typing import Annotated, Callable, Literal
 import numpy as np
 from pydantic import Field
 
-from . import asr, composer, harmony, samplelib, singing, speech, talkbox
+from . import analysis, asr, composer, harmony, samplelib, singing, speech, talkbox
 from . import sample_tools  # the module, not its names: it may still be loading (circular import)
 from .server import READ_ONLY, ItemId, call, tool
 
@@ -356,6 +356,12 @@ def _sing(words: list[dict], line: list[dict], times: list[float], note_times: l
 
 STEP_QN = 0.25  # one pattern step: a 16th note
 MAX_SHIFT = 6   # semitones; further and a voice turns chipmunk or monster
+# Chops come only from the sung (pitched) slices when there are at least this many: with
+# one, every chop played that one slice (72 copies of one syllable).
+MIN_PITCHED_SLICES = 3
+# A sample this dark (spectral centroid, Hz) makes chops that sound like grunts or burps
+# (Emulator II "Vocaloid", 720 Hz): they go up an octave unless the caller says otherwise.
+DARK_CHOPS_HZ = 1000
 
 
 def parse_pattern(pattern: str) -> list[str]:
@@ -374,8 +380,8 @@ def plan_chops(slices: list[dict], pattern: str, bars: float, chord_at: Callable
     usable = [i for i, sl in enumerate(slices) if sl["end"] - sl["start"] >= 0.06]
     if not usable:
         raise ValueError("no usable slices: the sample is too short or too quiet")
-    pitched = [i for i in usable if "pitch" in slices[i]] or usable
-    order = pitched[:]
+    pitched = [i for i in usable if "pitch" in slices[i]]
+    order = pitched[:] if len(pitched) >= MIN_PITCHED_SLICES else usable[:]
     random.Random(seed).shuffle(order)
     steps = parse_pattern(pattern)
     total = int(round(bars * qn_per_bar / STEP_QN))
@@ -417,12 +423,19 @@ def chop_vocal(
     chords_item: Annotated[str | None, Field(description="Or a MIDI item playing the song's chords: chops follow them")] = None,
     key: Annotated[str | None, Field(description="Or just keep chops in this key ('F minor')")] = None,
     seed: Annotated[int, Field(description="Another seed picks the slices in another order")] = 1,
+    octave: Annotated[Literal[-1, 0, 1, 2] | None, Field(description=(
+        "Pitch the chops track up or down by octaves (ReaPitch, formants lifted with it). Default: up one "
+        "when the sample is dark, since low dull chops sound like grunts; 0 keeps them as sung"))] = None,
+    glitch: Annotated[bool, Field(description="Also bitcrush them (8-bit, half wet): glitchy, digital chops")] = False,
 ) -> dict:
     """Turns a real vocal sample into rhythmic vocal chops, the house / future-bass
     way: slices it at its syllables, lays the slices on a 16th-note pattern, and
     shifts each one (at most a tritone, correcting its tuning) onto the chord or key.
-    Real voices beat robot vocals, so use this first when the user's samples have
-    vocals. One item per chop, all ordinary audio to edit afterwards."""
+    A new chops track (or one with no effects) gets a chop chain: the octave shift,
+    a high-pass and a low-mid dip so they sit above the bass, a little bite, and with
+    glitch a bitcrusher. Later calls on that track keep its chain. Real voices beat
+    robot vocals, so use this first when the user's samples have vocals. One item per
+    chop, all ordinary audio to edit afterwards."""
     path = sample_tools._check_audio(path)
     slices = samplelib.slice_vocal(path)
     if not slices:
@@ -445,8 +458,13 @@ def chop_vocal(
         scale = harmony.parse_key(key).pitch_classes()
         chord_at = lambda qn: scale  # noqa: E731
     plan = plan_chops(slices, pattern, bars, chord_at, seconds_per_qn, seed, qn_per_bar)
-    if not any(t["name"] == track for t in overview.get("tracks", [])):
+    existing = next((t for t in overview.get("tracks", []) if t["name"] == track), None)
+    if existing is None:
         call("create_track", name=track)
+    centroid = (analysis.analyze_file(path).get("spectrum") or {}).get("spectral_centroid_hz")
+    if octave is None:
+        octave = 1 if centroid and centroid < DARK_CHOPS_HZ else 0
+    chain = None if existing and existing.get("fx") else chop_chain(track, octave, glitch)
     clips = []
     for c in plan:
         sl = slices[c["slice"]]
@@ -455,9 +473,46 @@ def chop_vocal(
     result = call("place_audio_clips", timeout=120.0, track=track, clips=clips, name="vocal chops")
     shifts = [abs(c["semitones"]) for c in plan]
     result.update({"slices_found": len(slices), "pitched_slices": sum("pitch" in s for s in slices),
+                   "slices_used": len({c["slice"] for c in plan}),
                    "chops": len(plan), "largest_shift": max(shifts) if shifts else 0,
-                   "fit_to": "chords" if (chords or chords_item) else ("key" if key else "unchanged pitch")})
+                   "fit_to": "chords" if (chords or chords_item) else ("key" if key else "unchanged pitch"),
+                   "sample_brightness_hz": round(centroid) if centroid else None})
+    if chain is not None:
+        result["chain"] = chain
+        if octave > 0 and centroid and centroid < DARK_CHOPS_HZ:
+            result["why_octave"] = (f"the sample is dark ({centroid:.0f} Hz centroid): low, dull chops sound like "
+                                    "grunts. octave=0 keeps them as sung")
+    else:
+        result["chain"] = "kept the track's own effects"
     return result
+
+
+def chop_chain(track: str, octave: int, glitch: bool) -> list[str]:
+    """Effects for a chops track: ReaPitch by octaves (formants lifted part of the way,
+    so they turn machine-like rather than chipmunk), ReaEQ (high-pass 300 Hz, -4 dB at
+    600 Hz where a dull voice burps, +2 dB at 3.5 kHz) and with glitch an 8-bit crusher
+    half wet. What fixed chops the user heard as burping."""
+    chain = []
+    if octave:
+        fx = call("add_fx", track=track, name="ReaPitch")
+        call("set_fx_parameters", track=track, fx=fx["index"], changes=[
+            {"parameter": "1: Shift (oct)", "display_value": octave},
+            {"parameter": "1: Formant adjust (semitones)", "display_value": 5 * (1 if octave > 0 else -1)}])
+        chain.append(f"{fx['name']}: {octave:+d} octave")
+    fx = call("add_fx", track=track, name="ReaEQ")
+    call("set_fx_parameters", track=track, fx=fx["index"], changes=[
+        {"parameter": "Freq-High Pass 5", "display_value": 300},
+        {"parameter": "Freq-Band 2", "display_value": 600}, {"parameter": "Gain-Band 2", "display_value": -4},
+        {"parameter": "BW-Band 2", "display_value": 1.2},
+        {"parameter": "Freq-Band 3", "display_value": 3500}, {"parameter": "Gain-Band 3", "display_value": 2}])
+    chain.append(f"{fx['name']}: high-pass 300 Hz, -4 dB at 600 Hz, +2 dB at 3.5 kHz")
+    if glitch:
+        fx = call("add_fx", track=track, name="JS: Bit Reduction/Dither")
+        call("set_fx_parameters", track=track, fx=fx["index"], changes=[
+            {"parameter": "Resolution (bits)", "display_value": 8}, {"parameter": "Dither", "display_text": "Off"},
+            {"parameter": "Wet", "display_value": 55}])
+        chain.append(f"{fx['name']}: 8-bit, 55% wet")
+    return chain
 
 
 # ------------------------------------------------------- singing synthesizers

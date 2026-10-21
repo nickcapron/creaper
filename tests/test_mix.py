@@ -358,6 +358,20 @@ def test_tone_pass_presence_air_carve_and_low_heavy_keys():
     assert bass_eq["Freq-High Pass 5"] == mix_tools.NO_HIGHPASS_HZ and bass_eq["Freq-Band 2"] == 32
 
 
+def test_low_strings_and_brass_keep_their_fundamentals():
+    """The low-heavy keys/pad high pass took 'Strings Low' to 250 Hz and 'Low Brass' to 210."""
+    from creaper import mix_tools
+    low = {"bands": {"bass (60-250 Hz)": {"share_pct": 45}, "low mids (250-500 Hz)": {"share_pct": 20}},
+           "octave_bands_db": {"63 Hz": -6, "125 Hz": -4, "250 Hz": -8, "500 Hz": -14}}
+    channels = [{"name": "Drums", "role": "drums", "level": -10},
+                {"name": "Strings Low", "role": "pad", "level": -20, "spectrum": low},
+                {"name": "Low Brass", "role": "keys", "level": -20, "spectrum": low},
+                {"name": "Synth Pad", "role": "pad", "level": -20, "spectrum": low}]
+    acts = {a["name"]: a for a in mix_tools.plan_mix(channels)["channels"]}
+    assert "highpass_hz" not in acts["Strings Low"] and "highpass_hz" not in acts["Low Brass"]  # under 40 Hz: none
+    assert acts["Synth Pad"]["highpass_hz"] >= 250     # a pad crowding the bass still gets cleared
+
+
 def test_kick_and_bass_sharing_an_octave_leave_it_to_the_kick():
     from creaper import mix_tools
     carve = mix_tools._kick_bass_carve([{"name": "K", "role": "kick", "spectrum": _spec(oct63=-4)},

@@ -325,3 +325,72 @@ def test_dense_lyrics_are_refused():
         assign_lyrics("tonight forever tonight forever", quarters)
     assert len(assign_lyrics("one more time now", quarters)) == 4
     assert len(assign_lyrics(" ".join(["la"] * 16), eighths, max_per_beat=None)) == 16
+
+
+def test_one_sung_slice_doesnt_become_every_chop():
+    """Only one of ten slices had a pitch, and all 72 chops played it: one syllable over and over."""
+    from creaper.vocal_tools import plan_chops
+    slices = [{"start": 0.0, "end": 0.4, "pitch": 68.5}] + [{"start": 0.5 + i * 0.2, "end": 0.65 + i * 0.2}
+                                                             for i in range(5)]
+    chops = plan_chops(slices, "x.x.x.x.", bars=2, chord_at=lambda qn: {5, 8, 0}, seconds_per_qn=0.5)
+    assert len({c["slice"] for c in chops}) == 6
+    assert all(c["semitones"] == 0 for c in chops if "pitch" not in slices[c["slice"]])   # nothing to tune them by
+
+
+def _chop_fakes(monkeypatch, tracks):
+    from creaper import sample_tools, vocal_tools
+    calls = []
+
+    def fake(cmd, **kw):
+        calls.append((cmd, kw))
+        if cmd == "get_project_overview":
+            return {"tempo_bpm": 125, "time_signature": "4/4", "tracks": tracks}
+        if cmd == "bar_to_qn":
+            return {"qn": (kw["bar"] - 1) * 4}
+        if cmd == "add_fx":
+            return {"index": 1 + sum(c == "add_fx" for c, _ in calls[:-1]), "name": kw["name"]}
+        if cmd == "place_audio_clips":
+            return {"placed": len(kw["clips"])}
+        return {}
+    monkeypatch.setattr(vocal_tools, "call", fake)
+    monkeypatch.setattr(sample_tools, "_check_audio", lambda p: p)
+    return calls
+
+
+def _dark_phrase(tmp_path):
+    fs = 44100
+    def syllable(hz, seconds):
+        t = np.arange(int(seconds * fs)) / fs
+        return np.sin(2 * np.pi * hz * t) * np.hanning(len(t)) ** 0.3 * 0.3
+    gap = np.zeros(int(0.1 * fs))
+    audio = np.concatenate([gap] + [x for hz in (110, 123, 131, 147) for x in (syllable(hz, 0.25), gap)])
+    path = tmp_path / "low vox.wav"
+    speech._write(path, audio, fs)
+    return str(path)
+
+
+def test_dark_chops_go_up_an_octave_through_a_chop_chain(monkeypatch, tmp_path):
+    """Chops of a dark sample, left dry, sounded like burping to the user."""
+    from creaper import vocal_tools
+    calls = _chop_fakes(monkeypatch, [])
+    out = vocal_tools.chop_vocal(path=_dark_phrase(tmp_path), track="Scat Chops", bars=1, key="F minor", glitch=True)
+    added = [kw["name"] for c, kw in calls if c == "add_fx"]
+    assert added == ["ReaPitch", "ReaEQ", "JS: Bit Reduction/Dither"]
+    pitch = next(kw["changes"] for c, kw in calls if c == "set_fx_parameters" and kw["fx"] == 1)
+    assert {"parameter": "1: Shift (oct)", "display_value": 1} in pitch
+    assert out["why_octave"].startswith("the sample is dark") and len(out["chain"]) == 3
+
+
+def test_more_chops_on_the_track_keep_its_chain(monkeypatch, tmp_path):
+    from creaper import vocal_tools
+    calls = _chop_fakes(monkeypatch, [{"name": "Scat Chops", "fx": ["VST: ReaPitch (Cockos)"]}])
+    out = vocal_tools.chop_vocal(path=_dark_phrase(tmp_path), track="Scat Chops", bars=1)
+    assert not any(c in ("add_fx", "create_track") for c, _ in calls)
+    assert out["chain"] == "kept the track's own effects"
+
+
+def test_chops_can_stay_as_sung(monkeypatch, tmp_path):
+    from creaper import vocal_tools
+    calls = _chop_fakes(monkeypatch, [])
+    vocal_tools.chop_vocal(path=_dark_phrase(tmp_path), track="Chops", bars=1, octave=0)
+    assert [kw["name"] for c, kw in calls if c == "add_fx"] == ["ReaEQ"]

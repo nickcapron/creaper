@@ -23,13 +23,14 @@ from .server import DESTRUCTIVE, READ_ONLY, bridge, call, confirm_with_user, too
 STAGES = ("form", "sounds", "parts", "feel", "transitions", "mix", "master")
 STAGE_CHECKS = {
     "form": "named regions for every section, the length against the genre's form, the tempo in its range",
-    "sounds": "every MIDI track has an instrument",
+    "sounds": "every unmuted MIDI track has an instrument",
     "parts": "no section copies another on every track, no track loops all song, choruses busier than verses, "
              "the lead over the chords",
     "feel": "drums and bass aren't one velocity on the grid (check_groove)",
     "transitions": "under 40% copied bars, no 16-bar loop, each section's level matches its energy (one render)",
     "mix": "the mix against the genre's targets: dynamics, low end, harshness, mud (one render)",
-    "master": "loudness and true peak for the genre, no clipping (one render)",
+    "master": "loudness and true peak for the genre, no clipping (one render); the section balance again for "
+              "tracks whose fader or effects changed since the mix was signed off",
 }
 PART_TRACK = {"drums": "Drums", "bass": "Bass", "chords": "Chords", "lead": "Lead", "counter": "Counter"}
 PART_ROLES = {"drums": ("drums",), "bass": ("bass",), "chords": ("keys", "pad"), "lead": ("lead",), "counter": ()}
@@ -188,6 +189,8 @@ def _sounds_rows(ctx: _Context) -> list[dict]:
     their sounds chosen count (the sounds stage comes before the parts)."""
     rows = []
     for t in ctx.overview.get("tracks", []):
+        if t.get("mute"):
+            continue      # a muted guide (a robot vocal's melody) plays nothing: it needs no instrument
         details = call("get_track_details", track=t.get("guid") or t["name"])
         # An empty MIDI item plays nothing, so it needs no instrument (one on a noise
         # generator's track failed this check though the generator sounded fine).
@@ -277,6 +280,54 @@ def _transitions_rows(ctx: _Context) -> list[dict]:
 
 
 _MASTER_AREAS = ("integrated loudness", "true peak")
+# A fader this far (dB) from where the mix was signed off, or a new effect on a track,
+# means the balance the mix stage checked may be gone: mastering once added limiters
+# to five parts and raised the lead 3 dB, and the user heard it as overpowering.
+MOVED_DB = 1.0
+
+
+def _mix_snapshot(overview: dict) -> dict:
+    """Each track's fader and effects when the mix is signed off."""
+    return {t.get("guid") or t["name"]: {"name": t["name"], "volume_db": t.get("volume_db"),
+                                         "fx": list(t.get("fx") or [])} for t in overview.get("tracks", [])}
+
+
+def _moved_since_mix(ctx: _Context) -> dict[str, str]:
+    """{track: what changed} for tracks whose fader or effects changed since finish_stage('mix')."""
+    snap = ((ctx.plan.get("stages") or {}).get("mix") or {}).get("tracks") or {}
+    moved = {}
+    for t in ctx.overview.get("tracks", []):
+        was = snap.get(t.get("guid") or t["name"])
+        if not was:
+            continue
+        changes = []
+        if None not in (t.get("volume_db"), was.get("volume_db")) and abs(t["volume_db"] - was["volume_db"]) >= MOVED_DB:
+            changes.append(f"fader {t['volume_db'] - was['volume_db']:+.1f} dB")
+        added = [f for f in t.get("fx") or [] if f not in was.get("fx", [])]
+        if added:
+            changes.append("added " + ", ".join(added))
+        if changes:
+            moved[t["name"]] = "; ".join(changes)
+    return moved
+
+
+def _balance_rows(ctx: _Context) -> list[dict]:
+    """The section balance again (measure_tracks per_section), for the tracks changed
+    since the mix was signed off; nothing to render when none were."""
+    moved = _moved_since_mix(ctx)
+    if not moved:
+        return []
+    from . import ear_tools
+
+    lines = ear_tools.measure_tracks(per_section=True).get("balance", [])
+    rows = []
+    for name, change in moved.items():
+        flagged = [line for line in lines if f": {name} is " in line]
+        rows.append(songmap.row(
+            "balance since the mix", "warn" if flagged else "pass", None, None,
+            "put it back near its place (fader or the new effect), then measure_tracks(per_section=True)",
+            track=name, detail=f"{change} since the mix was signed off" + (": " + "; ".join(flagged[:3]) if flagged else "")))
+    return rows
 
 
 def _style_rows(ctx: _Context, master: bool) -> list[dict]:
@@ -287,6 +338,7 @@ def _style_rows(ctx: _Context, master: bool) -> list[dict]:
     if master:
         problems = styles.gate_problems(measured, styles.find_style(ctx.genre) if ctx.genre else None)
         rows.append(songmap.row("release gates", "fail" if problems else "pass", None, None, "; ".join(problems)))
+        rows += _balance_rows(ctx)
     if not ctx.genre:
         return rows or [songmap.row("style", "warn", None, None, "give the genre to judge the mix against it")]
     for f in styles.compare(measured, styles.find_style(ctx.genre)):
@@ -614,7 +666,8 @@ def finish_stage(
                          "if the user wants it as it is.")
     with jsonstore.updating(path, dict, indent=2) as data:
         data.setdefault("stages", {})[stage] = {"done": True, "at": time.strftime("%Y-%m-%d %H:%M"),
-                                                "forced": bool(fails), "checks": rows}
+                                                "forced": bool(fails), "checks": rows,
+                                                **({"tracks": _mix_snapshot(ctx.overview)} if stage == "mix" else {})}
     left = [s for s in STAGES if not data["stages"].get(s, {}).get("done")]
     return {"stage": stage, "done": True, **({"forced_past": [r["check"] for r in fails]} if fails else {}),
             "checks": rows, "next": left[0] if left else "all stages done: check_song for the scorecard"}

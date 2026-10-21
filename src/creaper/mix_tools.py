@@ -35,6 +35,9 @@ PRESENCE_LIFT_DB, PRESENCE_CUT_DB, PRESENCE_HZ = 1.5, -2.0, 3000
 AIR_LOW_PCT, AIR_LIFT_DB, AIR_HZ = 2.0, 1.5, 10000
 CARVE_DB = -2.5          # kick and bass each cut where the other is loudest below 120 Hz
 LOW_HEAVY_KEYS_PCT = 15  # keys and pads with more of their energy under 250 Hz get a higher high pass
+# ... except parts whose low register is their job: that high pass took the fundamentals
+# off "Strings Low" (250 Hz) and "Low Brass" (210 Hz) in an orchestral cue, twice.
+LOW_REGISTER_NAMES = r"\blow\b|cello|contrabass|double ?bass|tuba|trombone|bassoon|baritone|euphonium"
 NO_HIGHPASS_HZ = 20      # ReaEQ's band 5 is a high pass that defaults to 100 Hz: parked here when unwanted
 LOW_MONO_CORRELATION = 0.9   # a bass or kick whose lows correlate less than this gets narrowed
 WIDEN_DB, WIDEN_MIN_CORRELATION = 4.0, 0.6   # pads/keys in wide genres; only while they stay safe in mono
@@ -303,7 +306,8 @@ def plan_mix(channels: list[dict], style: dict | None = None) -> dict:
         a["gain_db"] = round(max(-18.0, min(boost, want - c["level"])), 1)
         if c["role"] in HIGHPASS_HZ and not c.get("has_eq"):
             hp = highpass_for(c["role"], c.get("spectrum"))
-            if c["role"] in ("keys", "pad") and low_share(c.get("spectrum")) > LOW_HEAVY_KEYS_PCT:
+            if (c["role"] in ("keys", "pad") and low_share(c.get("spectrum")) > LOW_HEAVY_KEYS_PCT
+                    and not re.search(LOW_REGISTER_NAMES, c["name"].lower())):
                 # Too much of it under 250 Hz: it crowds the bass, whatever its lowest note.
                 hp = max(hp or 0, min(250, int(HIGHPASS_HZ[c["role"]] * 1.5)))
             if hp:

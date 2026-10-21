@@ -538,8 +538,33 @@ def test_a_silent_reference_is_refused(reaper, tmp_path):
 def test_an_empty_midi_item_needs_no_instrument(monkeypatch):
     """A noise generator's track with an empty MIDI item on it isn't a part missing its sound."""
     items = {"Room Tone": [{"type": "midi", "muted": False, "note_count": 0}],
-             "Lead": [{"type": "midi", "muted": False, "note_count": 12}]}
+             "Lead": [{"type": "midi", "muted": False, "note_count": 12}],
+             "Hook Melody": [{"type": "midi", "muted": False, "note_count": 20}]}
     monkeypatch.setattr(song_tools, "call", lambda cmd, **kw: {"items": items[kw["track"]]})
-    ctx = type("Ctx", (), {"overview": {"tracks": [{"name": "Room Tone"}, {"name": "Lead"}]}})()
+    # A muted guide for a robot vocal plays nothing either (Claude loaded ReaSynth on one to pass this).
+    tracks = [{"name": "Room Tone"}, {"name": "Lead"}, {"name": "Hook Melody", "mute": True}]
+    ctx = type("Ctx", (), {"overview": {"tracks": tracks}})()
     rows = song_tools._sounds_rows(ctx)
     assert [(r["track"], r["status"]) for r in rows] == [("Lead", "fail")]
+
+
+def test_mastering_moves_get_the_balance_checked_again(monkeypatch):
+    """Mastering added a limiter to the lead and raised it 3 dB after the mix was signed off;
+    nothing checked the balance again and the user found the lead overpowering."""
+    from creaper import ear_tools
+    snap = song_tools._mix_snapshot({"tracks": [
+        {"name": "Drums", "guid": "{D}", "volume_db": -9, "fx": ["ReaComp"]},
+        {"name": "Lead", "guid": "{L}", "volume_db": 0, "fx": ["Prophet-5 V"]}]})
+    now = {"tracks": [{"name": "Drums", "guid": "{D}", "volume_db": -9.4, "fx": ["ReaComp"]},
+                      {"name": "Lead", "guid": "{L}", "volume_db": 3, "fx": ["Prophet-5 V", "VST: ReaLimit (Cockos)"]}]}
+    ctx = type("Ctx", (), {"overview": now, "plan": {"stages": {"mix": {"done": True, "tracks": snap}}}})()
+    measured = []
+    monkeypatch.setattr(ear_tools, "measure_tracks", lambda **kw: measured.append(kw) or {"balance": [
+        "Drop 1: Lead is 4.8 LU over its place (a lead part sits about 5 LU under the drums)",
+        "Drop 1: Chords is 6.0 LU over its place (a keys part sits about 7 LU under the drums)"]})
+    rows = song_tools._balance_rows(ctx)
+    assert measured == [{"per_section": True}]
+    assert [(r["track"], r["status"]) for r in rows] == [("Lead", "warn")]     # Drums moved under 1 dB
+    assert "fader +3.0 dB; added VST: ReaLimit (Cockos)" in rows[0]["detail"] and "Lead is 4.8 LU over" in rows[0]["detail"]
+    ctx.overview = {"tracks": [dict(t, volume_db=v) for t, v in zip(snap.values(), (-9, 0))]}
+    assert song_tools._balance_rows(ctx) == [] and len(measured) == 1   # nothing moved: nothing rendered

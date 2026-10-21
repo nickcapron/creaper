@@ -1852,7 +1852,8 @@ def master_to_target(
             f"stopped at {final['integrated_lufs']:g} LUFS, the loudest this mix takes: more than "
             f"{LIMITER_MAX_GR_DB:g} dB of limiting flattens the hits and sounds like clipping. This master is "
             f"finished as it is; don't re-run it at a lower target. Louder needs density in the mix: compress the "
-            f"peakiest parts (below), then master again")
+            f"peakiest parts (below) and keep each one as loud as it was (measure_tracks before and after; don't "
+            f"raise other parts to make up), then master again")
         try:
             result["peakiest_parts"] = _peakiest_parts(start_bar, end_bar)
         except Exception:  # noqa: BLE001 - the advice is a bonus
