@@ -795,14 +795,16 @@ def _vocalvst_fx(track: str | int) -> tuple[dict, list[dict]]:
     return fx, items
 
 
-def _wait_for_stop(expected_seconds: float) -> None:
-    deadline = time.monotonic() + expected_seconds + 20
+def _wait_for_stop(expected_seconds: float) -> bool:
+    """True when REAPER stopped at the end of the pass itself; False when it had to be
+    stopped after running half as long again (a slow or backgrounded REAPER)."""
+    deadline = time.monotonic() + expected_seconds * 1.5 + 30
     while time.monotonic() < deadline:
         _sleep(0.5)
         if not call("recording_status").get("playing"):
-            return
+            return True
     call("transport", action="stop")
-    raise ValueError("REAPER didn't reach the end of the pass in time; it was stopped. Try again")
+    return False
 
 
 def _track_audio(track: str | int, start: float, end: float) -> tuple[bool, bytes]:
@@ -951,11 +953,15 @@ def render_vocalvst(
     start = max(0.0, items[0]["start"]["seconds"] - 0.3)
     end = max(i["end"]["seconds"] for i in items) + 0.5
     call("transport", action="play", start_seconds=start, end_seconds=end)
-    _wait_for_stop(end - start)
+    stopped_itself = _wait_for_stop(end - start)
     captured = vocalvst_captured(call("capture_fx_state", track=track, fx=fx["index"])["chunk"])
     if not captured["notes"]:
         raise ValueError("VocalVST recorded no notes during the pass: check the track isn't muted, the item is "
                          "on it and the plugin is enabled, then call again")
+    if not stopped_itself and captured["notes"] < len(line):
+        raise ValueError(f"REAPER didn't reach the end of the pass in time and was stopped with {captured['notes']} "
+                         f"of {len(line)} notes captured. If REAPER was in the background with its audio device "
+                         "closed (Preferences > Audio), bring it to the front, then call again")
 
     log_size = VOCALVST_LOG.stat().st_size if VOCALVST_LOG.exists() else 0
     span = (captured["from_seconds"], captured["to_seconds"] + 1.0)
@@ -974,6 +980,8 @@ def render_vocalvst(
     if captured["notes"] != len(line):
         out["note"] = (f"the plugin captured {captured['notes']} notes but the items hold {len(line)}: overlapping "
                        "notes are cut and chords keep their top note, so the syllables may have shifted")
+    elif not stopped_itself:
+        out["note"] = "the pass ran long and REAPER was stopped by hand, after every note had been captured"
     without = re.search(r"(\d+) notes without lyrics", report)
     if lyrics and without and int(without.group(1)):
         out["warning"] = without.group(1) + " notes got no syllable and sing la: fewer syllables than captured notes"

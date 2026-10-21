@@ -51,18 +51,29 @@ def _speech_clips(track: str | int) -> tuple[str, list[dict]]:
     details = call("get_track_details", track=track)
     items = [i for i in details.get("items", []) if i.get("file")]
     measured = details["name"]
-    if not items:  # a vocoder vocal: the words are on its Voice track
-        voice = call("get_track_details", track=f"{details['name']} Voice")
-        items = [i for i in voice.get("items", []) if i.get("file")]
+    if not items:  # a vocoder vocal: the words are on its Voice track, when there is one
+        names = {t.get("name") for t in call("get_project_overview").get("tracks", [])}
+        if f"{measured} Voice" in names:
+            voice = call("get_track_details", track=f"{measured} Voice")
+            items = [i for i in voice.get("items", []) if i.get("file")]
     clips = []
     for i in items:
         f = Path(i["file"])
         clean = f.parent / "speech" / f.name
         clips.append({"start": i["start"]["seconds"], "length": i["length_seconds"],
                       "file": str(clean if clean.exists() else f)})
+    if not clips and _sings_itself(details):
+        # A singing instrument (VocalVST): no clean words exist, so its own solo render
+        # stands in as the reference and only the mix's covering can be measured.
+        clips = [{"start": i["start"]["seconds"], "length": i["length_seconds"], "file": None}
+                 for i in details.get("items", []) if i.get("type") == "midi" and not i.get("muted")]
     if not clips:
         raise ValueError(f"'{measured}' has no spoken words to compare with (is it an add_robot_vocal track?)")
     return measured, clips
+
+
+def _sings_itself(details: dict) -> bool:
+    return any("vocalvst" in (f.get("name") or "").lower() for f in details.get("fx", []))
 
 
 def _clean_timeline(clips: list[dict], start: float, frames: int, fs: int) -> np.ndarray:
@@ -87,6 +98,23 @@ def measure_vocal_clarity(track: str | int, start_bar: float | None = None, end_
         span = _bars_of([first, last])
         start_bar, end_bar = span[0]["bar"], span[1]["bar"] + 1
     out: dict = {"track": measured}
+    sung = any(c["file"] is None for c in clips)
+    if sung:
+        # No clean words: the solo render is the reference, so "alone" can't be scored
+        # and in_mix says how much the rest of the mix covers the voice.
+        solo, fs, render = _render(measured, start_bar, end_bar)
+        out["alone"] = {"score": None, "note": "a singing instrument has no clean words to compare with"}
+        if in_mix:
+            audio, fs2, render2 = _render("master", start_bar, end_bar)
+            heard = audio.mean(axis=1)
+            clean = perception._resample(solo.mean(axis=1), fs, fs2)[: len(heard)]
+            clean = np.pad(clean, (0, max(0, len(heard) - len(clean))))
+            score = perception.intelligibility(clean, heard, fs2)
+            out["in_mix"] = {"score": None if score is None else round(score, 3),
+                             "scale": "STOI of the mix against the vocal's own solo render: 1 would be the voice "
+                                      "alone; lower means the other parts cover it more. Compare before and after "
+                                      "a change rather than against the robot-vocal thresholds"}
+        return out
     for label, source in (("alone", measured), ("in_mix", "master")):
         if label == "in_mix" and not in_mix:
             continue
@@ -332,6 +360,35 @@ def _playing_lufs(audio: np.ndarray, fs: int) -> float | None:
     return value if value is not None and value > -70 else None
 
 
+# An item has to overlap a section this long (or half of a short section) for the part to
+# be playing there; less is the ring-out of a note that ended before it, which measured
+# "20 LU under its place: buried" in a verse the part never played in.
+TAIL_OVERLAP_S = 1.0
+
+
+def _item_spans(track: dict) -> list[tuple[float, float]]:
+    """(start, end) seconds of a track's own unmuted items; [] for a folder or bus."""
+    ref = track.get("guid") or track.get("number") or track.get("name")
+    try:
+        details = call("get_track_details", track=ref)
+    except BridgeError:
+        return []
+    spans = []
+    for i in details.get("items", []):
+        start = (i.get("start") or {}).get("seconds")
+        end = (i.get("end") or {}).get("seconds")
+        if end is None and start is not None and i.get("length_seconds") is not None:
+            end = start + i["length_seconds"]
+        if start is not None and end is not None and not i.get("muted"):
+            spans.append((start, end))
+    return spans
+
+
+def _plays_in(spans: list[tuple[float, float]], start: float, end: float) -> bool:
+    need = min(TAIL_OVERLAP_S, 0.5 * (end - start))
+    return any(min(e, end) - max(s, start) >= need for s, e in spans)
+
+
 def _sections(regions: list[dict], start: float, end: float) -> list[dict]:
     """Regions inside [start, end) seconds, clipped to it, with unique names (a second
     'Chorus' becomes 'Chorus (2)'). A region inside a longer one (a 'vocals in' region)
@@ -467,7 +524,11 @@ def measure_tracks(
 
                 audio, fs = sf.read(str(f), always_2d=True)
                 roles[name] = mix_tools.role_of(name, m["spectrum"])
+                spans = _item_spans(stem["track"])
                 for sec in sections:
+                    if spans and not _plays_in(spans, sec["start"], sec["end"]):
+                        by_section[sec["name"]][name] = None   # at most a tail from before: not playing here
+                        continue
                     a, b = int((sec["start"] - offset) * fs), int((sec["end"] - offset) * fs)
                     by_section[sec["name"]][name] = _playing_lufs(audio[max(0, a):b], int(fs))
                 if roles[name] == "drums":

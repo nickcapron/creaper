@@ -147,6 +147,8 @@ def test_measure_tracks_per_section_without_regions_says_so(monkeypatch, tmp_pat
                     "start": {"seconds": 0.0}, "end": {"seconds": 2.0}}
         if cmd == "get_tempo_map":
             return {"start_tempo_bpm": 120}
+        if cmd == "get_track_details":
+            return {"items": [{"start": {"seconds": 0.0}, "end": {"seconds": 2.0}}]}
         raise AssertionError(cmd)
     monkeypatch.setattr(ear_tools, "call", fake_call)
     out = ear_tools.measure_tracks(per_section=True)
@@ -161,3 +163,15 @@ def test_section_balance_ignores_fills_spill_and_quiet_risers():
               "Riff A": {"Drums": -23.7, "Bass": -39.7, "Chords": -56.5, "Lead": -31.8, "FX": -47.0}}
     flags = mix_tools.section_balance(levels, roles)
     assert flags == ["Riff A: Bass is 14.0 LU under its place (a bass part sits about 2 LU under the drums): buried"]
+
+
+def test_a_tail_from_the_previous_section_is_not_playing_there():
+    from creaper.ear_tools import _plays_in
+
+    intro_pulse = [(0.0, 15.36)]               # ends exactly where the verse starts
+    assert _plays_in(intro_pulse, 0.0, 15.36)
+    assert not _plays_in(intro_pulse, 15.36, 30.72)
+    assert not _plays_in([(0.0, 15.8)], 15.36, 30.72)    # half a second over the line is still a tail
+    assert _plays_in([(0.0, 17.0)], 15.36, 30.72)
+    assert _plays_in([(20.0, 21.0)], 15.36, 30.72)       # a short stab inside the section counts
+    assert _plays_in([(0.0, 0.3)], 0.0, 0.5)             # a very short section needs only half of itself
