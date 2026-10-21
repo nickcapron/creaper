@@ -434,7 +434,8 @@ def test_vocalvst_state_is_read_and_rewritten_in_place():
         vocalvst_state(base64.b64encode(b"something else").decode())
 
 
-def _vocalvst_bridge(tmp_path, monkeypatch, log_on_render=True, sounds_after=None, takes_switch=True):
+def _vocalvst_bridge(tmp_path, monkeypatch, log_on_render=True, sounds_after=None, takes_switch=True,
+                     sees_bank=lambda path: True):
     """A fake bridge with VocalVST on track 1 and a six-note item; returns the call log."""
     from creaper import vocal_tools
 
@@ -457,7 +458,11 @@ def _vocalvst_bridge(tmp_path, monkeypatch, log_on_render=True, sounds_after=Non
         if cmd == "capture_fx_state":
             return {"plugin": "VST3i: VocalVST (vocalvst)", "file": "vocalvst.vst3", "chunk": state["chunk"]}
         if cmd == "apply_fx_state":
-            state["chunk"] = kw["state"]["chunk"]
+            chunk = kw["state"]["chunk"]
+            bank = vocal_tools.vocalvst_bank(chunk)
+            if bank and not sees_bank(bank):       # the plugin keeps only a folder it can see
+                chunk = vocal_tools.vocalvst_state_with(chunk, bank="")
+            state["chunk"] = chunk
             return {}
         if cmd == "get_fx_parameters":
             return {"parameters": [{"name": "Render", "display": "On" if not takes_switch else "Off",
@@ -574,6 +579,34 @@ def test_render_vocalvst_gives_up_when_the_switch_stays_on(tmp_path, monkeypatch
     monkeypatch.setattr(vocal_tools.time, "monotonic", _FakeClock())
     with pytest.raises(ValueError, match="stays On"):
         vocal_tools.render_vocalvst(track=1)
+
+
+def test_render_vocalvst_offers_the_packaged_app_cache_when_the_plugin_cannot_see_the_first(tmp_path, monkeypatch):
+    from creaper import vocal_tools
+
+    _, state = _vocalvst_bridge(tmp_path, monkeypatch, sees_bank=lambda path: "LocalCache" in path)
+    cache = tmp_path / "Packages" / "Claude_x" / "LocalCache" / "Local" / "VocalVST" / "voicebanks" / "Canary_DS"
+    cache.mkdir(parents=True)
+    (cache / "dsconfig.yaml").write_text("acoustic: dsacoustic/acoustic.onnx\n")
+    monkeypatch.setattr(vocal_tools, "voicebank_roots", lambda: [tmp_path / "voicebanks", cache.parent])
+    out = vocal_tools.render_vocalvst(track=1)
+    assert vocal_tools.vocalvst_bank(state["chunk"]) == str(cache) and out["voicebank"] == "Canary_DS"
+
+    monkeypatch.setattr(vocal_tools, "voicebank_roots", lambda: [tmp_path / "voicebanks"])
+    vocal_tools.vocalvst_state_with(state["chunk"], bank="")
+    state["chunk"] = vocal_tools.vocalvst_state_with(state["chunk"], bank="")
+    with pytest.raises(ValueError, match="can't see them"):
+        vocal_tools.render_vocalvst(track=1)
+
+
+def test_voicebank_roots_include_packaged_app_caches(tmp_path, monkeypatch):
+    from creaper import vocal_tools
+
+    local = tmp_path / "AppData" / "Local"
+    cache = local / "Packages" / "Claude_abc" / "LocalCache" / "Local" / "VocalVST" / "voicebanks"
+    cache.mkdir(parents=True)
+    monkeypatch.setattr(vocal_tools, "VOICEBANK_ROOT", local / "VocalVST" / "voicebanks")
+    assert vocal_tools.voicebank_roots() == [local / "VocalVST" / "voicebanks", cache]
 
 
 def test_vocalvst_counts_as_an_installed_singer(monkeypatch):

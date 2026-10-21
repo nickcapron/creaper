@@ -735,19 +735,40 @@ def vocalvst_bank(chunk: str) -> str:
 VOICEBANK_ROOT = Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData/Local")) / "VocalVST" / "voicebanks"
 
 
-def find_voicebank() -> Path | None:
-    """The first DiffSinger voicebank where VocalVST's setup script installs them: a
-    folder whose dsconfig.yaml names an acoustic model."""
-    if not VOICEBANK_ROOT.is_dir():
-        return None
-    for folder in [VOICEBANK_ROOT, *sorted(VOICEBANK_ROOT.iterdir())]:
-        cfg = folder / "dsconfig.yaml"
-        try:
-            if cfg.is_file() and "acoustic" in cfg.read_text(encoding="utf-8", errors="replace"):
-                return folder
-        except OSError:
+def voicebank_roots() -> list[Path]:
+    """Where voicebanks can be: VocalVST's own folder, and the same folder inside a
+    packaged app's AppData cache. The Claude desktop app is one: files its sessions
+    write under AppData land in %LOCALAPPDATA%\\Packages\\<app>\\LocalCache, which those
+    sessions read back at the normal path while REAPER sees only the real one."""
+    roots = [VOICEBANK_ROOT]
+    local = VOICEBANK_ROOT.parents[1]
+    try:
+        roots += sorted(local.glob("Packages/*/LocalCache/Local/VocalVST/voicebanks"))
+    except OSError:
+        pass
+    return roots
+
+
+def find_voicebanks() -> list[Path]:
+    """DiffSinger voicebanks (a folder whose dsconfig.yaml names an acoustic model), in
+    every root, VocalVST's own folder first."""
+    found: list[Path] = []
+    for root in voicebank_roots():
+        if not root.is_dir():
             continue
-    return None
+        for folder in [root, *sorted(root.iterdir())]:
+            cfg = folder / "dsconfig.yaml"
+            try:
+                if cfg.is_file() and "acoustic" in cfg.read_text(encoding="utf-8", errors="replace"):
+                    found.append(folder)
+            except OSError:
+                continue
+    return found
+
+
+def find_voicebank() -> Path | None:
+    banks = find_voicebanks()
+    return banks[0] if banks else None
 
 
 def vocalvst_captured(chunk: str) -> dict:
@@ -892,16 +913,21 @@ def render_vocalvst(
     if vocalvst_lyrics(state["chunk"]) != text:
         changes["lyrics"] = text
     bank = vocalvst_bank(state["chunk"])
+    candidates: list[str] = []
     if not bank or not (Path(bank) / "dsconfig.yaml").is_file():
         # Without a voicebank Render does nothing, and the plugin says so only in its
-        # window; it takes the folder from its state, like the lyrics.
-        found = find_voicebank()
-        if found is None:
+        # window; it takes the folder from its state, like the lyrics. The plugin keeps
+        # only a folder it can see itself, so each candidate is offered until one sticks.
+        candidates = [str(b) for b in find_voicebanks()]
+        if not candidates:
             raise ValueError(f"VocalVST has no voicebank, so it can't render: none found under {VOICEBANK_ROOT} "
                              "(the plugin's setup script installs Canary there), and its window's Voicebank "
                              "button is the other way to choose one. Don't call again until one is in place")
-        bank = changes["bank"] = str(found)
-    if changes:
+    for attempt, candidate in enumerate(candidates or [None]):
+        if candidate:
+            changes["bank"] = candidate
+        if not changes:
+            break
         call("apply_fx_state", track=track, fx=fx["index"], sound_name="VocalVST " + " and ".join(changes),
              state={"plugin": state.get("plugin"), "file": state.get("file"),
                     "chunk": vocalvst_state_with(state["chunk"], **changes)})
@@ -909,9 +935,16 @@ def render_vocalvst(
         if vocalvst_lyrics(after) != text:
             raise ValueError("VocalVST didn't take the lyrics; type them in its window (update_fx show=True) "
                              "and call again without lyrics")
-        if "bank" in changes and not vocalvst_bank(after):
-            raise ValueError(f"VocalVST didn't accept the voicebank {bank}: choose it with the Voicebank button "
-                             "in its window (update_fx with show=True), then call again")
+        if not candidate:
+            break
+        bank = vocalvst_bank(after)
+        if bank:
+            break
+        if attempt == len(candidates) - 1:
+            raise ValueError("VocalVST didn't accept any voicebank folder it was given (" + ", ".join(candidates)
+                             + "): the plugin can't see them from REAPER. Move the voicebank to "
+                             + str(VOICEBANK_ROOT) + " in Explorer, or choose it with the Voicebank button in "
+                             "the plugin's window (update_fx with show=True), then call again")
     call("set_fx_parameter", track=track, fx=fx["index"], parameter="Mode", display_text=mode.capitalize())
 
     # The pass: the plugin records only what the transport plays through it, by position.
