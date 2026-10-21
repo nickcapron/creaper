@@ -151,3 +151,13 @@ def test_measure_tracks_per_section_without_regions_says_so(monkeypatch, tmp_pat
     monkeypatch.setattr(ear_tools, "call", fake_call)
     out = ear_tools.measure_tracks(per_section=True)
     assert "A" in out["tracks"] and "sections" not in out and "regions" in out["note"]
+
+
+def test_section_balance_ignores_fills_spill_and_quiet_risers():
+    """From a darksynth song: a breakdown whose only drums are a -42 LUFS fill, chords that
+    spill into a riff at -56, risers that are quiet between impacts, and a bass really buried."""
+    roles = {"Drums": "drums", "Bass": "bass", "Chords": "keys", "Lead": "lead", "Pulse": "bass", "FX": "fx"}
+    levels = {"Break": {"Drums": -41.6, "Chords": -35.3, "Lead": -36.7, "Pulse": -27.4},
+              "Riff A": {"Drums": -23.7, "Bass": -39.7, "Chords": -56.5, "Lead": -31.8, "FX": -47.0}}
+    flags = mix_tools.section_balance(levels, roles)
+    assert flags == ["Riff A: Bass is 14.0 LU under its place (a bass part sits about 2 LU under the drums): buried"]

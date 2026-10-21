@@ -119,30 +119,42 @@ def highpass_for(role: str, spectrum: dict | None) -> int | None:
 # A part this far over its role's level (LU, against the drums in the same section) is
 # overpowering; this far under, buried.
 OVER_LU, UNDER_LU = 4.0, 8.0
+# Further under than this, it isn't a quiet part but a tail or a stray note spilling into
+# the section (chords at -56 LUFS in a riff they don't play in were "33 LU buried").
+SPILL_LU = 20.0
+# Drums this far under the section's loudest other part are a fill or a tail, not the
+# beat: a breakdown's -42 LUFS fill made every part there "15-20 LU over its place".
+DRUMS_PRESENT_LU = 12.0
 
 
 def section_balance(levels: dict[str, dict[str, float | None]], roles: dict[str, str]) -> list[str]:
     """Parts out of place in each section. levels: {section: {track: LUFS while it
     plays}}; roles: {track: role}. Each part is judged against ROLE_LEVELS from the
-    drums in that section (a section without drums: from the parts' median)."""
+    drums in that section (a section without drums: from the parts' median). Parts
+    far under their place (spill) and quiet risers or impacts aren't called buried."""
     out = []
     for section, tracks in levels.items():
         playing = {t: v for t, v in tracks.items() if v is not None}
         if len(playing) < 2:
             continue
-        drums = [v for t, v in playing.items() if roles.get(t) in ("kick", "drums")]
+        others = [v for t, v in playing.items() if roles.get(t) not in ("kick", "drums")]
+        drums = [v for t, v in playing.items() if roles.get(t) in ("kick", "drums")
+                 and not (others and v < max(others) - DRUMS_PRESENT_LU)]
+        judged = {t: v for t, v in playing.items() if drums or roles.get(t) not in ("kick", "drums")}
+        if len(judged) < 2:
+            continue
         anchor = max(drums) if drums else float(sorted(v - ROLE_LEVELS.get(roles.get(t, "other"), -7)
-                                                       for t, v in playing.items())[len(playing) // 2])
+                                                       for t, v in judged.items())[len(judged) // 2])
         for t, v in playing.items():
             role = roles.get(t, "other")
-            if drums and role in ("kick", "drums") and v == anchor:
+            if role in ("kick", "drums") and (v == anchor or not drums):
                 continue
             off = v - (anchor + ROLE_LEVELS.get(role, -7))
-            where = (f"{-ROLE_LEVELS.get(role, -7):g} LU under the drums" if drums else "with the rest")
+            where = (f"about {-ROLE_LEVELS.get(role, -7):g} LU under the drums" if drums else "in line with the rest")
             if off > OVER_LU:
-                out.append(f"{section}: {t} is {off:.1f} LU over its place (a {role} part sits about {where})")
-            elif off < -UNDER_LU:
-                out.append(f"{section}: {t} is {-off:.1f} LU under its place (a {role} part sits about {where}): buried")
+                out.append(f"{section}: {t} is {off:.1f} LU over its place (a {role} part sits {where})")
+            elif -SPILL_LU <= off < -UNDER_LU and role != "fx":
+                out.append(f"{section}: {t} is {-off:.1f} LU under its place (a {role} part sits {where}): buried")
     return out
 
 
@@ -304,6 +316,10 @@ def plan_mix(channels: list[dict], style: dict | None = None) -> dict:
         want = anchor + offsets.get(c["role"], -7)
         boost = MAX_BOOST_LOW_DB if (c["role"] == "bass" or low_share(c.get("spectrum")) > LOW_HEAVY_PCT)             else MAX_BOOST_DB
         a["gain_db"] = round(max(-18.0, min(boost, want - c["level"])), 1)
+        if want - c["level"] > boost + UNDER_LU / 2:
+            # Said, not silent: a layered bass that wanted +14 got +2 and stayed buried.
+            a["capped"] = (f"wanted {want - c['level']:+.1f} dB, boosts stop at {boost:+g}: check it with "
+                           "measure_tracks(per_section=True) and raise it by hand if it's buried")
         if c["role"] in HIGHPASS_HZ and not c.get("has_eq"):
             hp = highpass_for(c["role"], c.get("spectrum"))
             if (c["role"] in ("keys", "pad") and low_share(c.get("spectrum")) > LOW_HEAVY_KEYS_PCT

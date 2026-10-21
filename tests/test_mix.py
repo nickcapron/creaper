@@ -84,6 +84,8 @@ def test_boosts_are_capped_and_sub_drones_barely_raised():
                                              channel("Drone", "other", -30, spectrum=sub)])["channels"]}
     assert acts["Lead"]["gain_db"] == 6.0        # wanted +15
     assert acts["Drone"]["gain_db"] == 2.0       # a K-weighted meter underrates sub: barely raised
+    assert acts["Lead"]["capped"].startswith("wanted +15.0 dB, boosts stop at +6")
+    assert acts["Drone"]["capped"].startswith("wanted +13.0 dB, boosts stop at +2")
 
 
 def test_highpass_stays_under_a_parts_lowest_notes():
