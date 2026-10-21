@@ -394,3 +394,164 @@ def test_chops_can_stay_as_sung(monkeypatch, tmp_path):
     calls = _chop_fakes(monkeypatch, [])
     vocal_tools.chop_vocal(path=_dark_phrase(tmp_path), track="Chops", bars=1, octave=0)
     assert [kw["name"] for c, kw in calls if c == "add_fx"] == ["ReaEQ"]
+
+
+
+# ------------------------------------------------------------------ VocalVST
+
+# A VocalVST instance's state as REAPER reports it (vst_chunk), after a pass that
+# captured six notes, with lyrics "hel lo world this is me" and no voicebank.
+VOCALVST_CHUNK = (
+    "XgIAAAEAAABWQzIhGQIAADw/eG1sIHZlcnNpb249IjEuMCIgZW5jb2Rpbmc9IlVURi04Ij8+IDxWb2NhbFZTVCBseXJpY3M9ImhlbCBsbyB3b3Js"
+    "ZCB0aGlzIGlzIG1lIiBiYW5rPSIiPjxzdGF0ZT48UEFSQU0gaWQ9ImdhaW4iIHZhbHVlPSIwLjAiLz48UEFSQU0gaWQ9Im1vZGUiIHZhbHVlPSIw"
+    "LjAiLz48UEFSQU0gaWQ9InJlbmRlciIgdmFsdWU9IjAuMCIvPjwvc3RhdGU+PG5vdGVzPjxuIHM9IjAuMCIgZT0iMC40NSIgbT0iNjAiIHY9IjAu"
+    "Nzg3NDAxNTU2OTY4Njg5Ii8+PG4gcz0iMC41IiBlPSIwLjk1MDAwMDAwMDAwMDAwMDEiIG09IjYyIiB2PSIwLjc4NzQwMTU1Njk2ODY4OSIvPjxu"
+    "IHM9IjEuMCIgZT0iMS40NSIgbT0iNjQiIHY9IjAuNzg3NDAxNTU2OTY4Njg5Ii8+PG4gcz0iMS41IiBlPSIxLjk1IiBtPSI2NCIgdj0iMC43ODc0"
+    "MDE1NTY5Njg2ODkiLz48biBzPSIyLjAiIGU9IjIuNDUiIG09IjYyIiB2PSIwLjc4NzQwMTU1Njk2ODY4OSIvPjxuIHM9IjIuNSIgZT0iMi45NSIg"
+    "bT0iNjAiIHY9IjAuNzg3NDAxNTU2OTY4Njg5Ii8+PC9ub3Rlcz48L1ZvY2FsVlNUPgAAAAAAAAAAAEpVQ0VQcml2YXRlRGF0YQABAUJ5cGFzcwAB"
+    "AQMAHQAAAAAAAABKVUNFUHJpdmF0ZURhdGEAAAAAAAAAAA=="
+)
+
+
+def test_vocalvst_state_is_read_and_rewritten_in_place():
+    import base64
+    import struct
+
+    from creaper.vocal_tools import vocalvst_captured, vocalvst_lyrics, vocalvst_state, vocalvst_state_with_lyrics
+
+    assert vocalvst_lyrics(VOCALVST_CHUNK) == "hel lo world this is me"
+    assert vocalvst_captured(VOCALVST_CHUNK) == {"notes": 6, "from_seconds": 0.0, "to_seconds": 2.95}
+    new = vocalvst_state_with_lyrics(VOCALVST_CHUNK, 'we "ride" & <fall> to night')
+    assert vocalvst_lyrics(new) == 'we "ride" & <fall> to night'
+    assert vocalvst_captured(new) == vocalvst_captured(VOCALVST_CHUNK)   # the notes survive
+    old_raw, at, old_n, _ = vocalvst_state(VOCALVST_CHUNK)
+    new_raw, at2, new_n, xml = vocalvst_state(new)
+    assert at2 == at and new_n == len(xml.encode()) + 1
+    assert struct.unpack_from("<I", new_raw, 0)[0] - struct.unpack_from("<I", old_raw, 0)[0] == new_n - old_n
+    assert new_raw[at + 8 + new_n:] == old_raw[at + 8 + old_n:]        # REAPER's controller state is untouched
+    assert vocalvst_lyrics(vocalvst_state_with_lyrics(new, "")) == ""
+    with pytest.raises(ValueError, match="JUCE"):
+        vocalvst_state(base64.b64encode(b"something else").decode())
+
+
+def _vocalvst_bridge(tmp_path, monkeypatch, log_on_render=True, sounds_after=None):
+    """A fake bridge with VocalVST on track 1 and a six-note item; returns the call log."""
+    from creaper import vocal_tools
+
+    state = {"chunk": VOCALVST_CHUNK, "renders": 0}
+    calls = []
+    log = tmp_path / "host.log"
+    log.write_text("2026-10-20T17:09:05.251-07:00 loaded in Reaper (plugin)\n")
+    renders = tmp_path / "renders"
+    renders.mkdir()
+    notes = [{"pitch": p, "start": i * 1.0, "length": 0.9, "velocity": 100} for i, p in enumerate((60, 62, 64, 64, 62, 60))]
+
+    def fake_call(cmd, **kw):
+        calls.append((cmd, kw))
+        if cmd == "get_track_details":
+            return {"number": 1, "name": "Vocal", "fx": [{"index": 1, "name": "VST3i: VocalVST (vocalvst)"}],
+                    "items": [{"id": "{I}", "type": "midi", "muted": False,
+                               "start": {"seconds": 2.0}, "end": {"seconds": 5.0}}]}
+        if cmd == "get_midi_notes":
+            return {"notes": notes, "start": {"qn": 4.0}}
+        if cmd == "capture_fx_state":
+            return {"plugin": "VST3i: VocalVST (vocalvst)", "file": "vocalvst.vst3", "chunk": state["chunk"]}
+        if cmd == "apply_fx_state":
+            state["chunk"] = kw["state"]["chunk"]
+            return {}
+        if cmd == "set_fx_parameter":
+            if kw["parameter"] == "Render" and log_on_render:
+                with log.open("a") as f:
+                    f.write("2026-10-20T19:00:00.000-07:00 Rendered: 1 phrase, 6 notes, 3.7 s\n")
+            return {}
+        if cmd == "transport":
+            return {}
+        if cmd == "recording_status":
+            return {"playing": False}
+        if cmd == "render_audio":
+            import numpy as np
+            import soundfile as sf
+
+            state["renders"] += 1
+            f = renders / f"r{state['renders']}.wav"
+            loud = sounds_after is not None and state["renders"] > sounds_after
+            sf.write(str(f), (0.3 if loud else 0.0) * np.ones((4800, 2), dtype="float32"), 48000)
+            return {"files": [str(f)]}
+        raise AssertionError(cmd)
+
+    monkeypatch.setattr(vocal_tools, "call", fake_call)
+    monkeypatch.setattr(vocal_tools, "VOCALVST_LOG", log)
+    monkeypatch.setattr(vocal_tools, "_sleep", lambda s: None)
+    monkeypatch.setattr(vocal_tools, "bridge", type("B", (), {
+        "directory": tmp_path,
+        "call": lambda self, cmd, params=None, timeout=30.0: fake_call(cmd, **(params or {}))})())
+    return calls, state
+
+
+def test_render_vocalvst_sets_lyrics_plays_the_pass_then_renders(tmp_path, monkeypatch):
+    from creaper import vocal_tools
+
+    calls, state = _vocalvst_bridge(tmp_path, monkeypatch)
+    out = vocal_tools.render_vocalvst(track="Vocal", lyrics="we ride at dawn to-night", mode="rap")
+    cmds = [c for c, _ in calls]
+    assert cmds.index("apply_fx_state") < cmds.index("transport") < cmds.index("recording_status")
+    assert vocal_tools.vocalvst_lyrics(state["chunk"]) == "we ride at dawn to night"
+    params = [(kw["parameter"], kw["display_text"]) for c, kw in calls if c == "set_fx_parameter"]
+    assert params == [("Mode", "Rap"), ("Render", "On")]
+    play = next(kw for c, kw in calls if c == "transport")
+    assert play["action"] == "play" and play["start_seconds"] == 1.7 and play["end_seconds"] == 5.5
+    assert cmds.index("render_audio") < cmds.index("set_fx_parameter", cmds.index("set_fx_parameter") + 1)
+    assert out["result"].startswith("Rendered: 1 phrase") and out["captured"]["notes"] == 6
+    assert out["lyrics"] == "we ride at dawn to night" and "warning" not in out
+
+
+def test_render_vocalvst_holds_notes_with_plus_and_checks_the_count(tmp_path, monkeypatch):
+    from creaper import vocal_tools
+
+    _, state = _vocalvst_bridge(tmp_path, monkeypatch)
+    vocal_tools.render_vocalvst(track=1, lyrics="go _ go _ go _")
+    assert vocal_tools.vocalvst_lyrics(state["chunk"]) == "go + go + go +"
+    with pytest.raises(ValueError, match="6 notes"):
+        vocal_tools.render_vocalvst(track=1, lyrics="too few words")
+
+
+def test_render_vocalvst_hears_the_take_when_the_plugin_writes_no_log(tmp_path, monkeypatch):
+    from creaper import vocal_tools
+
+    _vocalvst_bridge(tmp_path, monkeypatch, log_on_render=False, sounds_after=1)
+    out = vocal_tools.render_vocalvst(track=1, mode="scat")
+    assert out["lyrics"] is None and "plays the new take" in out["result"]
+
+
+def test_render_vocalvst_explains_a_render_that_never_comes(tmp_path, monkeypatch):
+    from creaper import vocal_tools
+
+    _vocalvst_bridge(tmp_path, monkeypatch, log_on_render=False)
+    monkeypatch.setattr(vocal_tools.time, "monotonic", _FakeClock())
+    with pytest.raises(ValueError, match="No voicebank"):
+        vocal_tools.render_vocalvst(track=1, timeout_seconds=30)
+
+
+class _FakeClock:
+    def __init__(self):
+        self.t = 0.0
+
+    def __call__(self):
+        self.t += 2.0
+        return self.t
+
+
+def test_render_vocalvst_needs_the_plugin_and_notes(monkeypatch):
+    from creaper import vocal_tools
+
+    monkeypatch.setattr(vocal_tools, "call", lambda cmd, **kw: {"number": 2, "name": "Lead", "fx": [], "items": []})
+    with pytest.raises(ValueError, match="no VocalVST"):
+        vocal_tools.render_vocalvst(track="Lead")
+
+
+def test_vocalvst_counts_as_an_installed_singer(monkeypatch):
+    from creaper import vocal_tools
+
+    monkeypatch.setattr(vocal_tools, "call", lambda cmd, **kw: {"plugins": [{"name": "VocalVST"}]})
+    assert "VocalVST" in vocal_tools.singing_synths()
+    assert "render_vocalvst" in vocal_tools.SINGERS["VocalVST"][1]

@@ -4,8 +4,11 @@ melody's notes, and a vocoder makes a synth playing the melody sing them)."""
 
 from __future__ import annotations
 
+import base64
+import os
 import random
 import re
+import struct
 import time
 from pathlib import Path
 from typing import Annotated, Callable, Literal
@@ -15,7 +18,7 @@ from pydantic import Field
 
 from . import analysis, asr, composer, harmony, samplelib, singing, speech, talkbox
 from . import sample_tools  # the module, not its names: it may still be loading (circular import)
-from .server import READ_ONLY, ItemId, call, tool
+from .server import READ_ONLY, ItemId, TrackRef, bridge, call, tool
 
 # Notes starting this close together (in QN) count as one onset: the top one sings.
 ONSET_TOLERANCE = 1 / 64
@@ -526,6 +529,7 @@ SINGERS = {
     "OpenUtau": ("openutau|utau", "drag the .mid into the window; set the hold symbol to '+' for OpenUtau"),
     "Alter/Ego": ("alter.?ego|plogue", "load it as an instrument on the melody's track and type the lyrics in its window"),
     "Emvoice": ("emvoice", "load it as an instrument on the melody's track and type the lyrics in its window"),
+    "VocalVST": ("vocalvst", "load it as the melody track's instrument and call render_vocalvst(track, lyrics): nothing to import"),
 }
 _APP_DIRS = {
     "Synthesizer V": ["Dreamtonics", "Synthesizer V Studio 2 Pro", "Synthesizer V Studio Pro"],
@@ -657,3 +661,221 @@ def export_vocal_midi(
     if ramps:
         result["warning"] = "the song has tempo ramps; the file steps between tempos, so check the timing there"
     return result
+
+
+# ------------------------------------------------------------------ VocalVST
+
+# VocalVST (the user's own singing plugin) can't sing live: it records the notes that
+# pass through it while the transport plays, keeps them with the lyrics in its state,
+# and renders the phrase offline when its Render switch is set. The rendered vocal then
+# plays wherever the transport (or an offline render) crosses the captured region.
+JUCE_STATE_MAGIC = b"VC2!"     # JUCE's copyXmlToBinary header, as REAPER stores it in the VST3 state
+VOCALVST_LOG = Path(os.environ.get("APPDATA") or (Path.home() / "AppData/Roaming")) / "VocalVST" / "host.log"
+_sleep = time.sleep
+
+
+def _xml_attr(text: str) -> str:
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+
+
+def vocalvst_state(chunk: str) -> tuple[bytes, int, int, str]:
+    """REAPER's base64 state of a VocalVST instance, taken apart: the raw bytes, where
+    the plugin's XML block starts and how long it is, and the XML text."""
+    raw = base64.b64decode(chunk)
+    at = raw.find(JUCE_STATE_MAGIC)
+    if at < 0 or at + 8 > len(raw):
+        raise ValueError("VocalVST's state isn't in the form creaper knows (a JUCE XML block)")
+    (n,) = struct.unpack_from("<I", raw, at + 4)
+    xml = raw[at + 8: at + 8 + n].rstrip(b"\x00").decode("utf-8", errors="replace")
+    if "<VocalVST" not in xml:
+        raise ValueError("that plugin's state isn't VocalVST's")
+    return raw, at, n, xml
+
+
+def vocalvst_state_with_lyrics(chunk: str, lyrics: str) -> str:
+    """The same state with its lyrics replaced; everything else (the captured notes,
+    the voicebank, the parameters) stays. REAPER's leading length word covers the
+    XML block, so it grows or shrinks with it."""
+    raw, at, n, xml = vocalvst_state(chunk)
+    if not re.search(r'<VocalVST[^>]*\slyrics="', xml):
+        raise ValueError("VocalVST's state has no lyrics field; is this a newer plugin?")
+    new_xml = re.sub(r'(<VocalVST[^>]*\slyrics=)"[^"]*"', lambda m: m.group(1) + '"' + _xml_attr(lyrics) + '"',
+                     xml, count=1)
+    block = new_xml.encode("utf-8") + b"\x00"
+    out = bytearray(raw[: at + 4])
+    out += struct.pack("<I", len(block)) + block + raw[at + 8 + n:]
+    if at >= 4:
+        (first,) = struct.unpack_from("<I", raw, 0)
+        if first >= 8 + n:
+            struct.pack_into("<I", out, 0, first + len(block) - n)
+    return base64.b64encode(bytes(out)).decode("ascii")
+
+
+def vocalvst_lyrics(chunk: str) -> str:
+    m = re.search(r'<VocalVST[^>]*\slyrics="([^"]*)"', vocalvst_state(chunk)[3])
+    text = m.group(1) if m else ""
+    return text.replace("&quot;", '"').replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
+
+
+def vocalvst_captured(chunk: str) -> dict:
+    """The notes the plugin has recorded from the transport: how many, and their span
+    in seconds."""
+    xml = vocalvst_state(chunk)[3]
+    starts = [float(s) for s in re.findall(r'<n s="([^"]+)"', xml)]
+    ends = [float(e) for e in re.findall(r'<n s="[^"]+" e="([^"]+)"', xml)]
+    return {"notes": len(starts), "from_seconds": round(min(starts), 3) if starts else None,
+            "to_seconds": round(max(ends), 3) if ends else None}
+
+
+def _vocalvst_fx(track: str | int) -> tuple[dict, list[dict]]:
+    details = call("get_track_details", track=track)
+    fx = next((f for f in details.get("fx", []) if "vocalvst" in (f.get("name") or "").lower()), None)
+    if fx is None:
+        raise ValueError(f"track {details.get('number', track)} \"{details.get('name', '')}\" has no VocalVST on it: "
+                         "create_track(name, instrument='VocalVST') or add_fx it first")
+    items = sorted((i for i in details.get("items", []) if i.get("type") == "midi" and not i.get("muted")),
+                   key=lambda i: i["start"]["seconds"])
+    if not items:
+        raise ValueError("the track has no (unmuted) MIDI item for VocalVST to sing: write the melody first "
+                         "(one note per syllable, no chords)")
+    return fx, items
+
+
+def _wait_for_stop(expected_seconds: float) -> None:
+    deadline = time.monotonic() + expected_seconds + 20
+    while time.monotonic() < deadline:
+        _sleep(0.5)
+        if not call("recording_status").get("playing"):
+            return
+    call("transport", action="stop")
+    raise ValueError("REAPER didn't reach the end of the pass in time; it was stopped. Try again")
+
+
+def _track_audio(track: str | int, start: float, end: float) -> tuple[bool, bytes]:
+    """Whether the track sounds over a span (rendered offline), and a digest of that audio."""
+    import hashlib
+
+    import soundfile as sf
+
+    # Straight to the bridge: server.call treats an all-silent render as offline media and
+    # re-renders after a slow action, but silence is expected here before the first take.
+    render = bridge.call("render_audio", {"track": track, "start_seconds": start, "end_seconds": end}, timeout=300.0)
+    files = list(render.get("files") or [])
+    renders = (bridge.directory / "renders").resolve()
+    sounding, digest = False, hashlib.sha1()
+    try:
+        for f in files:
+            if renders not in Path(f).resolve().parents:
+                raise ValueError(f"refusing to read a render outside {renders}: {f}")
+            audio, _ = sf.read(f, dtype="float32", always_2d=True)
+            sounding = sounding or bool(np.abs(audio).max() > 10 ** (-60 / 20))
+            digest.update(np.round(audio, 4).tobytes())
+    finally:
+        if not os.environ.get("CREAPER_KEEP_RENDERS"):
+            for f in files:
+                Path(f).unlink(missing_ok=True)
+    return sounding, digest.digest()
+
+
+def _new_log_line(log_size: int) -> str | None:
+    if not VOCALVST_LOG.exists():
+        return None
+    with VOCALVST_LOG.open("rb") as f:
+        f.seek(log_size)
+        new = f.read().decode("utf-8", errors="replace")
+    for line in new.splitlines():
+        line = line.strip()
+        if line and " loaded in " not in line:
+            return line.split(" ", 1)[1] if " " in line else line
+    return None
+
+
+def _wait_for_render(log_size: int, timeout: float, before: tuple[bool, bytes], audio) -> str:
+    """The plugin's result line from its log; failing that, the track's audio changing
+    (a plugin that can't write its log still plays what it rendered)."""
+    deadline = time.monotonic() + timeout
+    next_render = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        _sleep(1.0)
+        line = _new_log_line(log_size)
+        if line:
+            return line
+        if time.monotonic() >= next_render:
+            next_render = time.monotonic() + 10
+            sounding, digest = audio()
+            if (sounding and not before[0]) or (sounding and digest != before[1]):
+                return "Rendered (the track plays the new take; the plugin wrote nothing to its log)"
+    raise ValueError(f"VocalVST reported nothing in {timeout:.0f} s and the track's audio didn't change. Open its "
+                     "window (update_fx with show=True) to read its status: 'No voicebank' means its Voicebank "
+                     "button needs the voicebank folder (under %LOCALAPPDATA%\\VocalVST\\voicebanks); "
+                     "'Rendering...' or 'Loading voicebank...' means it needs longer (timeout_seconds, more on the "
+                     "first render)")
+
+
+@tool()
+def render_vocalvst(
+    track: TrackRef,
+    lyrics: Annotated[str | None, Field(description=(
+        "The words, one syllable per note: 'dan-cing in the dark _' (hyphens split syllables, '_' holds the note "
+        "before). Leave it out for a wordless line: scat syllables in scat mode, 'la' otherwise"))] = None,
+    mode: Annotated[Literal["sing", "rap", "scat"], Field(description="sing: pitched, vibrato on held notes; rap: spoken contour, syllables cut to about 220 ms; scat: nonsense syllables when there are no lyrics")] = "sing",
+    timeout_seconds: Annotated[float, Field(ge=30, le=900, description="How long to wait for the render")] = 240,
+) -> dict:
+    """Makes VocalVST (the user's singing plugin) sing the MIDI on its track: sets the
+    lyrics and mode, plays the transport over the item so the plugin records the notes
+    (it can't sing live: audition_instrument hears silence), then renders the phrase
+    offline and waits for the result. Afterwards the vocal plays in sync with the
+    transport and in offline renders (analyze_audio, export_mix). It's a clean sung
+    voice: for growls or shrieks add distortion after it. Call it again after the notes
+    or lyrics change, and after reopening a saved project (the capture is saved, the
+    rendered audio isn't). Needs a monophonic line: one note per syllable, no chords."""
+    fx, items = _vocalvst_fx(track)
+    line: list[dict] = []
+    for item in items:
+        line += melody_line(call("get_midi_notes", item_id=item["id"], limit=20000).get("notes", []))
+    if not line:
+        raise ValueError("the track's MIDI items have no notes to sing")
+    text = " ".join(singer_syllables(lyrics, line, hold="+")) if lyrics else ""
+
+    state = call("capture_fx_state", track=track, fx=fx["index"])
+    if not state.get("chunk"):
+        raise ValueError("REAPER gave no state for VocalVST, so its lyrics can't be set")
+    if vocalvst_lyrics(state["chunk"]) != text:
+        call("apply_fx_state", track=track, fx=fx["index"], sound_name="VocalVST lyrics",
+             state={"plugin": state.get("plugin"), "file": state.get("file"),
+                    "chunk": vocalvst_state_with_lyrics(state["chunk"], text)})
+        if vocalvst_lyrics(call("capture_fx_state", track=track, fx=fx["index"])["chunk"]) != text:
+            raise ValueError("VocalVST didn't take the lyrics; type them in its window (update_fx show=True) "
+                             "and call again without lyrics")
+    call("set_fx_parameter", track=track, fx=fx["index"], parameter="Mode", display_text=mode.capitalize())
+
+    # The pass: the plugin records only what the transport plays through it, by position.
+    start = max(0.0, items[0]["start"]["seconds"] - 0.3)
+    end = max(i["end"]["seconds"] for i in items) + 0.5
+    call("transport", action="play", start_seconds=start, end_seconds=end)
+    _wait_for_stop(end - start)
+    captured = vocalvst_captured(call("capture_fx_state", track=track, fx=fx["index"])["chunk"])
+    if not captured["notes"]:
+        raise ValueError("VocalVST recorded no notes during the pass: check the track isn't muted, the item is "
+                         "on it and the plugin is enabled, then call again")
+
+    log_size = VOCALVST_LOG.stat().st_size if VOCALVST_LOG.exists() else 0
+    span = (captured["from_seconds"], captured["to_seconds"] + 1.0)
+    before = _track_audio(track, *span)
+    call("set_fx_parameter", track=track, fx=fx["index"], parameter="Render", display_text="On")
+    report = _wait_for_render(log_size, timeout_seconds, before, lambda: _track_audio(track, *span))
+    out = {"track": track, "mode": mode, "lyrics": text or None, "written_notes": len(line), "captured": captured,
+           "result": report,
+           "plays": "in sync with the transport over the captured region, and in offline renders (analyze_audio, "
+                    "measure_tracks, export_mix); not in audition_instrument",
+           "next": "check it with analyze_audio(track) or check_vocal_clarity; render again after any change "
+                   "to the notes or lyrics"}
+    if not report.startswith("Rendered"):
+        out["warning"] = "the plugin reports: " + report
+    if captured["notes"] != len(line):
+        out["note"] = (f"the plugin captured {captured['notes']} notes but the items hold {len(line)}: overlapping "
+                       "notes are cut and chords keep their top note, so the syllables may have shifted")
+    without = re.search(r"(\d+) notes without lyrics", report)
+    if lyrics and without and int(without.group(1)):
+        out["warning"] = without.group(1) + " notes got no syllable and sing la: fewer syllables than captured notes"
+    return out

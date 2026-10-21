@@ -191,6 +191,21 @@ PROFILES: tuple[Profile, ...] = (
         controls={},
     ),
     Profile(
+        "VocalVST", "instrument",
+        "The user's own singing plugin (a DiffSinger voice, Canary: clean English singing). It isn't a live "
+        "instrument: it records the notes that pass through it while the transport plays, with their timeline "
+        "positions, and sings them only after an offline render, so audition_instrument and scan_plugins hear "
+        "silence. render_vocalvst(track, lyrics, mode) does the whole order: lyrics into its state (one syllable "
+        "per note; its window takes them too), Mode, a transport pass over the item, Render, and waits for the "
+        "result (its log is %APPDATA%\\VocalVST\\host.log). Then the vocal plays in sync with the transport and in "
+        "offline renders (analyze_audio, export_mix). Modes: Sing holds notes with vibrato; Rap cuts every "
+        "syllable to about 220 ms; Scat sings nonsense syllables when there are no lyrics. Monophonic: overlapping "
+        "notes are cut, chords keep the top note. The capture is by position, so moved or rewritten notes need "
+        "another render_vocalvst; so does a reopened project (the capture is saved, the rendered audio isn't). "
+        "A clean voice: growls, shrieks or robot tones come from distortion and effects after it.",
+        controls={"mode": "Mode", "gain": "Gain", "render": "Render"},
+    ),
+    Profile(
         "Filter MINI", "filter",
         "Arturia's Minimoog ladder filter as an effect. Its Cutoff is 0-1 and very steep at the bottom: on "
         "a part around C5-A5, about 0.5 barely changes anything, about 0.33 dulls it 2-6 dB, and 0.25 "

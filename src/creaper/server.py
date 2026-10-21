@@ -69,7 +69,7 @@ in order; finish_stage(stage) runs each stage's checks and refuses on a fail):
     reference track from the user, compare_to_reference(file).
 11. Export: export_mix(style). Tell the user its length, loudness and score, what changes
     in each section, and ask for their reaction to specific parts (the hook, the drop).
-Write a short sketch or loop only when the user asks for one.
+Short sketches or loops only when the user asks.
 
 When the user complains, measure before changing anything:
 - boring, repetitive, dull, "just a loop": song_map and measure_structure; give each
@@ -121,8 +121,8 @@ Sounds:
   lead can take an octave-down double 8 dB under it. Genre palettes (get_genre_profile)
   name the layers that fit the style. Drum kits layer too (build_drum_kit layers=, a
   click or sub under the kick), and alternatives per lane avoid machine-gun repeats.
-- Saved sounds tagged for another project are anchors for that project, not a palette:
-  give each song its own sounds. Offer to save_sound a sound the user likes.
+- Saved sounds tagged for another project are its anchors, not a palette: give each song
+  its own sounds. Offer to save_sound sounds the user likes.
 - Prefer the user's own plugins (list_installed_fx, browse by category) over REAPER's
   stock ones. get_plugin_profile explains plugins creaper knows; read it before
   configuring one. scan_plugins measures what untested plugins do. save_note what you
@@ -189,20 +189,21 @@ Samples and vocals:
   turn sample files into instruments (when a plugin's browser blocks you from picking
   its samples, they're often files you can use this way).
 - Vocals, best source first, saying which you used: real vocals in the user's samples
-  (find_samples role "vocal", then chop_vocal or place_loop); a singing synth for
-  human-like sung words (export_vocal_midi); add_robot_vocal(style="sung") for a sung
-  line or guide vocal; add_robot_vocal for robot hooks (house, French touch, electro,
-  synth-pop): a short hook, at most one syllable per beat. Wordless choirs and vocal
-  pads: build_sampled_instrument, from the user's samples or an .sfz file.
+  (find_samples role "vocal", then chop_vocal or place_loop); sung words from VocalVST
+  when installed (melody on its track, then render_vocalvst; clean voice: distortion
+  after it for shrieks) or a singing synth app (export_vocal_midi);
+  add_robot_vocal(style="sung") for a guide vocal; add_robot_vocal for robot hooks
+  (house, French touch, electro, synth-pop): a short hook, at most one syllable per
+  beat. Wordless choirs and vocal pads: build_sampled_instrument, from the user's
+  samples or an .sfz file.
 
 Sound effects: one project per family of sounds, each sound and variation in its own
 region named as its file, then export_regions. Build by layers (transient, body, tail);
 variations differ for real (another layer or sample, 1-2 semitones, another envelope).
 Real-world sounds (crowds, footsteps) need recordings: say so rather than fake them.
 
-Recording: list_inputs, set_record_settings, then record (it asks the user first and
-explains the save dialog REAPER shows afterwards). list_takes / choose_take pick the best
-pass.
+Recording: list_inputs, set_record_settings, then record (it asks the user first).
+list_takes / choose_take pick the best pass.
 
 Saving and delivering: offer to save_project when an unsaved project has real work in it
 (save_project(copy=True) snapshots before big changes); don't save over a different file
@@ -489,6 +490,9 @@ def list_installed_fx(
         entry = tested.get(plugin.get("load_as"))
         if entry and not entry.get("error"):
             plugin["tested"] = {"roles": entry.get("roles"), "summary": entry.get("summary")}
+        profile = plugin_profiles.find_profile(plugin.get("name"))
+        if profile:
+            plugin["how_it_works"] = profile.summary
     if not tested:
         result["tip"] = "No plugins have been tested yet: scan_plugins finds out what each one actually does."
     return result

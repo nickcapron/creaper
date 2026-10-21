@@ -15,7 +15,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field
 
-from . import composer, feel, genres, harmony, scales as scales_db, theory
+from . import composer, feel, genres, harmony, plugin_profiles, scales as scales_db, theory
 from .harmony import Key, SpelledChord
 from .server import READ_ONLY, ItemId, add_drum_pattern, call, tool
 
@@ -1360,6 +1360,10 @@ def audition_instrument(
                 entry["plays_own_pattern"] = True
         per_note.append(entry)
     out = {"instrument": instrument, "summary": listen.describe_patch(results), "notes": per_note}
+    if all(e.get("silent") for e in per_note):
+        profile = plugin_profiles.find_profile(instrument)
+        if profile:
+            out["how_it_works"] = profile.summary
     patterned = [e["note"] for e in per_note if e.get("plays_own_pattern")]
     if listen.plays_pattern(context.get("chord_motion") or {}):
         patterned.append("a held C major chord")
