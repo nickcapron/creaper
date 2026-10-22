@@ -435,7 +435,7 @@ def test_vocalvst_state_is_read_and_rewritten_in_place():
 
 
 def _vocalvst_bridge(tmp_path, monkeypatch, log_on_render=True, sounds_after=None, takes_switch=True,
-                     sees_bank=lambda path: True, notes=None):
+                     sees_bank=lambda path: True, notes=None, master_muted=False, pass_fails=False):
     """A fake bridge with VocalVST on track 1 and a six-note item (3 s from 2.0 s, at
     120 BPM, so a quarter note is 0.5 s); returns the call log. `notes` replaces the
     item's notes (start and length in quarter notes from the item's start)."""
@@ -486,7 +486,13 @@ def _vocalvst_bridge(tmp_path, monkeypatch, log_on_render=True, sounds_after=Non
         if cmd == "transport":
             return {}
         if cmd == "recording_status":
+            if pass_fails:
+                raise RuntimeError("REAPER went away")
             return {"playing": False}
+        if cmd == "get_project_overview":
+            return {"master": {"mute": master_muted}, "tracks": [{"number": 1, "name": "Vocal"}]}
+        if cmd == "set_track_properties":
+            return {}
         if cmd == "render_audio":
             import numpy as np
             import soundfile as sf
@@ -668,6 +674,36 @@ def test_voicebank_roots_include_packaged_app_caches(tmp_path, monkeypatch):
     cache.mkdir(parents=True)
     monkeypatch.setattr(vocal_tools, "VOICEBANK_ROOT", local / "VocalVST" / "voicebanks")
     assert vocal_tools.voicebank_roots() == [local / "VocalVST" / "voicebanks", cache]
+
+
+def test_render_vocalvst_mutes_the_master_only_for_the_pass(tmp_path, monkeypatch):
+    from creaper import vocal_tools
+
+    calls, _ = _vocalvst_bridge(tmp_path, monkeypatch)
+    vocal_tools.render_vocalvst(track=1)
+    mutes = [(i, kw["mute"]) for i, (c, kw) in enumerate(calls) if c == "set_track_properties"]
+    play = next(i for i, (c, kw) in enumerate(calls) if c == "transport")
+    render = next(i for i, (c, kw) in enumerate(calls) if c == "set_fx_parameter" and kw["parameter"] == "Render")
+    assert [m for _, m in mutes] == [True, False]
+    assert mutes[0][0] < play < mutes[1][0] < render
+    assert all(kw["track"] == "master" for c, kw in calls if c == "set_track_properties")
+
+
+def test_render_vocalvst_puts_the_master_back_when_the_pass_fails(tmp_path, monkeypatch):
+    from creaper import vocal_tools
+
+    calls, _ = _vocalvst_bridge(tmp_path, monkeypatch, pass_fails=True)
+    with pytest.raises(RuntimeError):
+        vocal_tools.render_vocalvst(track=1)
+    assert [kw["mute"] for c, kw in calls if c == "set_track_properties"] == [True, False]
+
+
+def test_render_vocalvst_leaves_a_muted_master_muted(tmp_path, monkeypatch):
+    from creaper import vocal_tools
+
+    calls, _ = _vocalvst_bridge(tmp_path, monkeypatch, master_muted=True)
+    vocal_tools.render_vocalvst(track=1)
+    assert not [c for c, _ in calls if c == "set_track_properties"]
 
 
 def test_vocalvst_counts_as_an_installed_singer(monkeypatch):

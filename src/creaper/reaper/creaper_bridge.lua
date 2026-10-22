@@ -1,6 +1,6 @@
 -- @description creaper bridge: lets Claude work in REAPER through the creaper MCP server
 -- @author nickcapron
--- @version 0.35.6
+-- @version 0.35.7
 -- @link https://github.com/nickcapron/creaper
 -- @provides
 --   [nomain] creaper_json.lua
@@ -13,7 +13,7 @@
 --   Every change it makes is a named undo point ("creaper: ..."), so Ctrl+Z
 --   reverts anything Claude did.
 
-local BRIDGE_VERSION = "0.35.6"
+local BRIDGE_VERSION = "0.35.7"
 local PROTOCOL = 2
 
 ----------------------------------------------------------------------- JSON
@@ -231,7 +231,8 @@ local function track_summary(t)
     name = track_name(t),
     volume_db = amp_to_db(reaper.GetMediaTrackInfo_Value(t, "D_VOL")),
     pan = round(reaper.GetMediaTrackInfo_Value(t, "D_PAN"), 3),
-    mute = reaper.GetMediaTrackInfo_Value(t, "B_MUTE") == 1,
+    -- The master reports its mute through GetMasterMuteSoloFlags, not B_MUTE.
+    mute = master and (reaper.GetMasterMuteSoloFlags() & 1 ~= 0) or (not master and reaper.GetMediaTrackInfo_Value(t, "B_MUTE") == 1),
     fx = fx,
   }
   if not master then
@@ -1298,6 +1299,7 @@ function commands.set_track_properties(p)
     if p.name then reaper.GetSetMediaTrackInfo_String(t, "P_NAME", p.name, true) end
     if p.volume_db then reaper.SetMediaTrackInfo_Value(t, "D_VOL", db_to_amp(p.volume_db)) end
     if p.pan then reaper.SetMediaTrackInfo_Value(t, "D_PAN", math.max(-1, math.min(1, p.pan))) end
+    -- B_MUTE sets the master's mute too, though reading it back needs GetMasterMuteSoloFlags.
     if p.mute ~= nil then reaper.SetMediaTrackInfo_Value(t, "B_MUTE", p.mute and 1 or 0) end
     if p.solo ~= nil then reaper.SetMediaTrackInfo_Value(t, "I_SOLO", p.solo and 2 or 0) end
     if p.color then set_color(t, p.color) end

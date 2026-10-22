@@ -851,6 +851,21 @@ def vocalvst_pass_span(items: list[dict], parts: list[dict]) -> tuple[float, flo
     return max(0.0, start - PASS_LEAD_SECONDS), end + PASS_TAIL_SECONDS
 
 
+def _silent_pass(start: float, end: float) -> bool:
+    """Plays the transport over the span for the plugin's capture, with the master muted
+    so the whole song doesn't come out of the speakers, then puts the master back exactly
+    as it was (a master the user had muted stays muted), whatever happens in between."""
+    was_muted = bool((call("get_project_overview").get("master") or {}).get("mute"))
+    if not was_muted:
+        call("set_track_properties", track="master", mute=True)
+    try:
+        call("transport", action="play", start_seconds=start, end_seconds=end)
+        return _wait_for_stop(end - start)
+    finally:
+        if not was_muted:
+            call("set_track_properties", track="master", mute=False)
+
+
 def _wait_for_stop(expected_seconds: float) -> bool:
     """True when REAPER stopped at the end of the pass itself; False when it had to be
     stopped after running half as long again (a slow or backgrounded REAPER)."""
@@ -949,8 +964,9 @@ def render_vocalvst(
     timeout_seconds: Annotated[float, Field(ge=30, le=900, description="How long to wait for the render")] = 240,
 ) -> dict:
     """Makes VocalVST (the user's singing plugin) sing the MIDI on its track: sets the
-    lyrics and mode, plays the transport over every note on the track so the plugin
-    records them (it can't sing live: audition_instrument hears silence; an item whose
+    lyrics and mode, plays the transport over every note on the track, silently (the
+    master is muted for the pass and put back), so the plugin records them (it can't
+    sing live: audition_instrument hears silence; an item whose
     notes run past its end is lengthened first, since REAPER plays nothing outside an
     item), then renders the phrase offline and waits for the result. Afterwards the
     vocal plays in sync with the transport and in offline renders (analyze_audio,
@@ -1016,8 +1032,7 @@ def render_vocalvst(
     # The pass: the plugin records only what the transport plays through it, by position,
     # so it has to run past the last note, not just the items' ends.
     start, end = vocalvst_pass_span(items, parts)
-    call("transport", action="play", start_seconds=start, end_seconds=end)
-    stopped_itself = _wait_for_stop(end - start)
+    stopped_itself = _silent_pass(start, end)
     captured = vocalvst_captured(call("capture_fx_state", track=track, fx=fx["index"])["chunk"])
     if not captured["notes"]:
         raise ValueError("VocalVST recorded no notes during the pass: check the track isn't muted, the item is "
