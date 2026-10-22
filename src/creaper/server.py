@@ -85,9 +85,9 @@ When the user complains, measure before changing anything:
   role and genre (find_arturia_presets to browse); layer.
 - stiff, robotic, mechanical: check_groove; apply_feel with the role and genre feel.
 - out of tune: check_tuning; audition_sounds reports each patch's tuning.
-- clipping, distorted, squashed: analyze_audio (clipped_runs, crest); master_to_target
-  reports limiter_gr_db and the peakiest parts when the mix needs density: auto_mix's
-  dynamics stage (or compress those parts), then master again, or a lower target.
+- clipping, distorted, squashed: analyze_audio (clipped_runs, crest). When
+  master_to_target stops short, re-running it or limiting single tracks changes nothing:
+  auto_mix's dynamics stage, or a lower target.
 - flat, doesn't build: measure_structure (section loudness against its role).
 - can't understand the words: check_vocal_clarity.
 Work out whether it's the tuning, the sound, the notes or the level, fix that one thing,
@@ -1632,6 +1632,9 @@ def master_to_target(
     glue_compressor: Annotated[str | None, Field(description="Bus compressor to use for glue, e.g. the user's 'Bus FORCE' or 'Comp VCA-65'; default ReaComp")] = None,
     glue_db: Annotated[float, Field(ge=0.5, le=6, description="How much the glue compressor should tame the peaks, in dB")] = 1.5,
     eq: Annotated[str | None, Field(description="Also put this EQ first on the master (added flat, for shaping tone), e.g. 'EQ SITRAL-295'")] = None,
+    clip: Annotated[bool, Field(description=(
+        "When the limiter alone can't reach the target, let a soft clipper before it round the mix's peaks "
+        "(as little as gets there, at most ~3 dB); off for styles that should breathe"))] = True,
     start_bar: Bar = None,
     end_bar: Annotated[float | None, Field(description="Measure only this range (e.g. the loudest section) to save time")] = None,
     passes: Annotated[int, Field(ge=1, le=5)] = 4,
@@ -1645,10 +1648,13 @@ def master_to_target(
     measurement so the glue takes about glue_db off the peaks. Then the limiter and
     master fader are adjusted until the integrated loudness is within 0.5 LU of the
     target, and the true peak is checked against the ceiling. The limiter never does
-    more than about 5 dB of gain reduction: if the target needs more, it stops there and
-    names the peakiest parts to compress (the mix needs density, not more limiting); a
-    sparse mix (peaks over 12 dB above its loudness) aims for the quiet end of the
-    style's range. Each step renders the range, so a short loud section is much faster
+    more than about 5 dB of gain reduction. When that alone can't reach the target, a
+    soft clipper before it (REAPER's JS Soft Clipper/Limiter) rounds the mix's peaks, as
+    little as gets there and at most about 3 dB (clip=False, or a style that should
+    breathe, keeps it off); if the target still needs more, it stops there and names the
+    peakiest parts to compress (the mix needs density, not more limiting); a sparse mix
+    (peaks over 12 dB above its loudness) aims for the quiet end of the style's range.
+    Each step renders the range, so a short loud section is much faster
     than the whole song.
     First it checks the mix (with any limiter and glue already on the master bypassed)
     and refuses, changing nothing, when it clips, when the whole song never changes level
@@ -1656,15 +1662,17 @@ def master_to_target(
     style: mastering would only make those worse. Fix the
     mix, or pass force=True when the user wants it mastered anyway."""
     from . import batch
+    from .mix_tools import GENTLE_FAMILIES, SOFT_CLIPPER
 
     profile_style = styles.find_style(style) if style else None
+    clip_allowed = clip and not (profile_style and profile_style.family in GENTLE_FAMILIES)
     target_given = target_lufs
     glue_span = None
     if not force:
-        # The mix as it reaches the master chain: a limiter or glue left by an earlier run
-        # would flatten the loudness range this check is about.
+        # The mix as it reaches the master chain: a limiter, clipper or glue left by an
+        # earlier run would flatten the loudness range this check is about.
         earlier = [f for f in call("get_track_details", track="master").get("fx", [])
-                   if "(bypassed)" not in f["name"] and ("ReaLimit" in f["name"] or (
+                   if "(bypassed)" not in f["name"] and ("ReaLimit" in f["name"] or "Soft Clipper" in f["name"] or (
                        glue_compressor or "ReaComp").lower() in f["name"].lower())]
         for f in earlier:
             call("update_fx", track="master", fx=f["index"], enabled=False)
@@ -1742,8 +1750,27 @@ def master_to_target(
     lim = limiter["index"]
     call("set_fx_parameters", track="master", fx=lim, changes=[{"parameter": "Ceiling", "display_value": ceiling_dbtp}])
     threshold = _number(call("get_fx_parameters", track="master", fx=lim, search="Threshold")["parameters"][0]["display"])
-    # What reaches the limiter (after the EQ and glue): ReaLimit's threshold is the gain
-    # into its ceiling, so its gain reduction on the peaks is about pre_peak - threshold.
+    # A clipper left by an earlier run stays off until this run's plan wants it.
+    clipper = find_fx("Soft Clipper")
+    if clipper:
+        call("update_fx", track="master", fx=clipper["index"], enabled=False)
+
+    def set_clipper(boost_db: float) -> int:
+        """The soft clipper (added before the limiter if there's none) set to boost_db into
+        its brickwall at 0 dBFS and switched on; returns the limiter's index, which moves
+        when the clipper is inserted."""
+        nonlocal clipper
+        if clipper is None:
+            clipper = insert_before_limiter(SOFT_CLIPPER)
+        call("set_fx_parameters", track="master", fx=clipper["index"], changes=[
+            {"parameter": "Boost (dB)", "display_value": boost_db},
+            {"parameter": "Output Brickwall (dB)", "display_value": 0}])
+        call("update_fx", track="master", fx=clipper["index"], enabled=True)
+        return find_fx("ReaLimit")["index"]
+
+    # What reaches the limiter (after the EQ and glue, before any clipping): ReaLimit's
+    # threshold is the gain into its ceiling, so its gain reduction on the peaks is about
+    # pre_peak - threshold.
     call("update_fx", track="master", fx=lim, enabled=False)
     _master_checks_paused[0] += 1
     try:
@@ -1793,16 +1820,29 @@ def master_to_target(
 
     model = None
     ceiling_now = ceiling_dbtp
+    limited_peak = pre_peak     # the peak the limiter sees: after the clipper, when there is one
     if pre_take is not None:
         state = {"threshold": threshold, "fader": fader, "ceiling": ceiling_dbtp}
         try:
             model = _limiter_by_model(pre_take, float(start_fader), target_lufs, ceiling_dbtp, min_threshold, lim,
-                                      passes, measure_pass, history, state)
+                                      passes, measure_pass, history, state,
+                                      clipper=set_clipper if clip_allowed else None)
         except Exception as e:  # noqa: BLE001 - the step-by-step search below still works
             result["model_note"] = f"the limiter model couldn't run ({e}); searched step by step"
             model = None
         # Carry on from what's actually set, whatever happened.
         threshold, fader, ceiling_now = state["threshold"], state["fader"], state["ceiling"]
+        lim = find_fx("ReaLimit")["index"]          # an inserted clipper moves it
+        if state.get("clip"):
+            clipped = state["clip"]
+            limited_peak = clipped["peak_db"]
+            min_threshold = limited_peak - LIMITER_MAX_GR_DB
+            result["clipper"] = {"plugin": clipper["name"], "boost_db": clipped["boost_db"],
+                                 "peaks_over_brickwall_db": clipped["over_db"], "peak_shaved_db": clipped["peak_shaved_db"],
+                                 "note": "the limiter alone couldn't reach the target: the mix's peaks are rounded "
+                                         "before it, as little as gets there"}
+        elif clipper:
+            result["clipper"] = {"plugin": clipper["name"], "bypassed": "the limiter alone reaches the target"}
         pre_take = None
     if model is not None:
         capped = model["capped"]
@@ -1849,15 +1889,19 @@ def master_to_target(
         final = history[-1]
     result["passes"] = history
     result["reached"] = abs(final["integrated_lufs"] - target_lufs) <= 0.5
-    if pre_peak is not None:
-        result["limiter_gr_db"] = round(max(0.0, pre_peak - threshold), 1)
+    if limited_peak is not None:
+        result["limiter_gr_db"] = round(max(0.0, limited_peak - threshold), 1)
     if capped and not result["reached"]:
+        shaved = (result.get("clipper") or {}).get("peak_shaved_db")
+        done = (f"{shaved:g} dB of its peaks are soft-clipped and the limiter takes {LIMITER_MAX_GR_DB:g} dB more"
+                if shaved else f"more than {LIMITER_MAX_GR_DB:g} dB of limiting")
         result["limited_at"] = (
-            f"stopped at {final['integrated_lufs']:g} LUFS, the loudest this mix takes: more than "
-            f"{LIMITER_MAX_GR_DB:g} dB of limiting flattens the hits and sounds like clipping. This master is "
-            f"finished as it is; don't re-run it at a lower target. Louder needs density in the mix: compress the "
-            f"peakiest parts (below) and keep each one as loud as it was (measure_tracks before and after; don't "
-            f"raise other parts to make up), then master again")
+            f"stopped at {final['integrated_lufs']:g} LUFS, the loudest this mix takes: {done}; past that the hits "
+            f"flatten and it sounds like clipping. This master is finished as it is: re-running it at this target "
+            f"changes nothing, and limiters on single tracks don't move the mix's peaks. Louder needs density in "
+            f"the mix: compress the drums 2-3 dB (auto_mix's dynamics stage) and the peakiest parts (below; risers "
+            f"and impacts are left out), keeping each as loud as it was (measure_tracks before and after), then "
+            f"master again, or keep this level")
         try:
             result["peakiest_parts"] = _peakiest_parts(start_bar, end_bar)
         except Exception:  # noqa: BLE001 - the advice is a bonus
@@ -1938,17 +1982,28 @@ MODEL_RENDERS = 3   # the limiter model's checks: a render to confirm, a correct
 
 
 def _limiter_by_model(pre_take, start_fader: float, target_lufs: float, ceiling_db: float, min_threshold: float,
-                      lim: int, passes: int, measure_pass, history: list, state: dict) -> dict:
+                      lim: int, passes: int, measure_pass, history: list, state: dict, clipper=None) -> dict:
     """Sets ReaLimit from a model run on the pre-limiter render (batch.plan_limiter):
     the threshold and fader for the target, the ceiling lowered when the model sees true
     peaks over it, then a render to check. A miss of more than 0.5 LU is corrected by the
     difference between model and render, and checked again (MODEL_RENDERS at most).
-    state ({'threshold', 'fader', 'ceiling'}) is kept up to date with what's set, so the
-    caller carries on from it if this stops part way."""
+    clipper: a callable that sets the master's soft clipper to a boost (dB) and returns
+    the limiter's index; when given and the capped limiter alone can't reach the target,
+    the least clipping that lets it (batch.plan_master_clip) is set first and the model
+    runs on the clipped mix. state ({'threshold', 'fader', 'ceiling', and 'clip' when
+    one was set}) is kept up to date with what's set, so the caller carries on from it
+    if this stops part way."""
     from . import batch
 
     _, audio, fs, _ = pre_take
     into = audio * 10 ** (-start_fader / 20)            # rendered after the master fader; the limiter sits before
+    if clipper is not None:
+        clip = batch.plan_master_clip(into, fs, target_lufs, ceiling_db, LIMITER_MAX_GR_DB, start_fader)
+        if clip is not None:
+            into = clip["audio"]
+            min_threshold = clip["peak_db"] - LIMITER_MAX_GR_DB
+            state["clip"] = {k: clip[k] for k in ("boost_db", "over_db", "peak_shaved_db", "peak_db")}
+            lim = clipper(clip["boost_db"])
     model = batch.LimiterModel(into, fs)
     aim, ceiling = target_lufs, ceiling_db
     renders = 0
@@ -1992,13 +2047,15 @@ SPARSE_MIX_PLR_DB = 12.0      # a mix whose peaks sit this far over its loudness
 
 def _peakiest_parts(start_bar: float | None, end_bar: float | None, top: int = 3) -> list[dict]:
     """The tracks whose peaks stand furthest over their loudness (peak minus max short-term
-    LUFS): the ones to compress or clip when the master can't get loud."""
+    LUFS): the ones to compress or clip when the master can't get loud. Risers, impacts
+    and other fx are left out: peaky by nature, and compressing them changes nothing."""
     from .ear_tools import measure_tracks
+    from .mix_tools import role_of
 
     table = measure_tracks(start_bar=start_bar, end_bar=end_bar).get("tracks", {})
     rows = [{"track": name, "peak_to_loudness_db": round(m["peak_dbfs"] - m["lufs_playing"], 1)}
             for name, m in table.items() if isinstance(m, dict) and m.get("peak_dbfs") is not None
-            and m.get("lufs_playing") is not None]
+            and m.get("lufs_playing") is not None and role_of(name) != "fx"]
     return sorted(rows, key=lambda r: -r["peak_to_loudness_db"])[:top]
 
 

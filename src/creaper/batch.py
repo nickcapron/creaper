@@ -460,3 +460,54 @@ def plan_limiter(audio: np.ndarray, fs: int, target_lufs: float, ceiling_db: flo
     return {"threshold": round(threshold, 2), "fader": round(fader, 2),
             "lufs": round(m.lufs(threshold, ceiling_db, fader), 2),
             "true_peak": analysis._db(tp), "capped": threshold <= floor + 0.05 and floor < 0}
+
+
+# REAPER's JS Soft Clipper/Limiter (schwa), as it computes: level in its own dB
+# (SOFT_CLIP_AMP per neper, a hair under 20/ln 10) plus Boost; over a knee that starts
+# SOFT_CLIP_KNEE_DB under the Output Brickwall, the excess is bent (a*x + b*x^2) and
+# capped at the brickwall.
+SOFT_CLIP_AMP = 8.6562
+SOFT_CLIP_KNEE_DB = -9.0
+SOFT_CLIP_A, SOFT_CLIP_B = 1.017, -0.025
+SOFT_CLIP_MAX_BOOST_DB = 9.0
+MASTER_CLIP_OVER_DB = 3.0   # the master's clipper pushes the mix's peaks at most this far over its brickwall
+
+
+def soft_clip(audio: np.ndarray, boost_db: float, brickwall_db: float = 0.0) -> np.ndarray:
+    """REAPER's JS Soft Clipper/Limiter applied to audio, sample by sample: Boost (dB) and
+    Output Brickwall (dB) as on its sliders."""
+    x = np.asarray(audio, dtype=np.float64)
+    with np.errstate(divide="ignore"):
+        level = SOFT_CLIP_AMP * np.log(np.maximum(np.abs(x), 1e-30)) + boost_db
+    knee = SOFT_CLIP_KNEE_DB + brickwall_db
+    over = level - knee
+    bent = SOFT_CLIP_A * over + SOFT_CLIP_B * over * over
+    out = np.where(over > 0, np.minimum(knee + bent, brickwall_db), level)
+    return np.exp(out / SOFT_CLIP_AMP) * np.sign(x)
+
+
+def plan_master_clip(audio: np.ndarray, fs: int, target_lufs: float, ceiling_db: float, cap_db: float,
+                     fader_db: float = 0.0, max_over_db: float = MASTER_CLIP_OVER_DB) -> dict | None:
+    """When the limiter alone (its gain reduction capped at cap_db) can't reach
+    target_lufs, the least soft clipping before it that lets it: the clipper's Boost set
+    so the mix's peaks land over_db over its brickwall at 0 dBFS, tried at 1, 2 ...
+    max_over_db. None when the limiter alone gets there; else {'boost_db', 'over_db',
+    'peak_shaved_db' (how far the peaks came down), 'peak_db' (the clipped peak),
+    'audio' (the clipped mix, for the limiter model), 'capped' (still short at
+    max_over_db)}. audio is what reaches the clipper."""
+    peak = analysis._db(float(np.abs(audio).max()))
+    if not plan_limiter(audio, fs, target_lufs, ceiling_db, peak - cap_db, fader_db)["capped"]:
+        return None
+    plan = None
+    over = 1.0
+    while over <= max_over_db + 1e-9:
+        boost = round(max(0.0, min(SOFT_CLIP_MAX_BOOST_DB, over - peak)), 1)
+        clipped = soft_clip(audio, boost)
+        cpeak = analysis._db(float(np.abs(clipped).max()))
+        limited = plan_limiter(clipped, fs, target_lufs, ceiling_db, cpeak - cap_db, fader_db)
+        plan = {"boost_db": boost, "over_db": over, "peak_shaved_db": round(peak + boost - cpeak, 1),
+                "peak_db": cpeak, "audio": clipped, "capped": limited["capped"]}
+        if not limited["capped"]:
+            break
+        over += 1.0
+    return plan

@@ -272,7 +272,7 @@ def test_the_true_peak_fix_never_raises_the_ceiling_the_model_lowered(monkeypatc
         return {}
 
     monkeypatch.setattr(server, "call", fake_call)
-    server.master_to_target(target_lufs=-12.0, glue=False, force=True, ceiling_dbtp=-1.0)
+    server.master_to_target(target_lufs=-12.0, glue=False, force=True, ceiling_dbtp=-1.0, clip=False)
     after_model = state["ceilings"][1] if len(state["ceilings"]) > 1 else state["ceilings"][0]
     assert all(b <= a + 1e-9 for a, b in zip(state["ceilings"][1:], state["ceilings"][2:]))   # only ever down
     assert state["ceiling"] <= after_model
