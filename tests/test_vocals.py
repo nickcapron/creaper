@@ -435,26 +435,37 @@ def test_vocalvst_state_is_read_and_rewritten_in_place():
 
 
 def _vocalvst_bridge(tmp_path, monkeypatch, log_on_render=True, sounds_after=None, takes_switch=True,
-                     sees_bank=lambda path: True):
-    """A fake bridge with VocalVST on track 1 and a six-note item; returns the call log."""
+                     sees_bank=lambda path: True, notes=None):
+    """A fake bridge with VocalVST on track 1 and a six-note item (3 s from 2.0 s, at
+    120 BPM, so a quarter note is 0.5 s); returns the call log. `notes` replaces the
+    item's notes (start and length in quarter notes from the item's start)."""
     from creaper import vocal_tools
 
-    state = {"chunk": VOCALVST_CHUNK, "renders": 0}
+    state = {"chunk": VOCALVST_CHUNK, "renders": 0, "item_end": 5.0}
     calls = []
     log = tmp_path / "host.log"
     log.write_text("2026-10-20T17:09:05.251-07:00 loaded in Reaper (plugin)\n")
     renders = tmp_path / "renders"
     renders.mkdir()
-    notes = [{"pitch": p, "start": i * 1.0, "length": 0.9, "velocity": 100} for i, p in enumerate((60, 62, 64, 64, 62, 60))]
+    if notes is None:
+        notes = [{"pitch": p, "start": i * 1.0, "length": 0.9, "velocity": 100} for i, p in enumerate((60, 62, 64, 64, 62, 60))]
+
+    def item():
+        return {"id": "{I}", "type": "midi", "muted": False, "start": {"seconds": 2.0, "qn": 4.0, "bar": 2},
+                "end": {"seconds": state["item_end"]}, "length_qn": (state["item_end"] - 2.0) * 2,
+                "length_seconds": state["item_end"] - 2.0}
 
     def fake_call(cmd, **kw):
         calls.append((cmd, kw))
         if cmd == "get_track_details":
             return {"number": 1, "name": "Vocal", "fx": [{"index": 1, "name": "VST3i: VocalVST (vocalvst)"}],
-                    "items": [{"id": "{I}", "type": "midi", "muted": False,
-                               "start": {"seconds": 2.0}, "end": {"seconds": 5.0}}]}
+                    "items": [item()]}
         if cmd == "get_midi_notes":
-            return {"notes": notes, "start": {"qn": 4.0}}
+            return {"notes": notes, **item()}
+        if cmd == "edit_item":
+            assert kw["item_id"] == "{I}" and kw["length_qn"] > 0
+            state["item_end"] = 2.0 + kw["length_qn"] * 0.5
+            return item()
         if cmd == "capture_fx_state":
             return {"plugin": "VST3i: VocalVST (vocalvst)", "file": "vocalvst.vst3", "chunk": state["chunk"]}
         if cmd == "apply_fx_state":
@@ -516,6 +527,56 @@ def test_render_vocalvst_sets_lyrics_plays_the_pass_then_renders(tmp_path, monke
     assert cmds.index("render_audio") < cmds.index("set_fx_parameter", cmds.index("set_fx_parameter") + 1)
     assert out["result"].startswith("Rendered: 1 phrase") and out["captured"]["notes"] == 6
     assert out["lyrics"] == "we ride at dawn to night" and "warning" not in out
+
+
+def test_vocalvst_pass_span_reaches_the_last_note():
+    from creaper.vocal_tools import vocalvst_pass_span
+
+    items = [{"start": {"seconds": 2.0}, "end": {"seconds": 5.0}}]        # 6 quarter notes at 120 BPM
+    inside = {"notes": [{"start": 0.0, "length": 1.0}, {"start": 4.0, "length": 1.5}],
+              "length_qn": 6.0, "length_seconds": 3.0}
+    assert vocalvst_pass_span(items, [inside]) == (1.7, 5.5)             # the item bounds, with lead and tail
+    beyond = {"notes": [{"start": 0.0, "length": 1.0}, {"start": 10.0, "length": 1.9},
+                        {"start": 20.0, "length": 1.0, "muted": True}],  # a muted note doesn't count
+              "length_qn": 6.0, "length_seconds": 3.0}
+    start, end = vocalvst_pass_span(items, [beyond])
+    assert (start, end) == (1.7, 2.0 + 11.9 * 0.5 + 0.5)                  # past the item end, to the last note
+    assert vocalvst_pass_span([{"start": {"seconds": 0.1}, "end": {"seconds": 1.0}}], [{"notes": []}]) == (0.0, 1.5)
+
+
+def test_render_vocalvst_lengthens_the_item_and_plays_past_its_old_end(tmp_path, monkeypatch):
+    from creaper import vocal_tools
+
+    # Six notes two beats apart: the last ends at 11.9 quarter notes, in a six-quarter-note item.
+    notes = [{"pitch": 60 + i, "start": i * 2.0, "length": 1.9, "velocity": 100} for i in range(6)]
+    calls, _ = _vocalvst_bridge(tmp_path, monkeypatch, notes=notes)
+    out = vocal_tools.render_vocalvst(track=1, lyrics="one two three four five six")
+    edit = next(kw for c, kw in calls if c == "edit_item")
+    assert edit == {"item_id": "{I}", "length_qn": 12}                   # the last note ends inside, a beat spare
+    play = next(kw for c, kw in calls if c == "transport")
+    assert (play["start_seconds"], play["end_seconds"]) == (1.7, 8.5)    # the lengthened item's end, plus the tail
+    assert out["pass"] == {"from_seconds": 1.7, "to_seconds": 8.5} and out["captured"]["notes"] == 6
+    assert "{I} to 8.0 s" in out["extended_items"]
+
+
+def test_render_vocalvst_reports_a_partial_capture_as_an_error(tmp_path, monkeypatch):
+    from creaper import vocal_tools
+
+    # Eight notes on the track; the plugin's state (VOCALVST_CHUNK) holds six captured.
+    notes = [{"pitch": 60, "start": i * 1.0, "length": 0.9, "velocity": 100} for i in range(8)]
+    calls, _ = _vocalvst_bridge(tmp_path, monkeypatch, notes=notes)
+    with pytest.raises(ValueError, match=r"captured 6 of the track's 8 notes .* 2 were missed"):
+        vocal_tools.render_vocalvst(track=1)
+    assert ("set_fx_parameter", {"track": 1, "fx": 1, "parameter": "Render", "display_text": "On"}) not in calls
+    assert "transport" in [c for c, _ in calls]                          # the pass did run, over the whole item
+
+
+def test_render_vocalvst_refuses_a_note_before_its_item(tmp_path, monkeypatch):
+    from creaper import vocal_tools
+
+    _vocalvst_bridge(tmp_path, monkeypatch, notes=[{"pitch": 60, "start": -1.0, "length": 0.5, "velocity": 100}])
+    with pytest.raises(ValueError, match=r"item \{I\} .* bar 2 .* 1.00 quarter notes before it"):
+        vocal_tools.render_vocalvst(track=1)
 
 
 def test_render_vocalvst_holds_notes_with_plus_and_checks_the_count(tmp_path, monkeypatch):

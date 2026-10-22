@@ -5,6 +5,7 @@ melody's notes, and a vocoder makes a synth playing the melody sing them)."""
 from __future__ import annotations
 
 import base64
+import math
 import os
 import random
 import re
@@ -795,6 +796,61 @@ def _vocalvst_fx(track: str | int) -> tuple[dict, list[dict]]:
     return fx, items
 
 
+PASS_LEAD_SECONDS = 0.3
+PASS_TAIL_SECONDS = 0.5
+
+
+def _note_extent_qn(part: dict) -> tuple[float, float] | None:
+    """Where an item's unmuted notes start and end, in quarter notes from the item's start."""
+    notes = [n for n in part.get("notes", []) if not n.get("muted")]
+    if not notes:
+        return None
+    return min(n["start"] for n in notes), max(n["start"] + n["length"] for n in notes)
+
+
+def _cover_notes(item: dict, part: dict) -> float | None:
+    """Lengthens a MIDI item whose notes run past its end, so REAPER plays them all; the
+    item's new end goes back into `item`. Returns the new length in quarter notes, or
+    None when the item already held its notes. add_midi_notes keeps an item at its
+    creation length unless it extends it, so a melody written in several calls can
+    outgrow its item, and REAPER plays nothing outside an item."""
+    extent = _note_extent_qn(part)
+    if extent is None:
+        return None
+    first, last = extent
+    length_qn = part.get("length_qn", item.get("length_qn"))
+    if first < -ONSET_TOLERANCE:
+        raise ValueError(f"item {item['id']} on the track starts at bar {item['start'].get('bar', '?')} but a note "
+                         f"begins {-first:.2f} quarter notes before it, where REAPER won't play it: move the item "
+                         "or the note (edit_item, edit_midi_notes), then call again")
+    if length_qn is None or last <= length_qn + 1e-6:
+        return None
+    new_length = math.floor(last) + 1          # the last note ends inside the item, with a beat to spare
+    info = call("edit_item", item_id=item["id"], length_qn=new_length)
+    for key in ("end", "length_qn", "length_seconds"):
+        if key in info:
+            item[key] = info[key]
+    return float(new_length)
+
+
+def vocalvst_pass_span(items: list[dict], parts: list[dict]) -> tuple[float, float]:
+    """Where the transport pass runs, in seconds: from the first item or note, less a
+    lead, to the last item end or note end, plus a tail. Note times are placed with the
+    item's own quarter-note-to-seconds ratio, so across a tempo change they are
+    approximate; that only ever lengthens the pass."""
+    start = min(i["start"]["seconds"] for i in items)
+    end = max(i["end"]["seconds"] for i in items)
+    for item, part in zip(items, parts):
+        extent = _note_extent_qn(part)
+        length_qn, length_s = part.get("length_qn"), part.get("length_seconds")
+        if extent is None or not length_qn or not length_s:
+            continue
+        per_qn = length_s / length_qn
+        start = min(start, item["start"]["seconds"] + extent[0] * per_qn)
+        end = max(end, item["start"]["seconds"] + extent[1] * per_qn)
+    return max(0.0, start - PASS_LEAD_SECONDS), end + PASS_TAIL_SECONDS
+
+
 def _wait_for_stop(expected_seconds: float) -> bool:
     """True when REAPER stopped at the end of the pass itself; False when it had to be
     stopped after running half as long again (a slow or backgrounded REAPER)."""
@@ -893,17 +949,25 @@ def render_vocalvst(
     timeout_seconds: Annotated[float, Field(ge=30, le=900, description="How long to wait for the render")] = 240,
 ) -> dict:
     """Makes VocalVST (the user's singing plugin) sing the MIDI on its track: sets the
-    lyrics and mode, plays the transport over the item so the plugin records the notes
-    (it can't sing live: audition_instrument hears silence), then renders the phrase
-    offline and waits for the result. Afterwards the vocal plays in sync with the
-    transport and in offline renders (analyze_audio, export_mix). It's a clean sung
-    voice: for growls or shrieks add distortion after it. Call it again after the notes
-    or lyrics change, and after reopening a saved project (the capture is saved, the
-    rendered audio isn't). Needs a monophonic line: one note per syllable, no chords."""
+    lyrics and mode, plays the transport over every note on the track so the plugin
+    records them (it can't sing live: audition_instrument hears silence; an item whose
+    notes run past its end is lengthened first, since REAPER plays nothing outside an
+    item), then renders the phrase offline and waits for the result. Afterwards the
+    vocal plays in sync with the transport and in offline renders (analyze_audio,
+    export_mix). It's a clean sung voice: for growls or shrieks add distortion after
+    it. Call it again after the notes or lyrics change, and after reopening a saved
+    project (the capture is saved, the rendered audio isn't). Needs a monophonic line:
+    one note per syllable, no chords."""
     fx, items = _vocalvst_fx(track)
     line: list[dict] = []
+    parts: list[dict] = []
+    extended: list[str] = []
     for item in items:
-        line += melody_line(call("get_midi_notes", item_id=item["id"], limit=20000).get("notes", []))
+        part = call("get_midi_notes", item_id=item["id"], limit=20000)
+        parts.append(part)
+        line += melody_line(part.get("notes", []))
+        if _cover_notes(item, part) is not None:
+            extended.append(f"{item['id']} to {item['end'].get('seconds', '?')} s")
     if not line:
         raise ValueError("the track's MIDI items have no notes to sing")
     text = " ".join(singer_syllables(lyrics, line, hold="+")) if lyrics else ""
@@ -949,9 +1013,9 @@ def render_vocalvst(
                              "the plugin's window (update_fx with show=True), then call again")
     call("set_fx_parameter", track=track, fx=fx["index"], parameter="Mode", display_text=mode.capitalize())
 
-    # The pass: the plugin records only what the transport plays through it, by position.
-    start = max(0.0, items[0]["start"]["seconds"] - 0.3)
-    end = max(i["end"]["seconds"] for i in items) + 0.5
+    # The pass: the plugin records only what the transport plays through it, by position,
+    # so it has to run past the last note, not just the items' ends.
+    start, end = vocalvst_pass_span(items, parts)
     call("transport", action="play", start_seconds=start, end_seconds=end)
     stopped_itself = _wait_for_stop(end - start)
     captured = vocalvst_captured(call("capture_fx_state", track=track, fx=fx["index"])["chunk"])
@@ -962,6 +1026,12 @@ def render_vocalvst(
         raise ValueError(f"REAPER didn't reach the end of the pass in time and was stopped with {captured['notes']} "
                          f"of {len(line)} notes captured. If REAPER was in the background with its audio device "
                          "closed (Preferences > Audio), bring it to the front, then call again")
+    if captured["notes"] < len(line):
+        missed = len(line) - captured["notes"]
+        raise ValueError(f"VocalVST captured {captured['notes']} of the track's {len(line)} notes over the pass "
+                         f"({start:.1f} s to {end:.1f} s): {missed} were missed, so the phrase wasn't rendered. "
+                         "Check that every note sits inside an unmuted item on this track and nothing else "
+                         "silences the track partway (a muted item, an automation lane), then call again")
 
     log_size = VOCALVST_LOG.stat().st_size if VOCALVST_LOG.exists() else 0
     span = (captured["from_seconds"], captured["to_seconds"] + 1.0)
@@ -970,6 +1040,7 @@ def render_vocalvst(
     _wait_for_render_switch(track, fx["index"])
     report = _wait_for_render(log_size, timeout_seconds, before, lambda: _track_audio(track, *span))
     out = {"track": track, "mode": mode, "lyrics": text or None, "written_notes": len(line), "captured": captured,
+           "pass": {"from_seconds": round(start, 3), "to_seconds": round(end, 3)},
            "voicebank": Path(bank).name, "result": report,
            "plays": "in sync with the transport over the captured region, and in offline renders (analyze_audio, "
                     "measure_tracks, export_mix); not in audition_instrument",
@@ -977,7 +1048,9 @@ def render_vocalvst(
                    "to the notes or lyrics"}
     if not report.startswith("Rendered"):
         out["warning"] = "the plugin reports: " + report
-    if captured["notes"] != len(line):
+    if extended:
+        out["extended_items"] = "lengthened to hold their notes, which ran past their ends: " + ", ".join(extended)
+    if captured["notes"] > len(line):
         out["note"] = (f"the plugin captured {captured['notes']} notes but the items hold {len(line)}: overlapping "
                        "notes are cut and chords keep their top note, so the syllables may have shifted")
     elif not stopped_itself:
