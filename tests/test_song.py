@@ -308,8 +308,11 @@ def test_check_song_renders_once_and_keeps_a_baseline(reaper, tmp_path):
                           sections=["Verse 1:8", "Chorus 1:8", "Verse 2:8", "Chorus 2:8"])
     reaper.render_audio = _song_audio()
     card = song_tools.check_song(genre="pop")
-    renders = [c for c, _ in reaper.calls if c == "render_audio"]
-    assert len(renders) == 1
+    renders = [a for c, a in reaper.calls if c == "render_audio"]
+    # The master once, and the lead's busiest section (at most 16 bars) for its tuning.
+    assert [a.get("track") for a in renders].count("master") == 1 and len(renders) == 2
+    lead = next(a for a in renders if a.get("track") != "master")
+    assert lead["end_bar"] - lead["start_bar"] <= song_tools.TUNING_BARS
     assert 0 <= card["score"] <= 10 and card["checks"]
     assert {r["stage"] for r in card["checks"]} >= {"form", "parts", "transitions", "mix", "master"}
     assert all(r["status"] in ("pass", "warn", "fail") for r in card["checks"])

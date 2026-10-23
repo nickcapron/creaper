@@ -1,4 +1,5 @@
 """auto_mix's plan: roles, levels, EQ, compression, panning, sends, sidechains."""
+from creaper import mix_tools
 from creaper.mix_tools import plan_mix, role_of
 
 
@@ -10,6 +11,20 @@ def test_roles_from_names_and_sound():
     low = {"bands": {"sub (20-60 Hz)": {"share_pct": 40}, "bass (60-250 Hz)": {"share_pct": 35}}}
     assert role_of("Track 7", low) == "bass"
     assert role_of("Track 8", {"bands": {}, "spectral_centroid_hz": 6000}) == "perc"
+
+
+def test_roles_for_orchestral_ambient_and_odd_kits():
+    """Names from the sessions where auto_mix guessed wrong and buried the featured part."""
+    assert role_of("Lead Violin") == "lead" and role_of("Sax Solo") == "lead" and role_of("Main Theme") == "lead"
+    assert role_of("Violin II") == "pad" and role_of("Low Cello") == "pad" and role_of("Drone") == "pad"
+    assert role_of("Pizz Strings") == "keys" and role_of("French Horn") == "keys" and role_of("Bassoon") == "keys"
+    assert role_of("Flute") == "lead" and role_of("Contrabass") == "bass"
+    low = {"bands": {"sub (20-60 Hz)": {"share_pct": 40}, "bass (60-250 Hz)": {"share_pct": 35}}}
+    assert role_of("City Hum", low) == "fx" and role_of("Passing Cars", low) == "fx"
+    assert role_of("Wall Voices", low) != "vocal" and role_of("Robot Voice") == "vocal"
+    assert role_of("Guns", low, kit=True) == "drums" and role_of("Guns", low) == "bass"
+    assert mix_tools.is_kit(["kick - 909 Kick", "snare - Clap 2", "JS: Volume"])
+    assert not mix_tools.is_kit(["VSTi: ReaSamplOmatic5000 (Cockos)"] * 4 + ["VST3: Pro-Q 3 - x (FabFilter)"])
 
 
 def channel(name, role, level, **kw):

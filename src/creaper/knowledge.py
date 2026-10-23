@@ -7,14 +7,44 @@ can read, edit or delete it.
 from __future__ import annotations
 
 import datetime as dt
+import re
+import time
 import uuid
 from pathlib import Path
 
-from . import jsonstore
+from . import __version__, jsonstore
 
 TOPICS = ("plugin", "preference", "mix", "sound", "project", "other")
 MAX_NOTE_CHARS = 600     # a lesson, not a document: a long note is more likely pasted-in text
 MAX_NOTES = 300          # the oldest go when there are more
+# A note naming one of creaper's tools (snake_case, like auto_mix) describes how that tool
+# behaved then: "auto_mix chokes on VocalVST tracks" kept steering Claude to mix by hand
+# for days after the fix.
+TOOL_WORDS = re.compile(r"\b[a-z]+_[a-z_]+\b|\bcreaper\b|\bvocalvst\b", re.I)
+
+
+def _version(v: str | None) -> tuple:
+    try:
+        return tuple(int(x) for x in (v or "").split("."))
+    except ValueError:
+        return ()
+
+
+def staleness(note: dict) -> str | None:
+    """Why a note about creaper's own tools may be out of date, or None. Taste notes
+    (topic preference) don't age with the tools."""
+    if note.get("topic") == "preference" or not TOOL_WORDS.search(note.get("text", "")):
+        return None
+    saved = note.get("creaper")
+    if saved and _version(saved) >= _version(__version__):
+        return None
+    when = f"under creaper {saved}" if saved else "before creaper recorded versions (older than 0.36)"
+    return (f"saved {when}; creaper is {__version__} now: a limit, crash or workaround it describes may be "
+            "fixed. Use the tool as documented before working around it")
+
+
+def recent(note: dict, hours: float) -> bool:
+    return time.time() - float(note.get("saved_at") or 0) < hours * 3600
 
 
 class Knowledge:
@@ -44,7 +74,8 @@ class Knowledge:
                 if note["text"].lower() == text.lower() and (note.get("subject") or "").lower() == subject_key:
                     return note
             note = {"id": uuid.uuid4().hex[:8], "topic": topic, "subject": (subject or "").strip() or None,
-                    "text": text, "saved": dt.date.today().isoformat()}
+                    "text": text, "saved": dt.date.today().isoformat(), "saved_at": int(time.time()),
+                    "creaper": __version__}
             notes.append(note)
             del notes[:-MAX_NOTES]
         return note

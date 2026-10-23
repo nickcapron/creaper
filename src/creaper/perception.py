@@ -121,23 +121,68 @@ def masking_verdict(drop: float) -> str:
 
 # --------------------------------------------------------------------- tuning
 
-def note_pitches(audio: np.ndarray, fs: int, notes: list[dict], min_seconds: float = 0.12) -> list[dict]:
+TAIL_SECONDS = 0.5        # a note's release or echo still sounds this long after its note-off
+# A pitch tracker that locks onto an overtone (or a subharmonic) reads a whole interval off,
+# folded into one octave: the 3rd harmonic as a fourth down (-498), the 5th as a major third (+386).
+OVERTONE_CENTS = (498, 386)
+OVERTONE_TOLERANCE = 25
+GLIDE_CENTS = 80          # a note that starts this far from where it settles slid into it
+
+
+def _fold(cents: float) -> float:
+    return (cents + 600) % 1200 - 600
+
+
+def _pitch_at(audio: np.ndarray, fs: int, a: float, b: float, pitch: int) -> float | None:
+    """The MIDI pitch (fractional) heard between a and b seconds, searching from about
+    an octave under the written note (so short windows can still be read)."""
+    fmin = max(40.0, 440 * 2 ** ((pitch - 13 - 69) / 12))
+    hz, clarity = vocal_pitch(audio[max(0, int(a * fs)):int(b * fs)], fs, fmin=fmin, fmax=2000)
+    if not hz or clarity < 0.7:
+        return None
+    return 69 + 12 * math.log2(hz / 440)
+
+
+def note_pitches(audio: np.ndarray, fs: int, notes: list[dict], min_seconds: float = 0.12,
+                 sounding: list[dict] | None = None) -> list[dict]:
     """For each note (start and end in seconds within `audio`, MIDI pitch), the pitch
-    actually sounding and how far off it is in cents, folded into one octave (an
-    octave-up sample is in tune). Notes too short or without a clear pitch are skipped."""
+    sounding in the settled middle of the note (past a slow attack) and how far off it
+    is in cents, folded into one octave (an octave-up sample is in tune).
+    sounding: every note played (chord tones too) when `notes` is only the line. A
+    reading that matches another note still sounding there (a chord tone, the previous
+    note's release or echo) gets reading="another note", and one a whole overtone
+    interval off reading="overtone": neither means the part is out of tune.
+    glide_cents: how far the note's start sits from where it settles (portamento).
+    Notes too short or without a clear pitch are skipped."""
+    sounding = sounding if sounding is not None else notes
     out = []
     for n in notes:
         length = n["end"] - n["start"]
         if length < min_seconds:
             continue
-        a = int((n["start"] + min(0.05, length * 0.2)) * fs)
-        b = a + int(min(length * 0.6, 0.4) * fs)
-        hz, clarity = vocal_pitch(audio[a:b], fs, fmin=40, fmax=2000)
-        if not hz or clarity < 0.7:
+        mid, half = n["start"] + length / 2, max(0.03, min(length * 0.25, 0.2))
+        a, b = mid - half, mid + half
+        played = _pitch_at(audio, fs, a, b, n["pitch"])
+        if played is None:
             continue
-        played = 69 + 12 * math.log2(hz / 440)
-        cents = ((played - n["pitch"]) * 100 + 600) % 1200 - 600
-        out.append({**n, "heard": round(played, 2), "cents": round(cents)})
+        cents = _fold((played - n["pitch"]) * 100)
+        row = {**n, "heard": round(played, 2), "cents": round(cents)}
+        if abs(cents) > 50:
+            others = [m["pitch"] for m in sounding if m["start"] < b and m["end"] + TAIL_SECONDS > a
+                      and m["pitch"] != n["pitch"]]
+            if any(abs(_fold((played - p) * 100)) <= 50 for p in others):
+                row["reading"] = "another note"
+            elif any(abs(abs(cents) - o) <= OVERTONE_TOLERANCE for o in OVERTONE_CENTS):
+                row["reading"] = "overtone"
+        if length >= 0.25:
+            first = _pitch_at(audio, fs, n["start"] + 0.01, n["start"] + 0.07, n["pitch"])
+            # The previous note still ringing reads as that note, exactly: that's a release, not a slide.
+            ringing = first is not None and any(
+                abs((first - m["pitch"]) * 100) <= 30 for m in sounding
+                if m["pitch"] != n["pitch"] and m["start"] < n["start"] and m["end"] + TAIL_SECONDS > n["start"])
+            if first is not None and not ringing:
+                row["glide_cents"] = round((first - played) * 100)
+        out.append(row)
     return out
 
 

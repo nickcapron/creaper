@@ -48,6 +48,40 @@ def test_note_pitches_finds_a_detuned_note():
     got = perception.note_pitches(audio, fs, [{"start": 0.0, "end": 0.5, "pitch": 57},
                                               {"start": 0.5, "end": 1.0, "pitch": 57}])
     assert abs(got[0]["cents"]) <= 3 and 26 <= got[1]["cents"] <= 34
+    assert all("reading" not in g for g in got) and abs(got[1].get("glide_cents", 0)) < 30
+
+
+def _harmonic_tone(hz, seconds, fs=44100, partials=5):
+    t = np.arange(int(seconds * fs)) / fs
+    return sum(np.sin(2 * np.pi * hz * k * t) / k for k in range(1, partials + 1))
+
+
+def test_note_pitches_sets_aside_a_ringing_note_and_an_overtone():
+    """The false alarms of the old check: the previous note still ringing (+500 cents on a
+    part that was fine) and a tracker locked onto the 3rd harmonic."""
+    fs = 44100
+    ringing = np.concatenate([_harmonic_tone(220.0, 0.5), _harmonic_tone(220.0, 0.5) + 0.05 * _harmonic_tone(330.0, 0.5)])  # A3 rings over E4
+    got = perception.note_pitches(ringing, fs, [{"start": 0.0, "end": 0.5, "pitch": 57},
+                                                {"start": 0.5, "end": 1.0, "pitch": 64}])
+    assert "reading" not in got[0] and got[1]["reading"] == "another note"
+    t = np.arange(int(0.6 * fs)) / fs
+    third = np.sin(2 * np.pi * 330.0 * t)                     # only A2's 3rd harmonic sounds
+    got = perception.note_pitches(third, fs, [{"start": 0.0, "end": 0.6, "pitch": 45}])
+    assert got[0]["reading"] == "overtone"
+
+
+def test_note_pitches_reads_past_a_slow_attack_and_hears_a_glide():
+    fs = 44100
+    t = np.arange(int(1.0 * fs)) / fs
+    swell = np.minimum(1.0, t / 0.6) * np.sin(2 * np.pi * 220.0 * t)
+    swell[: int(0.3 * fs)] += 0.3 * np.random.default_rng(0).standard_normal(int(0.3 * fs))  # bow noise first
+    got = perception.note_pitches(swell, fs, [{"start": 0.0, "end": 1.0, "pitch": 57}])
+    assert abs(got[0]["cents"]) <= 5
+    # Portamento: the note starts a whole tone low and slides up over 150 ms.
+    hz = np.where(t < 0.15, 196.0 * (220.0 / 196.0) ** (t / 0.15), 220.0)
+    slide = np.sin(2 * np.pi * np.cumsum(hz) / fs)
+    got = perception.note_pitches(slide, fs, [{"start": 0.0, "end": 1.0, "pitch": 57}])
+    assert abs(got[0]["cents"]) <= 5 and got[0]["glide_cents"] < -perception.GLIDE_CENTS
 
 
 def test_spectrogram_png_is_a_valid_image():

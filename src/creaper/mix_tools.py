@@ -13,13 +13,13 @@ from __future__ import annotations
 import math
 import re
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 import numpy as np
 from pydantic import Field
 
 from . import analysis, genres, plugin_profiles
-from .server import DESTRUCTIVE, Bar, analyze_audio, call, confirm_with_user, setup_sidechain, tool
+from .server import DESTRUCTIVE, Bar, analyze_audio, call, setup_sidechain, tool
 
 # Loudness of each role while it plays (max short-term LUFS), relative to the drums.
 ROLE_LEVELS = {"kick": 0, "drums": 0, "snare": -3, "perc": -9, "bass": -2, "vocal": -1, "lead": -5,
@@ -52,25 +52,35 @@ ROLE_WORDS = [
     ("kick", r"\bkick|\bbd\b|bass ?drum"),
     ("snare", r"snare|clap"),
     ("perc", r"hat|\bhh\b|cymbal|ride|crash|shaker|perc|conga|bongo|tamb|rim\b|tom"),
-    ("bass", r"bass|\bsub\b|808 ?bass"),
-    ("vocal", r"vocal|\bvox|voice|chops?\b|singer|acapella|talk ?box|vocoder|robot"),
+    ("bass", r"bass(?!oon)|\bsub\b|808 ?bass"),
+    ("vocal", r"vocal|\bvox|\bvoice\b|chops?\b|singer|acapella|talk ?box|vocoder|robot"),
     ("drums", r"drum|\bkit\b|909|808|beat"),
-    ("pad", r"\bpad|string|choir|atmos|ambien"),
-    ("keys", r"key|piano|rhodes|clav|organ|\bep\b|wurli|stab|brass|chord|guitar"),
-    ("lead", r"lead|hook|arp|pluck|melody|synth|solo"),
-    ("fx", r"\bfx\b|riser|sweep|impact|noise|downlifter|uplifter|whoosh|transition"),
+    ("pad", r"\bpad"),
+    # A part named as the lead is the lead, whatever plays it ("Lead Violin", "Sax Solo").
+    ("lead", r"\blead\b|\bsolo\b|melody|\btheme\b|hook"),
+    ("keys", r"pizz|staccato|spiccato"),
+    ("pad", r"\bpad|string|violin|viola|cello|fiddle|ensemble|orchestra|choir|atmos|ambien|drone|texture|swell"),
+    ("keys", r"key|piano|rhodes|clav|organ|\bep\b|wurli|stab|brass|horn|trumpet|trombone|tuba|bassoon|woodwind|"
+             r"chord|guitar|harp|marimba|vibraphone|celesta|mallet"),
+    ("lead", r"arp|pluck|synth|flute|clarinet|oboe|\bsax|whistle|ocarina"),
+    ("fx", r"\bfx\b|sfx|riser|sweep|impact|noise|downlifter|uplifter|whoosh|transition|crowd|walla|foley|traffic|"
+           r"\bcars?\b|\brain\b|\bwind\b|\bcity\b|\bhum\b|\bbirds?\b|footsteps?|\bfield\b|room ?tone"),
 ]
+Role = Literal["kick", "snare", "perc", "bass", "vocal", "drums", "lead", "keys", "pad", "fx", "other"]
 DANCE_FAMILIES = {"electronic dance"}
 MELODY_OVER_BED_FAMILIES = {"film and games", "ambient and experimental", "classical"}
 BED_UNDER_LEAD_LU = 3
 
 
-def role_of(name: str, spectrum: dict | None = None) -> str:
-    """A track's job in the mix, from its name, else from its sound."""
+def role_of(name: str, spectrum: dict | None = None, kit: bool = False) -> str:
+    """A track's job in the mix, from its name, else (a sampler drum kit, whatever its
+    lanes are called) from what's on it, else from its sound."""
     n = re.sub(r"\s+(duck|bus)$", "", name.lower())
     for role, pattern in ROLE_WORDS:
         if re.search(pattern, n):
             return role
+    if kit:
+        return "drums"   # "Guns", "Clanks": a kit of hits, not the low-heavy bass its spectrum suggests
     bands = (spectrum or {}).get("bands", {})
     low = sum((bands.get(k) or {}).get("share_pct", 0) for k in ("sub (20-60 Hz)", "bass (60-250 Hz)"))
     if low > 60:
@@ -424,8 +434,14 @@ def _channels() -> list[dict]:
         out.append({"name": name, "track": t["number"], "ref": t.get("guid") or t["number"],
                     "pan": t.get("pan", 0), "volume_db": t.get("volume_db", 0),
                     "has_eq": "eq" in fx, "has_comp": "comp" in fx or "limit" in fx,
-                    "ducked": source is not None or (by_name.get(f"{name} Duck") is not None)})
+                    "ducked": source is not None or (by_name.get(f"{name} Duck") is not None),
+                    "kit": is_kit(t.get("fx", []))})
     return out
+
+
+def is_kit(fx: list[str]) -> bool:
+    """A build_drum_kit track: two or more samplers named for their lanes ("kick - 909 Kick")."""
+    return sum(1 for f in fx if ":" not in f and " - " in f) >= 2
 
 
 COVERING_ROLES = ("keys", "lead", "pad", "other")
@@ -1069,10 +1085,15 @@ def auto_mix(
     section_moves: Annotated[bool, Field(description=(
         "Ride the mix up in sections that should lift but don't (a chorus or drop under 1 LU over the verse "
         "before it), with a gain plugin first on the master; needs the sections as regions"))] = True,
-    dry_run: Annotated[bool, Field(description="Only report what it would do")] = False,
+    roles: Annotated[dict[str, Role] | None, Field(description=(
+        "Each part's job, by track name, where its name doesn't say it: {\"Violin I\": \"lead\", \"City Hum\": "
+        "\"fx\"}. The featured melody is 'lead' (it sits over the other parts); levels follow the roles"))] = None,
+    dry_run: Annotated[bool, Field(description=(
+        "Only report what it would do (it costs the same render as a real run: don't dry-run first)"))] = False,
 ) -> dict:
     """A whole first mix in one call: measures every track (one render pass), works out
-    each one's role, then sets levels for the genre; EQ (high-passes what isn't bass,
+    each one's role (from roles=, else its name, else its sound; the result lists them),
+    then sets levels for the genre; EQ (high-passes what isn't bass,
     a higher one for keys and pads heavy in the lows, low-mid mud cut, kick and bass
     each cut where the other is loudest, presence and air for vocals and leads by their
     measured top end); compresses vocals/bass/leads that need it; narrows a bass or kick
@@ -1098,6 +1119,13 @@ def auto_mix(
     channels = _channels()
     if not channels:
         raise ValueError("no tracks with sound to mix")
+    given = {str(k).strip().lower(): v for k, v in (roles or {}).items()}
+    roles_given = {str(k).strip().lower(): str(k).strip() for k in (roles or {})}
+    unknown = sorted(set(given) - {c["name"].lower() for c in channels})
+    if unknown:   # before the render, not after ten minutes of it
+        raise ValueError(f"roles names tracks that aren't mixed: {', '.join(roles_given[k] for k in unknown)} "
+                         f"(the tracks: "
+                         f"{', '.join(c['name'] for c in channels)})")
     ADDED_COMPRESSORS.clear()
     stems = call("render_stems", timeout=900.0, tracks=[c["track"] for c in channels],
                  start_bar=start_bar, end_bar=end_bar)
@@ -1126,19 +1154,25 @@ def auto_mix(
             c["crest_db"] = m["levels"]["crest_factor_db"]
             c["spectrum"] = m["spectrum"]
             c["stereo"] = m.get("stereo")
-            c["role"] = role_of(c["name"], m["spectrum"])
+            c["role"] = given.get(c["name"].lower()) or role_of(c["name"], m["spectrum"], c.get("kit", False))
     finally:
         for f in stems.get("files", []):
             Path(f).unlink(missing_ok=True)
     for c in channels:
-        c.setdefault("role", role_of(c["name"]))
+        c.setdefault("role", given.get(c["name"].lower()) or role_of(c["name"], kit=c.get("kit", False)))
     spans = _loud_spans(channels, envelopes, stems.get("start", {}).get("seconds", 0.0)) \
         if start_bar is None and end_bar is None else {}
     plan = plan_mix(channels, profile)
-    report = {"style": (profile or {}).get("name"), "plan": plan["channels"], "sidechains": plan["sidechains"]}
+    report = {"style": (profile or {}).get("name"),
+              "roles": {c["name"]: c["role"] + ("" if c["name"].lower() in given else " (guessed)") for c in channels},
+              "roles_note": ("levels follow the roles: if a guess is wrong (the featured melody not 'lead', an "
+                             "ambience as 'bass'), set those tracks' levels by hand, or pass roles= next time"),
+              "plan": plan["channels"], "sidechains": plan["sidechains"]}
     if dry_run:
         return report
-    confirm_with_user("mix every track (levels, EQ, compression, panning, reverb, sidechain)")
+    # No question first: the mix is the job the user asked for, a copy of the project is
+    # saved before it (or Ctrl+Z steps back), and an unanswered prompt stalled whole songs
+    # for 30 minutes at a time, after which the mix was done by hand.
     paths = call("project_paths")
     if paths.get("project"):
         project = Path(paths["project"])

@@ -160,6 +160,70 @@ def check_vocal_clarity(
 
 # ------------------------------------------------------------------- tuning
 
+GLIDE_SHARE = 0.3   # this share of notes sliding in means portamento (glide) is on
+
+
+def _tuning_of_notes(name: str, midi_items: list[dict], mono: np.ndarray, fs: int, t0: float) -> dict:
+    """check_tuning for a MIDI part: each line note's settled pitch against the note
+    played. Readings that caught a chord tone, a ringing note or an overtone are counted
+    apart, not as out of tune (they sent Claude chasing "+500 cents" parts that were fine)."""
+    line_notes, every = [], []
+    for it in midi_items:
+        data = call("get_midi_notes", item_id=it["id"], limit=20000)
+        played = [n for n in data.get("notes", []) if not n.get("muted")]
+        on_line = {id(n) for n in vocal_tools.melody_line(played)}
+        base = data["start"]["qn"]
+        qns = [q for n in played for q in (base + n["start"], base + n["start"] + n["length"])]
+        times = call("qn_to_times", qns=qns) if qns else []
+        timed = [{"start": times[2 * k] - t0, "end": times[2 * k + 1] - t0, "pitch": n["pitch"]}
+                 for k, n in enumerate(played)]
+        every += timed
+        line_notes += [t for t, n in zip(timed, played) if id(n) in on_line]
+    length = len(mono) / fs
+    line_notes = [n for n in line_notes if n["start"] >= 0 and n["end"] <= length]
+    heard = perception.note_pitches(mono, fs, line_notes, sounding=every)
+    if not heard:
+        return {"track": name, "result": "no held notes with a clear pitch in that range"}
+    clean = [h for h in heard if "reading" not in h]
+    overtones = [h for h in heard if h.get("reading") == "overtone"]
+    if len(overtones) > 0.6 * len(heard):
+        interval = int(np.median([h["cents"] for h in overtones]))
+        return {"track": name, "notes_measured": len(heard), "median_cents": interval,
+                "verdict": (f"nearly every note reads {interval:+d} cents (a whole interval): the patch is probably "
+                            "transposed, or its overtone is stronger than its note. audition_instrument it, and "
+                            "transpose the instrument if it plays the wrong note")}
+    out: dict = {"track": name, "notes_measured": len(heard)}
+    if len(clean) < len(heard):
+        out["readings_set_aside"] = len(heard) - len(clean)
+        out["set_aside_because"] = ("they caught another note still sounding (a chord tone, the previous note's "
+                                    "release or echo) or an overtone: not out of tune")
+    if not clean:
+        return {**out, "verdict": "no clean readings (chords or long tails everywhere): check the line solo, "
+                                  "without its delay and reverb, if you need to know"}
+    cents = [h["cents"] for h in clean]
+    median = int(np.median(cents))
+    off = sorted((h for h in clean if abs(h["cents"]) > 25), key=lambda h: -abs(h["cents"]))
+    positions = _bars_of([t0 + h["start"] for h in off[:8]])
+    timed_starts = [h for h in heard if "glide_cents" in h]
+    slides = [h for h in timed_starts if abs(h["glide_cents"]) > perception.GLIDE_CENTS]
+    out.update({"median_cents": median, "spread_cents": [min(cents), max(cents)],
+                "notes_off_by_25_cents_or_more": len(off),
+                "worst": [{"bar": p["bar"], "beat": p["beat"], "cents": h["cents"]} for h, p in zip(off, positions)]})
+    if timed_starts:
+        out["notes_sliding_in"] = f"{len(slides)} of {len(timed_starts)}"
+    if timed_starts and len(slides) >= max(3, GLIDE_SHARE * len(timed_starts)):
+        out["verdict"] = ("notes slide into their pitch: the patch's portamento (glide) is on, which sounds out of "
+                          "tune unless the style wants it. Turn glide/portamento off (get_fx_parameters 'glide', "
+                          "'porta') and check again")
+    elif not off and abs(median) <= 10:
+        out["verdict"] = "in tune"
+    elif abs(median) > 15 and len(off) > 0.5 * len(clean):
+        out["verdict"] = "the whole part is detuned (check the instrument's tune/fine controls)"
+    else:
+        out["verdict"] = "some notes are off (vibrato or bends?)"
+    return out
+
+
 @tool(annotations=READ_ONLY)
 def check_tuning(
     track: Annotated[str | int, Field(description="The track to check")],
@@ -169,8 +233,10 @@ def check_tuning(
     chords_item: Annotated[str | None, Field(description="Audio tracks: or a MIDI item with the chords to check against")] = None,
 ) -> dict:
     """Is a part in tune? Renders the track and measures what actually sounds. For a
-    MIDI part: each held note's pitch against the note played (cents off; a detuned
-    patch, vibrato or glide shows up). For audio (vocals, samples, chops): how far its
+    MIDI part: each held note's settled pitch against the note played (cents off; a
+    detuned patch or vibrato shows up, and notes sliding in mean portamento is on).
+    Readings that caught a chord tone, a ringing release or echo, or an overtone are
+    set aside, not called out of tune. For audio (vocals, samples, chops): how far its
     pitches sit from the nearest semitone (a detuned sample) and how many fall outside
     the key or chords. Mono lines measure best; chords are judged by their top note."""
     details = call("get_track_details", track=track)
@@ -179,28 +245,7 @@ def check_tuning(
     t0 = render["start"]["seconds"]
     midi_items = [i for i in details.get("items", []) if i.get("type") == "midi"]
     if midi_items:
-        notes = []
-        for it in midi_items:
-            data = call("get_midi_notes", item_id=it["id"], limit=20000)
-            line = vocal_tools.melody_line(data.get("notes", []))
-            base = data["start"]["qn"]
-            qns = [q for n in line for q in (base + n["start"], base + n["start"] + n["length"])]
-            times = call("qn_to_times", qns=qns) if qns else []
-            notes += [{"start": times[2 * k] - t0, "end": times[2 * k + 1] - t0, "pitch": n["pitch"]}
-                      for k, n in enumerate(line)]
-        notes = [n for n in notes if n["start"] >= 0 and n["end"] <= len(mono) / fs]
-        heard = perception.note_pitches(mono, fs, notes)
-        if not heard:
-            return {"track": details["name"], "result": "no held notes with a clear pitch in that range"}
-        cents = [h["cents"] for h in heard]
-        off = sorted((h for h in heard if abs(h["cents"]) > 25), key=lambda h: -abs(h["cents"]))
-        positions = _bars_of([t0 + h["start"] for h in off[:8]])
-        return {"track": details["name"], "notes_measured": len(heard), "median_cents": int(np.median(cents)),
-                "spread_cents": [min(cents), max(cents)], "notes_off_by_25_cents_or_more": len(off),
-                "worst": [{"bar": p["bar"], "beat": p["beat"], "cents": h["cents"]} for h, p in zip(off, positions)],
-                "verdict": ("in tune" if not off and abs(np.median(cents)) <= 10 else
-                            "the whole part is detuned (check the instrument's tune/fine controls)"
-                            if abs(np.median(cents)) > 15 else "some notes are off (glide, vibrato, or bends?)")}
+        return _tuning_of_notes(details["name"], midi_items, mono, fs, t0)
     frames = perception.pitch_classes_heard(mono, fs)
     if not frames:
         return {"track": details["name"], "result": "no clear pitches in that range (unpitched or too quiet)"}

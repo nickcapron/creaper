@@ -1,6 +1,6 @@
 -- @description creaper bridge: lets Claude work in REAPER through the creaper MCP server
 -- @author nickcapron
--- @version 0.35.7
+-- @version 0.36.0
 -- @link https://github.com/nickcapron/creaper
 -- @provides
 --   [nomain] creaper_json.lua
@@ -13,7 +13,7 @@
 --   Every change it makes is a named undo point ("creaper: ..."), so Ctrl+Z
 --   reverts anything Claude did.
 
-local BRIDGE_VERSION = "0.35.7"
+local BRIDGE_VERSION = "0.36.0"
 local PROTOCOL = 2
 
 ----------------------------------------------------------------------- JSON
@@ -1663,6 +1663,30 @@ function commands.new_project_tab()
   local count = 0
   while reaper.EnumProjects(count) do count = count + 1 end
   return { tab = count, tabs_open = count, project = "(unsaved)" }
+end
+
+-- Every open project tab: its number, name, file and track count, and which is active.
+function commands.list_project_tabs()
+  local active = reaper.EnumProjects(-1)
+  local tabs = {}
+  local i = 0
+  while true do
+    local proj, path = reaper.EnumProjects(i)
+    if not proj then break end
+    local name = reaper.GetProjectName(proj, "")
+    tabs[#tabs + 1] = { tab = i + 1, name = name ~= "" and name or "(unsaved)", path = path ~= "" and path or nil,
+                        tracks = reaper.CountTracks(proj), active = proj == active }
+    i = i + 1
+  end
+  return { tabs = tabs }
+end
+
+-- Makes another open tab the active project (changes nothing in either project).
+function commands.switch_project_tab(p)
+  local proj = reaper.EnumProjects(int(tonumber(p.tab) or 0) - 1)
+  if not proj then fail("there's no project tab " .. tostring(p.tab)) end
+  reaper.SelectProjectInstance(proj)
+  return commands.list_project_tabs()
 end
 
 function commands.bar_to_qn(p)

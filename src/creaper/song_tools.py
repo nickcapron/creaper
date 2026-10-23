@@ -26,7 +26,8 @@ STAGE_CHECKS = {
     "sounds": "every unmuted MIDI track has an instrument",
     "parts": "no section copies another on every track, no track loops all song, choruses busier than verses, "
              "the lead over the chords",
-    "feel": "drums and bass aren't one velocity on the grid (check_groove)",
+    "feel": "drums and bass aren't one velocity on the grid (check_groove); each lead in tune over its busiest "
+            "section, with no portamento sliding into its notes (check_tuning, one short render per lead)",
     "transitions": "under 40% copied bars, no 16-bar loop, each section's level matches its energy (one render)",
     "mix": "the mix against the genre's targets: dynamics, low end, harshness, mud (one render)",
     "master": "loudness and true peak for the genre, no clipping (one render); the section balance again for "
@@ -239,7 +240,42 @@ def _feel_rows(ctx: _Context) -> list[dict]:
                                 track=t["name"]))
     if not rows and not any(s["tracks"] for s in ctx.song_map["sections"]):
         return [songmap.row("groove", "fail", None, None, "no parts written yet")]
-    return rows or [songmap.row("groove", "warn", None, None, "no MIDI drums or bass to check")]
+    rows = rows or [songmap.row("groove", "warn", None, None, "no MIDI drums or bass to check")]
+    return rows + _lead_tuning_rows(ctx)
+
+
+TUNING_BARS = 16    # the lead is checked over its busiest section, up to this many bars (one short render)
+
+
+def _lead_tuning_rows(ctx: _Context) -> list[dict]:
+    """check_tuning on each lead over its busiest section: a patch with portamento on or
+    detuned oscillators reached the user as "a bit out of tune" while every other check
+    passed (the sounds stage plays single notes, which can't show a glide)."""
+    from . import ear_tools, mix_tools
+
+    sections = {s["name"]: s for s in _sections(ctx.overview)}
+    rows = []
+    for t in ctx.overview.get("tracks", []):
+        if t.get("mute") or mix_tools.role_of(t["name"]) != "lead":
+            continue
+        busiest = max(((row["tracks"][t["name"]].get("notes_per_bar", 0) * row.get("bars", 0), row["section"])
+                       for row in ctx.song_map["sections"] if t["name"] in row["tracks"]), default=None)
+        span = sections.get(busiest[1]) if busiest and busiest[0] > 0 else None
+        if not span or span.get("start_bar") is None or span.get("end_bar") is None:
+            continue
+        start = span["start_bar"]
+        try:
+            report = ear_tools.check_tuning(track=t.get("guid") or t["name"], start_bar=start,
+                                            end_bar=min(span["end_bar"], start + TUNING_BARS))
+        except Exception:  # noqa: BLE001 - a check that can't run isn't a finding
+            continue
+        verdict = report.get("verdict")
+        if not verdict:
+            continue
+        ok = verdict == "in tune" or verdict.startswith("no clean")
+        rows.append(songmap.row("tuning", "pass" if ok else "warn", report.get("median_cents"), None,
+                                None if ok else verdict, track=t["name"], section=span["name"]))
+    return rows
 
 
 def _silent(ctx: _Context) -> list[dict] | None:
@@ -706,7 +742,8 @@ def _fingerprint(measured: dict, overview: dict) -> dict:
 def check_song(
     genre: Annotated[str | None, Field(description="The song's genre; default: the song plan's")] = None,
 ) -> dict:
-    """The song's scorecard: renders the master once and runs every check (form,
+    """The song's scorecard: renders the master once (and each lead's busiest section,
+    for its tuning) and runs every check (form,
     instruments, the song map, groove, copied bars and loops, the energy arc, the mix
     against the genre, the release gates), each pass / warn / fail with its number,
     limit and fix, and a score out of 10 (a warning counts half). The result is kept next

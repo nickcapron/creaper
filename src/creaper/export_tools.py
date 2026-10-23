@@ -184,13 +184,52 @@ def _inside(path: Path, root: Path) -> bool:
 
 
 def _destination(folder: str | None, name: str, fmt: Format, info: dict, overwrite: bool) -> Path:
-    """Where an export goes. Replacing a file is always asked in the chat panel: overwrite
-    only says replacing is wanted (outside the panel, the app asks before the tool runs)."""
+    """Where an export goes. Replacing a file is asked in the chat panel (overwrite only
+    says replacing is wanted; outside the panel, the app asks before the tool runs),
+    except a file creaper exported itself and nobody changed since: a revised song
+    replaces its last export without a question that stalled deliveries for 30 minutes."""
     base = check_folder(folder, info) if folder else _default_folder(info)
     dest = base / (safe_name(name) + EXTENSIONS[fmt])
-    if dest.exists():
+    if dest.exists() and not is_own_export(dest):
         confirm_with_user(f"replace the existing file {dest}")
     return dest
+
+
+OWN_EXPORTS_KEPT = 500
+
+
+def _own_exports_file() -> Path:
+    return bridge.directory / "own_exports.json"
+
+
+def _file_stamp(path: Path) -> list:
+    st = path.stat()
+    return [st.st_size, round(st.st_mtime, 3)]
+
+
+def is_own_export(path: Path) -> bool:
+    """Whether creaper wrote this file and it's unchanged since (same size and time)."""
+    from . import jsonstore
+
+    try:
+        saved = jsonstore.read(_own_exports_file(), dict) if _own_exports_file().exists() else {}
+        return saved.get(str(path.resolve()).lower()) == _file_stamp(path)
+    except (OSError, ValueError):
+        return False
+
+
+def remember_export(path: Path) -> None:
+    from . import jsonstore
+
+    try:
+        with jsonstore.updating(_own_exports_file(), dict) as data:
+            key = str(path.resolve()).lower()
+            data.pop(key, None)
+            data[key] = _file_stamp(path)
+            for old in list(data)[:-OWN_EXPORTS_KEPT]:
+                del data[old]
+    except Exception:  # noqa: BLE001 - remembering is a convenience
+        pass
 
 
 def _deliver(src: str, dest: Path, fmt: Format, bit_depth: int, sample_rate: int | None,
@@ -216,6 +255,7 @@ def _deliver(src: str, dest: Path, fmt: Format, bit_depth: int, sample_rate: int
         bit_depth = 24
         notes.append("FLAC has no 32-bit float format, so it's 24-bit; use wav for a 32-bit float file")
     written = convert(src, dest, fmt, bit_depth, sample_rate, gain, ogg_quality)
+    remember_export(dest)
     out = {"file": str(dest), "format": fmt + (f" {bit_depth}-bit" if fmt in ("wav", "flac") else
                                                f" (Vorbis quality {ogg_quality:g})" if fmt == "ogg" else ""),
            "sample_rate": written["sample_rate"], "duration_s": measured.get("duration_seconds"),
@@ -241,7 +281,9 @@ def save_project(
     name: Annotated[str | None, Field(description="Save as this name (first save or save-as); default: save in place")] = None,
     folder: Annotated[str | None, Field(description="Folder for a new file; default: REAPER's project folder")] = None,
     copy: Annotated[bool, Field(description="Save a copy (a snapshot) and keep working in the current project")] = False,
-    overwrite: Annotated[bool, Field(description="Replace an existing file of that name (the chat panel still asks)")] = False,
+    overwrite: Annotated[bool, Field(description=(
+        "Replace an existing file of that name. A file creaper exported (unchanged since) is replaced without "
+        "asking; the chat panel asks about any other"))] = False,
 ) -> dict:
     """Saves the project: in place when it already has a file, as a new file the first
     time (or with a new name), or as a snapshot copy before big changes. A first save
