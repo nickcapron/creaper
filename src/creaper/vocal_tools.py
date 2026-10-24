@@ -17,7 +17,7 @@ from typing import Annotated, Callable, Literal
 import numpy as np
 from pydantic import Field
 
-from . import analysis, asr, composer, harmony, samplelib, singing, speech, talkbox
+from . import analysis, asr, composer, harmony, samplelib, singing, speech, talkbox, theory
 from . import sample_tools  # the module, not its names: it may still be loading (circular import)
 from .server import READ_ONLY, ItemId, TrackRef, bridge, call, tool
 
@@ -1081,6 +1081,10 @@ def render_vocalvst(
         "before). Leave it out for a wordless line: scat syllables in scat mode, 'la' otherwise"))] = None,
     mode: Annotated[Literal["sing", "rap", "scat"], Field(description="sing: pitched, vibrato on held notes; rap: spoken contour, syllables cut to about 220 ms; scat: nonsense syllables when there are no lyrics")] = "sing",
     voice: Annotated[str | None, Field(description=VOICE_HELP)] = None,
+    expression: Annotated[float | None, Field(ge=0, le=1, description=(
+        "The plugin's Expression: 0 sings the notes exactly as written, 1 lets the voice's own attacks, glides "
+        "and vibrato through (its default). Lower it for a double that has to sit tight under the lead, or "
+        "when a line wobbles; leave it out to keep the plugin's setting"))] = None,
     timeout_seconds: Annotated[float, Field(ge=30, le=900, description="How long to wait for the render")] = 240,
 ) -> dict:
     """Makes VocalVST (the user's singing plugin) sing the MIDI on its track: sets the
@@ -1170,6 +1174,9 @@ def render_vocalvst(
                              + str(VOICEBANK_ROOT) + " in Explorer, or choose it with the Voicebank button in "
                              "the plugin's window (update_fx with show=True), then call again")
     call("set_fx_parameter", track=track, fx=fx["index"], parameter="Mode", display_text=mode.capitalize())
+    if expression is not None:
+        # A 0-1 knob: the normalized value is the displayed one, so no display matching.
+        call("set_fx_parameter", track=track, fx=fx["index"], parameter="Expression", value=float(expression))
 
     # The pass: the plugin records only what the transport plays through it, by position,
     # so it has to run past the last note, not just the items' ends.
@@ -1197,6 +1204,7 @@ def render_vocalvst(
     _wait_for_render_switch(track, fx["index"])
     report = _wait_for_render(log_size, timeout_seconds, before, lambda: _track_audio(track, *span))
     out = {"track": track, "mode": mode, "lyrics": text or None, "written_notes": len(line), "captured": captured,
+           "expression": expression if expression is not None else "the plugin's own",
            "pass": {"from_seconds": round(start, 3), "to_seconds": round(end, 3)},
            "voicebank": Path(bank).name, "voice": speaker or "the bank's default",
            "range": range_advice([n["pitch"] for n in line], bank, speaker), "result": report,
@@ -1222,4 +1230,177 @@ def render_vocalvst(
     if not voice:
         out["voices"] = ("other voices: " + ", ".join(k for k in installed_voices() if "_" in k)
                          + " (voice=...; choose the singer the song calls for)")
+    return out
+
+
+def _voice_range(voice: str | None, bank: str | Path | None = None) -> tuple[int, int, str]:
+    """The sweet spot of a voice (or bank), and whose it is; TIGER's when nothing is
+    known and it's installed, else Canary's."""
+    known = None
+    if voice:
+        path, speaker = resolve_voice(voice)
+        known = bank_voices(path)
+        if speaker == "tiger_royal" and known:
+            known = {**known, "sweet": (known["sweet"][0] + 7, known["sweet"][1] + 7)}
+    elif bank:
+        known = bank_voices(bank)
+    if not known:
+        installed = installed_voices()
+        name = "TIGER" if any(k.startswith("tiger") for k in installed) else "Canary"
+        known = BANK_VOICES[name]
+    lo, hi = known["sweet"]
+    return lo, hi, known["singer"]
+
+
+@tool()
+def write_vocal_melody(
+    item_id: ItemId,
+    lyrics: Annotated[str, Field(description=(
+        "The words, one line per sung phrase, lines split by '/' or newlines: \"Saturday night I'm coming round / "
+        "in my white suit for you\". A hyphen in a word fixes its syllables ('to-night'); otherwise they're found "
+        "by rule"))],
+    chords: Annotated[list | str, Field(description=(
+        "The chords under the line, as text ('Am7 Fmaj7 G6 Am7', chord_length QN each) or timed chords "
+        "(chord, start, length) like write_melody takes"))],
+    key: Annotated[str | None, Field(description="Key, e.g. 'A minor'; default: detected from the chords")] = None,
+    chord_length: Annotated[float, Field(gt=0, description="QN per chord when chords is text")] = 4.0,
+    voice: Annotated[str | None, Field(description=(
+        "The singer, for the range: a VocalVST voice ('tiger_disco', 'Canary'); default: TIGER's range when "
+        "it's installed, else Canary's. low/high override it"))] = None,
+    low: Annotated[str | int | None, Field(description="Lowest note, e.g. D3; default: the voice's sweet spot")] = None,
+    high: Annotated[str | int | None, Field(description="Highest note, e.g. E4")] = None,
+    shape: Annotated[Literal["verse", "chorus", "bridge"], Field(description=(
+        "verse: low in the range, talkative, lines end on a question; chorus: higher, longer held words, a fall on "
+        "every second line's last word, repeated lines repeat their tune; bridge: between"))] = "verse",
+    line_bars: Annotated[float | None, Field(gt=0, description=(
+        "Bars per line; default: the chords' length divided among the lines (1, 2 or 4)"))] = None,
+    start: Annotated[float, Field(ge=0, description="Where the first line's downbeat is, in QN from the item start")] = 0.0,
+    syncopation: Annotated[float, Field(ge=0, le=1, description="How often an unstressed syllable is pushed off the beat")] = 0.0,
+    melisma: Annotated[bool | None, Field(description="A two-note fall on held last words; default: in a chorus")] = None,
+    seed: Annotated[int | None, Field(description="Same seed, same line; change it for another")] = None,
+    replace: Annotated[bool, Field(description="Delete the item's existing notes first")] = True,
+) -> dict:
+    """Writes a sung melody from the words, the way songs are written: each line's
+    syllables get their rhythm from their stresses (stressed on the beats, unstressed
+    between, pickups before the bar), the last word of a line is held and a breath
+    follows, lines with the same words get the same tune, and the pitches follow the
+    chords (chord tones on the stressed syllables, steps between, verse lines ending
+    off the tonic, the last line on it) inside the singer's range. Returns the notes
+    written and the `lyrics` string to give render_vocalvst, one token per note; use
+    it instead of write_melody for anything VocalVST sings. Put the item's start a bar
+    before the first downbeat when the line should begin with a pickup."""
+    from . import lyric_melody, music_tools
+
+    lines = [ln.strip() for ln in re.split(r"[/\n]+", lyrics) if ln.strip()]
+    k = music_tools._key(key)
+    events, k = music_tools._events(chords, k, chord_length, start)
+    lo, hi, singer = _voice_range(voice)
+    if low is not None:
+        lo = theory.note_to_midi(low)
+    if high is not None:
+        hi = theory.note_to_midi(high)
+    if hi - lo < 7:
+        raise ValueError("the range needs at least a fifth between low and high")
+    chosen = seed if seed is not None else random.randrange(1, 10**6)
+    out = lyric_melody.compose(lines, events, k, lo, hi, shape=shape, meter=music_tools._project_meter(),
+                               line_bars=line_bars, start=start, seed=chosen, melisma=melisma, syncopation=syncopation)
+    written = call("add_midi_notes", item_id=item_id, notes=out["notes"], replace=replace)
+    names = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
+    nn = lambda p: f"{names[p % 12]}{p // 12 - 1}"  # noqa: E731
+    result = {"key": k.name, "seed": chosen, "notes_written": len(out["notes"]), "lyrics": out["lyrics"],
+              "lines": out["lines"], "line_bars": out["line_bars"],
+              "range": {"lowest": nn(out["range"][0]), "highest": nn(out["range"][1]), "voice": f"{singer} ({nn(lo)}-{nn(hi)})"},
+              "syllables_per_beat_max": out["syllables_per_beat_max"],
+              "next": "render_vocalvst(track, lyrics=<this lyrics string>, voice=...) sings it; the string is one "
+                      "token per note, so pass it as returned"}
+    if isinstance(written, dict):
+        result["item"] = {k_: written[k_] for k_ in ("notes", "end", "grew") if k_ in written}
+    if out["syllables_per_beat_max"] > SUNG_MAX_PER_BEAT:
+        result["warning"] = (f"{out['syllables_per_beat_max']:g} syllables a beat at the busiest: words this fast "
+                             "blur; give the lines more bars (line_bars) or fewer words")
+    return result
+
+
+@tool()
+def add_vocal_harmony(
+    track: TrackRef,
+    interval: Annotated[Literal["unison", "third above", "third below", "fourth below", "sixth below", "octave above", "octave below"],
+                        Field(description="Where the new voice sits against the lead, in the key's scale")] = "third above",
+    voice: Annotated[str | None, Field(description=(
+        "Who sings it (see render_vocalvst). A different speaker than the lead reads as another singer; the same "
+        "one on a unison is a plain double"))] = None,
+    key: Annotated[str | None, Field(description="Key for the scale steps; default: detected from the lead's notes")] = None,
+    start_bar: Annotated[float | None, Field(ge=1, description="Only the lead's items that start from this bar (e.g. the choruses)")] = None,
+    end_bar: Annotated[float | None, Field(ge=1, description="... and before this bar")] = None,
+    pan: Annotated[float, Field(ge=-1, le=1, description="Where it sits; a second harmony goes the other way")] = 0.3,
+    volume_db: Annotated[float, Field(le=6, description="Its level against the lead (which stays at 0)")] = -6.0,
+    expression: Annotated[float | None, Field(ge=0, le=1, description="render_vocalvst's Expression for this voice; 0.5 keeps a harmony tight")] = 0.6,
+    name: Annotated[str | None, Field(description="Track name; default: '<lead> Harmony' or '<lead> Double'")] = None,
+    timeout_seconds: Annotated[float, Field(ge=30, le=900)] = 300,
+) -> dict:
+    """Adds a second sung voice under or over a VocalVST lead: a new track with its own
+    VocalVST, the lead's notes moved by scale steps (a third above, a sixth below, an
+    octave, or unison for a double), the same words, panned and a few dB down, then
+    rendered. Call it after the lead is rendered and sits right; choruses stacked this
+    way (a double hard left, a third above hard right) are what separates a demo
+    vocal from a record. Takes as long as the lead's render did."""
+    from . import lyric_melody
+
+    fx, items = _vocalvst_fx(track)
+    details = call("get_track_details", track=track)
+    lead_name = details.get("name") or str(track)
+    chunk = call("capture_fx_state", track=track, fx=fx["index"]).get("chunk") or ""
+    lead_voice = vocalvst_attr(chunk, "speaker")
+    if voice is None and interval != "unison":
+        voice = lead_voice or None
+    tokens = vocalvst_lyrics(chunk).split()
+    parts = [(item, melody_line(call("get_midi_notes", item_id=item["id"], limit=20000).get("notes", []))) for item in items]
+    all_notes = [n for _, notes in parts for n in notes]
+    if not all_notes:
+        raise ValueError("the lead has no notes to harmonise")
+    k = harmony.parse_key(key) if key else None
+    if k is None:
+        found = harmony.detect_key(harmony.histogram_from_notes(all_notes))
+        if not found:
+            raise ValueError("couldn't tell the key from the lead's notes; give one")
+        k = harmony.parse_key(found[0]["key"])
+    steps = lyric_melody.HARMONY_STEPS[interval]
+    new_name = name or f"{lead_name} {'Double' if interval == 'unison' else 'Harmony'}"
+    created = call("create_track", timeout=60.0, name=new_name, instrument="VocalVST")
+    new_track = created.get("name") or new_name
+    sung: list[str] = []
+    copied = 0
+    at = 0
+    for item, notes in parts:
+        count = len(notes)
+        s = item["start"]
+        within = (start_bar is None or s["bar"] + (s.get("beat", 1) - 1) / 4 >= start_bar - 1e-6) and \
+                 (end_bar is None or s["bar"] < end_bar - 1e-6)
+        if within and notes:
+            new_item = call("create_midi_item", track=new_track, start_bar=s["bar"], start_beat=s.get("beat", 1),
+                            length_qn=item.get("length_qn") or 4.0, name=f"{item.get('name') or 'Vocal'} {interval}")
+            moved = [{"pitch": lyric_melody.diatonic_shift(n["pitch"], k, steps), "start": n["start"], "length": n["length"],
+                      "velocity": n.get("velocity", 96), "channel": n.get("channel", 1)} for n in notes]
+            call("add_midi_notes", item_id=new_item["id"], notes=moved, replace=True)
+            copied += 1
+            if len(tokens) == len(all_notes):
+                sung += tokens[at:at + count]
+        at += count
+    if not copied:
+        raise ValueError("none of the lead's items start in that range: check start_bar/end_bar against get_track_details")
+    call("set_track_properties", track=new_track, pan=pan, volume_db=volume_db)
+    lyrics = " ".join(sung) if sung else None
+    if lyrics and lyrics.split()[0] in ("+", "_", "-"):
+        lyrics = "la " + " ".join(lyrics.split()[1:])      # a slice can't start on a hold
+    render = render_vocalvst(new_track, lyrics=lyrics, mode="sing", voice=voice, expression=expression,
+                             timeout_seconds=timeout_seconds)
+    out = {"track": new_track, "interval": interval, "key": k.name, "items": copied, "voice": render.get("voice"),
+           "pan": pan, "volume_db": volume_db, "render": render.get("result"), "range": render.get("range"),
+           "next": "measure_tracks the two together; a second harmony (a sixth below, pan the other way) thickens a "
+                   "chorus further, and the lead keeps its reverb and compression while these can sit drier"}
+    if not sung:
+        out["warning"] = ("the lead's lyrics don't line up with its notes one to one, so the harmony sings 'la': "
+                          "render the lead again with its lyrics, then call again")
+    if lead_voice and voice and interval == "unison" and resolve_voice(voice)[1] == lead_voice:
+        out["note"] = "the same voice on a unison is a plain double: another speaker (voice=) reads as a second singer"
     return out

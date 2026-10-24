@@ -442,7 +442,7 @@ def _vocalvst_bridge(tmp_path, monkeypatch, log_on_render=True, sounds_after=Non
     item's notes (start and length in quarter notes from the item's start)."""
     from creaper import vocal_tools
 
-    state = {"chunk": VOCALVST_CHUNK, "renders": 0, "item_end": 5.0}
+    state = {"chunk": VOCALVST_CHUNK, "renders": 0, "item_end": 5.0, "created": []}
     calls = []
     log = tmp_path / "host.log"
     log.write_text("2026-10-20T17:09:05.251-07:00 loaded in Reaper (plugin)\n")
@@ -508,6 +508,13 @@ def _vocalvst_bridge(tmp_path, monkeypatch, log_on_render=True, sounds_after=Non
             loud = sounds_after is not None and state["renders"] > sounds_after
             sf.write(str(f), (0.3 if loud else 0.0) * np.ones((4800, 2), dtype="float32"), 48000)
             return {"files": [str(f)]}
+        if cmd == "create_track":                       # add_vocal_harmony's second singer
+            state["created"].append(kw["name"])
+            return {"name": kw["name"], "number": 2, "instrument": {"name": "VST3i: VocalVST (vocalvst)"}}
+        if cmd == "create_midi_item":
+            return {"id": "{H}", **item()}
+        if cmd == "add_midi_notes":
+            return {"notes": len(kw["notes"])}
         raise AssertionError(cmd)
 
     monkeypatch.setattr(vocal_tools, "call", fake_call)
@@ -826,3 +833,69 @@ def test_vocalvst_counts_as_an_installed_singer(monkeypatch):
     monkeypatch.setattr(vocal_tools, "call", lambda cmd, **kw: {"plugins": [{"name": "VocalVST"}]})
     assert "VocalVST" in vocal_tools.singing_synths()
     assert "render_vocalvst" in vocal_tools.SINGERS["VocalVST"][1]
+
+
+def test_render_vocalvst_sets_expression_only_when_asked(tmp_path, monkeypatch):
+    from creaper import vocal_tools
+
+    calls, _ = _vocalvst_bridge(tmp_path, monkeypatch)
+    out = vocal_tools.render_vocalvst(track="Vocal", lyrics="we ride at dawn to-night", expression=0.4)
+    expr = [kw for c, kw in calls if c == "set_fx_parameter" and kw["parameter"] == "Expression"]
+    assert expr == [{"track": "Vocal", "fx": 1, "parameter": "Expression", "value": 0.4}] and out["expression"] == 0.4
+    calls.clear()
+    out = vocal_tools.render_vocalvst(track="Vocal", lyrics="we ride at dawn to-night")
+    assert not [kw for c, kw in calls if c == "set_fx_parameter" and kw["parameter"] == "Expression"]
+    assert out["expression"] == "the plugin's own"
+
+
+def test_add_vocal_harmony_stacks_a_third_above_with_the_lead_words(tmp_path, monkeypatch):
+    from creaper import vocal_tools
+
+    calls, state = _vocalvst_bridge(tmp_path, monkeypatch)
+    vocal_tools.render_vocalvst(track="Vocal", lyrics="we ride at dawn to-night")
+    calls.clear()
+    out = vocal_tools.add_vocal_harmony(track="Vocal", interval="third above", key="C major", pan=-0.4)
+    assert state["created"] == ["Vocal Harmony"]
+    created = next(kw for c, kw in calls if c == "create_track")
+    assert created["instrument"] == "VocalVST"
+    item = next(kw for c, kw in calls if c == "create_midi_item")
+    assert item["track"] == "Vocal Harmony" and item["start_bar"] == 2 and item["length_qn"] == 6.0
+    added = next(kw for c, kw in calls if c == "add_midi_notes")
+    assert [n["pitch"] for n in added["notes"]] == [64, 65, 67, 67, 65, 64] and added["replace"]   # C D E E D C, a third up
+    props = next(kw for c, kw in calls if c == "set_track_properties" and "pan" in kw)
+    assert props == {"track": "Vocal Harmony", "pan": -0.4, "volume_db": -6.0}
+    assert vocal_tools.vocalvst_lyrics(state["chunk"]) == "we ride at dawn to night"   # the same words
+    expr = next(kw for c, kw in calls if c == "set_fx_parameter" and kw["parameter"] == "Expression")
+    assert expr["value"] == 0.6 and expr["track"] == "Vocal Harmony"
+    assert out["items"] == 1 and out["key"] == "C major" and out["render"].startswith("Rendered") and "warning" not in out
+
+
+def test_add_vocal_harmony_outside_the_bars_or_without_notes_is_said(tmp_path, monkeypatch):
+    from creaper import vocal_tools
+
+    _vocalvst_bridge(tmp_path, monkeypatch)
+    with pytest.raises(ValueError, match="none of the lead's items start in that range"):
+        vocal_tools.add_vocal_harmony(track="Vocal", start_bar=10, key="C major")
+
+
+def test_write_vocal_melody_writes_the_line_and_returns_its_lyrics(monkeypatch):
+    from creaper import music_tools, vocal_tools
+
+    calls = []
+
+    def fake(cmd, **kw):
+        calls.append((cmd, kw))
+        if cmd == "add_midi_notes":
+            return {"notes": len(kw["notes"]), "end": {"bar": 9}}
+        return {"time_signature": "4/4", "tempo_bpm": 112}
+
+    monkeypatch.setattr(vocal_tools, "call", fake)
+    monkeypatch.setattr(music_tools, "call", fake)
+    monkeypatch.setattr(vocal_tools, "installed_voices", lambda: {"TIGER": (None, ""), "tiger_disco": (None, "tiger_disco")})
+    out = vocal_tools.write_vocal_melody(item_id="{I}", lyrics="Baby it's you, yeah / Baby it's true, oh",
+                                         chords="Am7 Fmaj7 Cmaj7 G", key="A minor", shape="chorus", seed=2)
+    added = next(kw for c, kw in calls if c == "add_midi_notes")
+    assert added["item_id"] == "{I}" and added["replace"] and len(added["notes"]) == out["notes_written"]
+    assert out["lyrics"].split()[:2] == ["Ba-by", "it's"] and out["range"]["voice"].startswith("male (D3-E4)")
+    assert out["line_bars"] == 2.0 and len(out["lines"]) == 2 and out["key"] == "A minor"
+    assert all(50 <= n["pitch"] <= 64 for n in added["notes"])

@@ -144,7 +144,7 @@ Arranging and composing:
   find_modulation, get_rhythm. Spell chords as musicians do; explain choices
   briefly in theory terms.
 - Registers: bass below C3, chords and comping around C3-C5, an instrument lead above;
-  a robot vocal low (E3-E4); a sung one where render_vocalvst's range says.
+  a robot vocal low (E3-E4); a sung one where write_vocal_melody puts it.
   Don't move a part up an octave to make it cut through (it turns thin and shrill), and
   don't put the hook on the chords' instrument and register.
 - Something changes at least every 8 bars: a part enters or drops out, a drum or bass
@@ -192,9 +192,10 @@ Samples and vocals:
   turn sample files into instruments (when a plugin's browser blocks you from picking
   its samples, they're often files you can use this way).
 - Vocals, best source first, saying which you used: real vocals in the user's samples
-  (find_samples role "vocal", then chop_vocal or place_loop); sung words from VocalVST
-  when installed (melody on its track, then render_vocalvst with the singer the song calls
-  for, voice= TIGER male or Canary female; distortion after it for shrieks) or a singing
+  (find_samples role "vocal", then chop_vocal or place_loop); VocalVST's sung words
+  when installed (write_vocal_melody from the lyrics, then render_vocalvst with its lyrics
+  and the singer the song calls for, voice= TIGER male or Canary female;
+  add_vocal_harmony stacks the choruses; distortion after it for shrieks) or a singing
   synth app (export_vocal_midi);
   add_robot_vocal(style="sung") for a guide vocal; add_robot_vocal for robot hooks
   (house, French touch, electro, synth-pop): a short hook, at most one syllable per
