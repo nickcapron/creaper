@@ -700,9 +700,10 @@ def vocalvst_state_with(chunk: str, **attrs: str) -> str:
     raw, at, n, xml = vocalvst_state(chunk)
     for name, value in attrs.items():
         pattern = r'(<VocalVST[^>]*\s' + name + r'=)"[^"]*"'
-        if not re.search(pattern, xml):
-            raise ValueError(f"VocalVST's state has no {name} field; is this a newer plugin?")
-        xml = re.sub(pattern, lambda m: m.group(1) + '"' + _xml_attr(value) + '"', xml, count=1)
+        if re.search(pattern, xml):
+            xml = re.sub(pattern, lambda m: m.group(1) + '"' + _xml_attr(value) + '"', xml, count=1)
+        else:   # a state saved before the plugin had the field (speaker)
+            xml = xml.replace("<VocalVST", f'<VocalVST {name}="{_xml_attr(value)}"', 1)
     block = xml.encode("utf-8") + b"\x00"
     out = bytearray(raw[: at + 4])
     out += struct.pack("<I", len(block)) + block + raw[at + 8 + n:]
@@ -770,6 +771,117 @@ def find_voicebanks() -> list[Path]:
 def find_voicebank() -> Path | None:
     banks = find_voicebanks()
     return banks[0] if banks else None
+
+
+# The voices of the banks VocalVST's setup script installs: who sings, and where the
+# middle of a melody sits well (MIDI notes; outside it Canary turns thin and whiny, and
+# TIGER strained or mumbled). Other banks' speakers work too, without the advice.
+BANK_VOICES = {   # TIGER's range is its author's (A2-C#5); Canary's is an estimate
+    "Canary": {"singer": "female", "sweet": (57, 69), "range": (53, 76),
+               "speakers": {"canary_arc": "the default voice", "canary_spark": "another colour",
+                            "canary_voltage": "another colour"}},
+    "TIGER": {"singer": "male", "sweet": (50, 64), "range": (45, 73),
+              "speakers": {"tiger_fresh": "standard, the default", "tiger_disco": "soft, smooth",
+                           "tiger_electric": "powerful (rock, eurobeat, metal under distortion)",
+                           "tiger_vinyl": "standard, warmer", "tiger_mystic": "soft, breathy",
+                           "tiger_glam": "powerful, bright (glam, pop-rock)", "tiger_royal": "falsetto"}},
+}
+VOICE_HELP = ("Who sings: a speaker of an installed voicebank, e.g. 'tiger_electric', or a bank's name for its "
+              "default voice ('Canary', 'TIGER'). Canary is female (canary_arc, canary_spark, canary_voltage); TIGER "
+              "is male: tiger_fresh, tiger_disco (soft), tiger_electric (powerful), tiger_vinyl, tiger_mystic "
+              "(breathy), tiger_glam (powerful, bright), tiger_royal (falsetto). Pick the singer the song calls for "
+              "(a male lead, a female pop voice); default: the voice the track already has")
+
+
+def bank_speakers(bank: Path) -> list[str]:
+    """A voicebank's speakers as VocalVST names them (the file name of each entry in
+    dsconfig.yaml's speakers list); empty for a single-voice bank."""
+    try:
+        text = (bank / "dsconfig.yaml").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    out, inside = [], False
+    for line in text.splitlines():
+        if re.match(r"^speakers\s*:", line):
+            inside = True
+            continue
+        if inside:
+            m = re.match(r"^\s*-\s*['\"]?([^'\"#]+?)['\"]?\s*(#.*)?$", line)
+            if m:
+                out.append(Path(m.group(1).strip()).name)
+            elif line.strip() and not line.startswith((" ", "\t", "-")):
+                break
+    return out
+
+
+def bank_voices(bank: str | Path) -> dict | None:
+    """The BANK_VOICES entry for a voicebank folder (by its name), if creaper knows it."""
+    name = Path(bank).name.lower()
+    return next((v for k, v in BANK_VOICES.items() if name.startswith(k.lower())), None)
+
+
+def installed_voices() -> dict[str, tuple[Path, str]]:
+    """Every voice VocalVST can sing with: {name: (bank folder, speaker)}, the speaker ""
+    being the bank's default. Each bank is also listed under its own short name
+    ('Canary', 'TIGER'), for its default voice."""
+    out: dict[str, tuple[Path, str]] = {}
+    for bank in find_voicebanks():
+        short = bank.name.split("_")[0]
+        out.setdefault(short, (bank, ""))
+        for speaker in bank_speakers(bank):
+            out.setdefault(speaker, (bank, speaker))
+    return out
+
+
+def resolve_voice(voice: str) -> tuple[Path, str]:
+    voices = installed_voices()
+    found = next((v for k, v in voices.items() if k.lower() == voice.strip().lower()), None)
+    if found is None:
+        raise ValueError(f"there's no VocalVST voice '{voice}'; installed: {', '.join(voices) or 'none'}")
+    return found
+
+
+def range_advice(pitches: list[int], bank: str | Path, speaker: str = "") -> dict:
+    """Where a melody sits for the voice singing it, and what to do when it's out of the
+    voice's sweet spot."""
+    names = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
+    nn = lambda p: f"{names[p % 12]}{p // 12 - 1}"  # noqa: E731
+    middle = sorted(pitches)[len(pitches) // 2]
+    out: dict = {"lowest": nn(min(pitches)), "highest": nn(max(pitches)), "middle": nn(middle)}
+    known = bank_voices(bank)
+    if not known:
+        return out
+    lo, hi = known["sweet"]
+    top = known["range"][1]
+    out["sweet_spot"] = f"{nn(lo)}-{nn(hi)} for the middle of the line ({known['singer']} voice)"
+    if speaker == "tiger_royal":
+        lo, hi = lo + 7, hi + 7      # falsetto sits higher
+    if middle > hi:
+        shift = -12 if middle - 12 >= lo else -(middle - hi)
+        out["advice"] = (f"the line sits high for this voice (middle {nn(middle)}): it turns thin and whiny up there. "
+                         f"Move it down {abs(shift)} semitones (transpose the notes, then render again)")
+    elif middle < lo:
+        out["advice"] = (f"the line sits low for this voice (middle {nn(middle)}): the words get mumbled. "
+                         f"Move it up {lo - middle} semitones or more")
+    elif max(pitches) > top:
+        out["advice"] = f"its top note {nn(max(pitches))} is past this voice's range (up to {nn(top)}): bring it down"
+    return out
+
+
+SYLLABLE_GAP_SECONDS = 0.2   # sung syllables closer than this blur into each other
+
+
+def syllable_rate_advice(gaps: list[float]) -> str | None:
+    """Advice when most sung syllables start closer together than a singer can make
+    each word clear (DiffSinger smears consonants there)."""
+    if len(gaps) < 5:
+        return None
+    gaps = sorted(gaps)
+    median = gaps[len(gaps) // 2]
+    if median >= SYLLABLE_GAP_SECONDS:
+        return None
+    return (f"the syllables come every {median * 1000:.0f} ms, faster than the voice can make words clear: give the "
+            "line fewer words, on longer notes (a syllable per beat or eighth at this tempo, holds at line ends)")
 
 
 def vocalvst_captured(chunk: str) -> dict:
@@ -904,6 +1016,12 @@ def _track_audio(track: str | int, start: float, end: float) -> tuple[bool, byte
     return sounding, digest.digest()
 
 
+# The plugin's log lines that end a render. The others (the pass's "run ... captured",
+# "render started", "pitch: ...") come before the take exists: returning on the capture
+# line left the render running, so whatever measured the track next heard silence.
+RENDER_RESULTS = ("rendered", "render error", "render cancelled", "render refused", "voicebank error")
+
+
 def _new_log_line(log_size: int) -> str | None:
     if not VOCALVST_LOG.exists():
         return None
@@ -912,8 +1030,9 @@ def _new_log_line(log_size: int) -> str | None:
         new = f.read().decode("utf-8", errors="replace")
     for line in new.splitlines():
         line = line.strip()
-        if line and " loaded in " not in line:
-            return line.split(" ", 1)[1] if " " in line else line
+        message = line.split(" ", 1)[1] if " " in line else line
+        if message.lower().startswith(RENDER_RESULTS):
+            return message
     return None
 
 
@@ -961,6 +1080,7 @@ def render_vocalvst(
         "The words, one syllable per note: 'dan-cing in the dark _' (hyphens split syllables, '_' holds the note "
         "before). Leave it out for a wordless line: scat syllables in scat mode, 'la' otherwise"))] = None,
     mode: Annotated[Literal["sing", "rap", "scat"], Field(description="sing: pitched, vibrato on held notes; rap: spoken contour, syllables cut to about 220 ms; scat: nonsense syllables when there are no lyrics")] = "sing",
+    voice: Annotated[str | None, Field(description=VOICE_HELP)] = None,
     timeout_seconds: Annotated[float, Field(ge=30, le=900, description="How long to wait for the render")] = 240,
 ) -> dict:
     """Makes VocalVST (the user's singing plugin) sing the MIDI on its track: sets the
@@ -973,15 +1093,23 @@ def render_vocalvst(
     export_mix). It's a clean sung voice: for growls or shrieks add distortion after
     it. Call it again after the notes or lyrics change, and after reopening a saved
     project (the capture is saved, the rendered audio isn't). Needs a monophonic line:
-    one note per syllable, no chords."""
+    one note per syllable, no chords. Says where the line sits for the voice and
+    whether its syllables come too fast to understand."""
     fx, items = _vocalvst_fx(track)
+    want = resolve_voice(voice) if voice else None
     line: list[dict] = []
     parts: list[dict] = []
     extended: list[str] = []
+    gaps: list[float] = []
     for item in items:
         part = call("get_midi_notes", item_id=item["id"], limit=20000)
         parts.append(part)
-        line += melody_line(part.get("notes", []))
+        notes = melody_line(part.get("notes", []))
+        line += notes
+        if part.get("length_qn") and part.get("length_seconds"):
+            per_qn = part["length_seconds"] / part["length_qn"]
+            gaps += [(b["start"] - a["start"]) * per_qn for a, b in zip(notes, notes[1:])
+                     if (b["start"] - a["start"]) * per_qn < 1.0]     # not across a rest between lines
         if _cover_notes(item, part) is not None:
             extended.append(f"{item['id']} to {item['end'].get('seconds', '?')} s")
     if not line:
@@ -995,8 +1123,15 @@ def render_vocalvst(
     if vocalvst_lyrics(state["chunk"]) != text:
         changes["lyrics"] = text
     bank = vocalvst_bank(state["chunk"])
+    speaker = vocalvst_attr(state["chunk"], "speaker")
     candidates: list[str] = []
-    if not bank or not (Path(bank) / "dsconfig.yaml").is_file():
+    if want:
+        # The bank and speaker go in together: the plugin drops a speaker its bank lacks.
+        if Path(bank) != want[0]:
+            changes["bank"] = str(want[0])
+        if speaker != want[1] or "bank" in changes:
+            changes["speaker"] = want[1]
+    elif not bank or not (Path(bank) / "dsconfig.yaml").is_file():
         # Without a voicebank Render does nothing, and the plugin says so only in its
         # window; it takes the folder from its state, like the lyrics. The plugin keeps
         # only a folder it can see itself, so each candidate is offered until one sticks.
@@ -1017,6 +1152,13 @@ def render_vocalvst(
         if vocalvst_lyrics(after) != text:
             raise ValueError("VocalVST didn't take the lyrics; type them in its window (update_fx show=True) "
                              "and call again without lyrics")
+        if want:
+            bank, speaker = vocalvst_bank(after), vocalvst_attr(after, "speaker")
+            if Path(bank) != want[0] or speaker != want[1]:
+                raise ValueError(f"VocalVST didn't take the voice '{voice}' (it has {Path(bank).name or 'no bank'}"
+                                 f"{', ' + speaker if speaker else ''}): the plugin can't see {want[0]} from "
+                                 "REAPER, or it's an older build without voices. Pick it in the plugin's window "
+                                 "(update_fx with show=True), or call without voice")
         if not candidate:
             break
         bank = vocalvst_bank(after)
@@ -1056,7 +1198,8 @@ def render_vocalvst(
     report = _wait_for_render(log_size, timeout_seconds, before, lambda: _track_audio(track, *span))
     out = {"track": track, "mode": mode, "lyrics": text or None, "written_notes": len(line), "captured": captured,
            "pass": {"from_seconds": round(start, 3), "to_seconds": round(end, 3)},
-           "voicebank": Path(bank).name, "result": report,
+           "voicebank": Path(bank).name, "voice": speaker or "the bank's default",
+           "range": range_advice([n["pitch"] for n in line], bank, speaker), "result": report,
            "plays": "in sync with the transport over the captured region, and in offline renders (analyze_audio, "
                     "measure_tracks, export_mix); not in audition_instrument",
            "next": "check it with analyze_audio(track) or check_vocal_clarity; render again after any change "
@@ -1073,4 +1216,10 @@ def render_vocalvst(
     without = re.search(r"(\d+) notes without lyrics", report)
     if lyrics and without and int(without.group(1)):
         out["warning"] = without.group(1) + " notes got no syllable and sing la: fewer syllables than captured notes"
+    fast = syllable_rate_advice(gaps) if lyrics and mode == "sing" else None
+    if fast:
+        out["words"] = fast
+    if not voice:
+        out["voices"] = ("other voices: " + ", ".join(k for k in installed_voices() if "_" in k)
+                         + " (voice=...; choose the singer the song calls for)")
     return out

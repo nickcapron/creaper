@@ -54,6 +54,18 @@ def test_a_cue_keeps_its_drone_under_the_solo_melody():
     assert -16 + dance["Drone Bass"] > -10 + dance["Flute Lead"]       # dance music keeps its loud bass
 
 
+def test_metal_vocals_sit_inside_the_guitars():
+    chans = [channel("Drums", "drums", -10), channel("Guitars", "lead", -14), channel("Rhythm", "keys", -14),
+             channel("Vox", "vocal", -14)]
+    level = lambda plan, name: -14 + {a["name"]: a["gain_db"] for a in plan["channels"]}[name]  # noqa: E731
+    metal = plan_mix(chans, {"family": "metal and punk"})
+    assert level(metal, "Vox") < level(metal, "Guitars") and level(metal, "Vox") < level(metal, "Rhythm")
+    pop = plan_mix(chans, {"family": "pop"})
+    assert level(pop, "Vox") - level(pop, "Guitars") >= 5
+    rock = plan_mix(chans, {"family": "rock"})
+    assert level(metal, "Vox") < level(rock, "Vox") < level(pop, "Vox")
+
+
 def test_plan_cleans_up_without_touching_what_the_user_set():
     chans = [channel("Kick", "kick", -10),
              channel("Keys", "keys", -15, spectrum={"bands": {"low mids (250-500 Hz)": {"share_pct": 40}}}),

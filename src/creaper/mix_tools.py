@@ -69,6 +69,7 @@ ROLE_WORDS = [
 Role = Literal["kick", "snare", "perc", "bass", "vocal", "drums", "lead", "keys", "pad", "fx", "other"]
 DANCE_FAMILIES = {"electronic dance"}
 MELODY_OVER_BED_FAMILIES = {"film and games", "ambient and experimental", "classical"}
+WALL_FAMILIES = {"rock", "metal and punk"}   # guitars at the vocal's level, not under it
 BED_UNDER_LEAD_LU = 3
 
 
@@ -308,6 +309,12 @@ def plan_mix(channels: list[dict], style: dict | None = None) -> dict:
         offsets["bass"] -= 2
     if style.get("family") in ("pop", "hip-hop", "r&b and soul", "country and folk"):
         offsets["vocal"] += 2
+    if style.get("family") in WALL_FAMILIES:
+        # The guitars are the wall the voice sits inside: at the pop balance a black metal
+        # vocal sat 14 dB over its guitars ("all I can hear is the singing").
+        offsets["vocal"] -= 3 if style["family"] == "metal and punk" else 1
+        offsets["keys"] = max(offsets["keys"], -3)
+        offsets["lead"] = max(offsets["lead"], -3)
     if style.get("family") in MELODY_OVER_BED_FAMILIES:
         # A cue's solo melody leads over its drone: the dance-music bass level (3 LU over
         # the lead) put a solo flute under the drone in an ambient game cue.

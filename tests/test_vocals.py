@@ -435,7 +435,8 @@ def test_vocalvst_state_is_read_and_rewritten_in_place():
 
 
 def _vocalvst_bridge(tmp_path, monkeypatch, log_on_render=True, sounds_after=None, takes_switch=True,
-                     sees_bank=lambda path: True, notes=None, master_muted=False, pass_fails=False):
+                     sees_bank=lambda path: True, notes=None, master_muted=False, pass_fails=False,
+                     keeps_speaker=True):
     """A fake bridge with VocalVST on track 1 and a six-note item (3 s from 2.0 s, at
     120 BPM, so a quarter note is 0.5 s); returns the call log. `notes` replaces the
     item's notes (start and length in quarter notes from the item's start)."""
@@ -473,6 +474,8 @@ def _vocalvst_bridge(tmp_path, monkeypatch, log_on_render=True, sounds_after=Non
             bank = vocal_tools.vocalvst_bank(chunk)
             if bank and not sees_bank(bank):       # the plugin keeps only a folder it can see
                 chunk = vocal_tools.vocalvst_state_with(chunk, bank="")
+            if not keeps_speaker:                   # an older build: no voices
+                chunk = vocal_tools.vocalvst_state_with(chunk, speaker="")
             state["chunk"] = chunk
             return {}
         if cmd == "get_fx_parameters":
@@ -484,6 +487,9 @@ def _vocalvst_bridge(tmp_path, monkeypatch, log_on_render=True, sounds_after=Non
                     f.write("2026-10-20T19:00:00.000-07:00 Rendered: 1 phrase, 6 notes, 3.7 s\n")
             return {}
         if cmd == "transport":
+            if kw.get("action") == "play":           # the plugin logs its capture after the pass
+                with log.open("a") as f:
+                    f.write("2026-10-20T18:59:00.000-07:00#ab12/Vocal run 2.00 s to 5.00 s captured; notes 6 -> 6\n")
             return {}
         if cmd == "recording_status":
             if pass_fails:
@@ -533,6 +539,114 @@ def test_render_vocalvst_sets_lyrics_plays_the_pass_then_renders(tmp_path, monke
     assert cmds.index("render_audio") < cmds.index("set_fx_parameter", cmds.index("set_fx_parameter") + 1)
     assert out["result"].startswith("Rendered: 1 phrase") and out["captured"]["notes"] == 6
     assert out["lyrics"] == "we ride at dawn to night" and "warning" not in out
+
+
+TIGER_CONFIG = """# v106
+acoustic: dsacoustic/acoustic.onnx
+speakers:
+  - dsacoustic/tiger_fresh
+  - dsacoustic/tiger_electric   # power
+  - "dsacoustic/tiger_royal"
+
+augmentation_args:
+  random_pitch_shifting:
+    enabled: true
+"""
+
+
+def _tiger(tmp_path):
+    bank = tmp_path / "voicebanks" / "TIGER_DS_v106"
+    bank.mkdir(parents=True)
+    (bank / "dsconfig.yaml").write_text(TIGER_CONFIG)
+    return bank
+
+
+def test_bank_speakers_reads_the_dsconfig_list():
+    from creaper.vocal_tools import bank_speakers
+
+    import tempfile
+    from pathlib import Path
+
+    with tempfile.TemporaryDirectory() as d:
+        bank = _tiger(Path(d))
+        assert bank_speakers(bank) == ["tiger_fresh", "tiger_electric", "tiger_royal"]
+        assert bank_speakers(Path(d)) == []
+
+
+def test_render_vocalvst_sings_with_the_voice_asked_for(tmp_path, monkeypatch):
+    from creaper import vocal_tools
+
+    _, state = _vocalvst_bridge(tmp_path, monkeypatch)
+    tiger = _tiger(tmp_path)
+    out = vocal_tools.render_vocalvst(track=1, lyrics="one two three four five six", voice="tiger_electric")
+    assert vocal_tools.vocalvst_bank(state["chunk"]) == str(tiger)
+    assert vocal_tools.vocalvst_attr(state["chunk"], "speaker") == "tiger_electric"
+    assert out["voicebank"] == "TIGER_DS_v106" and out["voice"] == "tiger_electric" and "voices" not in out
+    out = vocal_tools.render_vocalvst(track=1, voice="TIGER")          # the bank's default voice
+    assert vocal_tools.vocalvst_attr(state["chunk"], "speaker") == "" and out["voice"] == "the bank's default"
+    with pytest.raises(ValueError, match="no VocalVST voice 'tiger_growl'.*tiger_electric"):
+        vocal_tools.render_vocalvst(track=1, voice="tiger_growl")
+
+
+def test_render_vocalvst_offers_the_other_voices_when_none_is_asked_for(tmp_path, monkeypatch):
+    from creaper import vocal_tools
+
+    _vocalvst_bridge(tmp_path, monkeypatch)
+    _tiger(tmp_path)
+    out = vocal_tools.render_vocalvst(track=1)
+    assert out["voicebank"] == "Canary_DS" and "tiger_electric" in out["voices"]
+
+
+def test_render_vocalvst_says_when_the_plugin_drops_the_voice(tmp_path, monkeypatch):
+    from creaper import vocal_tools
+
+    _vocalvst_bridge(tmp_path, monkeypatch, keeps_speaker=False)
+    _tiger(tmp_path)
+    with pytest.raises(ValueError, match="didn't take the voice 'tiger_royal'"):
+        vocal_tools.render_vocalvst(track=1, voice="tiger_royal")
+
+
+def test_render_vocalvst_says_where_the_line_sits_for_the_voice(tmp_path, monkeypatch):
+    from creaper import vocal_tools
+
+    _vocalvst_bridge(tmp_path, monkeypatch)
+    out = vocal_tools.render_vocalvst(track=1)               # D4 in the middle: fine for Canary
+    assert out["range"]["middle"] == "D4" and "advice" not in out["range"]
+    high = [{"pitch": p, "start": i * 1.0, "length": 0.9, "velocity": 100} for i, p in enumerate((72, 74, 76, 72, 71, 72))]
+    (tmp_path / "high").mkdir()
+    _vocalvst_bridge(tmp_path / "high", monkeypatch, notes=high)
+    out = vocal_tools.render_vocalvst(track=1)
+    assert "sits high" in out["range"]["advice"] and "down 12" in out["range"]["advice"]
+
+
+def test_range_advice_knows_each_voice():
+    from creaper.vocal_tools import range_advice
+
+    low_male = [50, 52, 55, 57, 55, 52]                       # D3-A3: TIGER's middle
+    assert "advice" not in range_advice(low_male, "TIGER_DS_v106")
+    assert "sits low" in range_advice(low_male, "Canary_DS_v106")["advice"]
+    assert "sits low" in range_advice(low_male, "TIGER_DS_v106", "tiger_royal")["advice"]   # falsetto sits higher
+    assert "advice" not in range_advice([90, 91], "SomeOtherBank") and "sweet_spot" not in range_advice([90], "X")
+
+
+def test_render_vocalvst_warns_when_syllables_come_too_fast(tmp_path, monkeypatch):
+    from creaper import vocal_tools
+
+    fast = [{"pitch": 62, "start": i * 0.25, "length": 0.2, "velocity": 100} for i in range(6)]   # 125 ms apart
+    _vocalvst_bridge(tmp_path, monkeypatch, notes=fast)
+    out = vocal_tools.render_vocalvst(track=1, lyrics=" ".join(["la"] * 6))
+    assert "125 ms" in out["words"]
+    (tmp_path / "slow").mkdir()
+    _vocalvst_bridge(tmp_path / "slow", monkeypatch)
+    assert "words" not in vocal_tools.render_vocalvst(track=1, lyrics="one two three four five six")
+
+
+def test_vocalvst_state_gains_a_field_it_lacked():
+    from creaper.vocal_tools import vocalvst_attr, vocalvst_captured, vocalvst_lyrics, vocalvst_state_with
+
+    new = vocalvst_state_with(VOCALVST_CHUNK, speaker="tiger_glam")
+    assert vocalvst_attr(new, "speaker") == "tiger_glam" and vocalvst_lyrics(new) == "hel lo world this is me"
+    assert vocalvst_captured(new) == vocalvst_captured(VOCALVST_CHUNK)
 
 
 def test_vocalvst_pass_span_reaches_the_last_note():

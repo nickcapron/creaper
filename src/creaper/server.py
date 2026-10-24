@@ -54,7 +54,8 @@ in order; finish_stage(stage) runs each stage's checks and refuses on a fail):
     adds. Or by hand: plan_harmony (each section's chords), then per
     section add_genre_groove(bars, energy), write_bassline, add_chord_progression,
     write_melody (shape verse or hook; candidates), write_counter_melody, write_answer.
-    Rewrite what you'd change. Check: song_map; finish_stage("parts").
+    Rewrite what you'd change. Then layer_instrument the bass and the chords or pad
+    (Sounds). Check: song_map; finish_stage("parts").
  5. Feel: generators play with a feel; apply_feel on parts written note by note.
     finish_stage("feel") (check_groove on drums and bass).
  6. Transitions and movement: add_transitions(style), then write_automation ramps across
@@ -102,8 +103,8 @@ Conventions:
 - Inside a MIDI item, note positions and lengths are in quarter notes (QN) from the item
   start: 1 = quarter, 0.5 = eighth, 0.25 = sixteenth, 4 = one bar of 4/4.
 - Notes can be names (C4 = middle C = 60, F#3, Bb2) or MIDI numbers.
-- MIDI items are identified by the item_id from create_midi_item or get_track_details;
-  "selected" means the item the user has selected.
+- item_id comes from create_midi_item or get_track_details; "selected" is the user's
+  selected item.
 - A track you made is "not found": the active tab changed; switch_project_tab back first.
 
 Sounds:
@@ -111,10 +112,9 @@ Sounds:
   of instrument: a ROMpler or preset player for an M1 house piano or organ, FM for DX7
   pianos and bells, a Rhodes or Wurlitzer model for those, a piano model only for a real
   piano. If nothing close is installed, say what you're using; never call a sound
-  something it isn't.
+  something it isn't. With no guitar instrument or samples, say so rather than faking one.
 - Designed factory presets sound finished; a patch built from a default rarely does.
-  Beyond Arturia (step 3): audition_sounds with the presets REAPER can see and the
-  user's saved sounds.
+  Beyond Arturia: audition_sounds with REAPER's presets and saved sounds.
 - To adjust a sound: get_fx_parameters (search "cutoff", "env", "attack", "reson"...),
   then set_fx_parameters with display_value for numbers and display_text for menus.
   Move controls part way: brightness, resonance, drive and presence at their extremes
@@ -126,7 +126,7 @@ Sounds:
   name the layers that fit the style. Drum kits layer too (build_drum_kit layers=, a
   click or sub under the kick), and alternatives per lane avoid machine-gun repeats.
 - Saved sounds tagged for another project are its anchors, not a palette: give each song
-  its own sounds. Offer to save_sound sounds the user likes.
+  its own sounds.
 - Prefer the user's own plugins (list_installed_fx, browse by category) over REAPER's
   stock ones. get_plugin_profile explains plugins creaper knows; read it before
   configuring one. save_note what you
@@ -134,17 +134,16 @@ Sounds:
 - Drums: a real drum instrument (find_notes, the catalog's "drum kit" results), not
   ReaSynDr; skip plugins marked hardware or realtime_only unless the user says the device
   is connected. Patterns follow the kit's note names, a saved or built-in drum map, then
-  General MIDI; when the layout is unknown run map_drum_kit (per_channel=True for a drum
-  per MIDI channel).
+  General MIDI; when the layout is unknown run map_drum_kit.
 
 Arranging and composing:
 - Read the genre profile and honour it (tempo, feel, harmonic rhythm, instrumentation)
   unless the user wants something else. Use the theory tools rather than guessing:
   get_scale, suggest_progressions, reharmonize, analyze_harmony, check_voice_leading,
-  find_modulation, get_rhythm. Spell chords and keys as musicians do and explain choices
-  in theory terms briefly when it helps the user learn.
+  find_modulation, get_rhythm. Spell chords as musicians do; explain choices
+  briefly in theory terms.
 - Registers: bass below C3, chords and comping around C3-C5, an instrument lead above;
-  a robot or sung vocal low (E3-E4), where its words stay clear.
+  a robot vocal low (E3-E4); a sung one where render_vocalvst's range says.
   Don't move a part up an octave to make it cut through (it turns thin and shrill), and
   don't put the hook on the chords' instrument and register.
 - Something changes at least every 8 bars: a part enters or drops out, a drum or bass
@@ -193,8 +192,9 @@ Samples and vocals:
   its samples, they're often files you can use this way).
 - Vocals, best source first, saying which you used: real vocals in the user's samples
   (find_samples role "vocal", then chop_vocal or place_loop); sung words from VocalVST
-  when installed (melody on its track, then render_vocalvst; clean voice: distortion
-  after it for shrieks) or a singing synth app (export_vocal_midi);
+  when installed (melody on its track, then render_vocalvst with the singer the song calls
+  for, voice= TIGER male or Canary female; distortion after it for shrieks) or a singing
+  synth app (export_vocal_midi);
   add_robot_vocal(style="sung") for a guide vocal; add_robot_vocal for robot hooks
   (house, French touch, electro, synth-pop): a short hook, at most one syllable per
   beat. Wordless choirs and vocal pads: build_sampled_instrument, from the user's
