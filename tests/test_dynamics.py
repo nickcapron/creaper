@@ -309,6 +309,27 @@ def test_a_quiet_kit_gets_no_pointless_clipper(monkeypatch):
     assert "too far to round" in out["skipped"] and "add_fx" not in added
 
 
+def test_a_kit_already_over_the_knee_is_still_rounded():
+    """After the headroom move the fader is down and the pre-fader peaks hot: the 90s pop
+    kit (fader -11.4, peaks -9.1) was skipped as 'already at the knee' and its 18 dB of
+    peaks went to the master's limiter instead."""
+    from creaper import mix_tools
+    calls = []
+
+    def fake_call(cmd, **kw):
+        calls.append((cmd, kw))
+        return {"volume_db": -11.4, "index": 15} if cmd in ("get_track_details", "add_fx") else {}
+    monkeypatch_target = mix_tools
+    monkeypatch_target.call, saved = fake_call, mix_tools.call
+    try:
+        out = mix_tools._soft_clip("Drums", None, None, peak=-9.1)
+    finally:
+        mix_tools.call = saved
+    assert out == {"boost_db": 0.0, "peaks_rounded_db": 2.3, "fader_db": -11.4}
+    assert [c for c, _ in calls if c == "add_fx"] and not [c for c, _ in calls if c == "set_track_properties"]
+    assert {c["parameter"]: c["display_value"] for c in next(kw for c, kw in calls if c == "set_fx_parameters")["changes"]}["Boost (dB)"] == 0.0
+
+
 def test_colour_keeps_a_gentle_overshoot():
     from creaper import mix_tools
     assert mix_tools.choose_colour([{"amount": 5, "rise_db": 6.0, "crest_drop_db": 0.2}])["amount"] == 5

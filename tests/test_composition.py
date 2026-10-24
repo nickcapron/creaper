@@ -131,7 +131,8 @@ def test_energy_doubles_the_hats_or_thins_the_kick():
     pattern = {"kick": "x.x.x.x.x.x.x.x.", "closed hat": "x.x.x.x.x.x.x.x."}
     high = grooves.vary_groove(pattern, 0.25, 1, "none", energy=4)
     low = grooves.vary_groove(pattern, 0.25, 1, "none", energy=1)
-    assert high["closed hat"].count(".") == 0
+    assert high["closed hat"] == ("x" + grooves.SIXTEENTH_HAT) * 8     # 16ths, the off-16ths a touch under, not ghosts
+    assert theory.STEP_VELOCITY["o"] < int(grooves.SIXTEENTH_HAT) * 127 // 9 < theory.STEP_VELOCITY["x"]
     assert low["kick"] == "x.......x......."
 
 

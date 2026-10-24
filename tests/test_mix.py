@@ -527,6 +527,30 @@ def test_a_dull_sung_vocal_gets_a_real_lift_and_keeps_its_high_pass():
     assert mix_tools.tone_lift_db(0, 8) == mix_tools.TONE_LIFT_MAX_DB and mix_tools.tone_lift_db(7.9, 8) == mix_tools.TONE_LIFT_MIN_DB
 
 
+def test_a_sub_heavy_dull_kit_gets_its_sub_trimmed_and_its_top_lifted():
+    """The 90s pop LinnDrum kit: 55% of its energy under 60 Hz, 4.7% at 2-6 kHz, 1.9% over
+    6 kHz, and auto_mix gave it no EQ; the user did -5/+2.5/+3 by hand after measuring."""
+    from creaper import mix_tools
+    dull = {"bands": {"sub (20-60 Hz)": {"share_pct": 54.7}, "bass (60-250 Hz)": {"share_pct": 16},
+                      "low mids (250-500 Hz)": {"share_pct": 2.3}, "mids (500 Hz-2 kHz)": {"share_pct": 20.3},
+                      "upper mids (2-4 kHz)": {"share_pct": 3.4}, "presence (4-6 kHz)": {"share_pct": 1.3},
+                      "air (6-20 kHz)": {"share_pct": 1.9}}}
+    bright = _spec(low=30, upper=8, presence=4, air=8)
+    acts = {a["name"]: a for a in mix_tools.plan_mix([
+        {"name": "Drums", "role": "drums", "level": -10, "spectrum": dull},
+        {"name": "Kick", "role": "kick", "level": -12, "spectrum": dull},         # a kick is meant to be sub
+        {"name": "Kit 2", "role": "drums", "level": -14, "spectrum": bright}])["channels"]}
+    assert acts["Drums"]["sub_trim_db"] == mix_tools.DRUM_SUB_TRIM_DB
+    assert acts["Drums"]["presence_db"] == 1.5 and acts["Drums"]["air_db"] == 3.0   # 10 log10(6/4.7), 10 log10(4/1.9)
+    assert not any(k in acts["Kick"] for k in ("sub_trim_db", "presence_db", "air_db"))
+    assert not any(k in acts["Kit 2"] for k in ("sub_trim_db", "presence_db", "air_db"))
+    eq = {c["parameter"]: c["display_value"] for c in mix_tools.eq_changes(acts["Drums"])}
+    assert eq["Freq-Low Shelf"] == mix_tools.DRUM_SUB_HZ and eq["Gain-Low Shelf"] == -3.0
+    assert eq["Gain-Band 3"] == 1.5 and eq["Gain-High Shelf 4"] == 3.0 and eq["Freq-High Pass 5"] == mix_tools.NO_HIGHPASS_HZ
+    assert mix_tools.tone_lift_db(0, mix_tools.DRUM_AIR_LOW_PCT) > mix_tools.DRUM_TONE_MAX_DB   # the kit's lifts are capped
+    assert all(a <= mix_tools.DRUM_TONE_MAX_DB for a in (acts["Drums"]["presence_db"], acts["Drums"]["air_db"]))
+
+
 def test_low_strings_and_brass_keep_their_fundamentals():
     """The low-heavy keys/pad high pass took 'Strings Low' to 250 Hz and 'Low Brass' to 210."""
     from creaper import mix_tools

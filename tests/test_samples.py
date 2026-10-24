@@ -294,6 +294,34 @@ def test_drum_fit_scores_against_a_genre_target():
     assert samplelib.drum_fit(good, house_kick) == (0.0, [])
     score, why = samplelib.drum_fit(thin, house_kick)
     assert score > 2 and "sub share" in why[0]
+    # A waveform with no tail to read ranked as a perfect kick: now it costs.
+    score, why = samplelib.drum_fit({"sub_share": 0.9, "decay_s": None, "punch_db": 2}, house_kick)
+    assert score == samplelib.UNMEASURED_DECAY_COST and "decay unmeasured" in why[0]
+
+
+def test_every_genre_ranks_its_drums_and_synth_waveforms_stay_out(tmp_path, monkeypatch):
+    """Pop had no palette, so a 90s pop kick search went unranked and the top results were
+    Arturia wavetable cycles that 'sound like' a kick, then a sub-only LinnDrum hit."""
+    import soundfile as sf
+    from creaper import genres, server  # noqa: F401
+    from creaper import sample_tools
+    from creaper.genres import palettes
+    for g in genres.GENRES:
+        for lane in ("kick", "snare", "clap", "hat"):
+            assert palettes.drum_target(g, lane) is not None, (g.name, lane)
+    assert palettes.drum_target(genres.find("house"), "kick") is palettes.PALETTES["house"].drums["kick"]
+    assert palettes.drum_target(genres.find("pop"), "kick") is palettes.FAMILY_DRUMS["pop"]["kick"]
+    assert palettes.drum_target(genres.find("pop"), "tom") is None
+    hits, waves = tmp_path / "hits", tmp_path / "Factory" / "Wavetables"
+    hits.mkdir(), waves.mkdir(parents=True)
+    sf.write(str(waves / "BD Smash.wav"), _kick()[: FS44 // 8], FS44, subtype="PCM_24")   # a kick's first cycles
+    sf.write(str(hits / "deep kick.wav"), _kick(), FS44, subtype="PCM_24")
+    lib = samplelib.SampleLibrary(tmp_path / "cfg")
+    lib.set_folders([str(tmp_path)])
+    monkeypatch.setattr(sample_tools, "library", lib)
+    out = sample_tools.find_samples(role="kick", style="pop")
+    assert [s["name"] for s in out["shown"]] == ["deep kick"] and "fit" in out["shown"][0]
+    assert [s["name"] for s in sample_tools.find_samples(search="BD")["shown"]] == ["BD Smash"]   # by name, still there
 
 
 def test_find_samples_ranks_kicks_for_the_style(tmp_path, monkeypatch):
@@ -353,10 +381,47 @@ def test_build_drum_kit_with_alternatives_and_layers(tmp_path, monkeypatch):
     assert by_fx[4] == {"Minimum velocity": 65, "Maximum velocity": 127}
     assert out["kit"]["snare"]["samples"] == ["snare soft (velocity 1-64)", "snare loud (velocity 65-127)"]
     assert "layer, -9 dB" in out["kit"]["kick"]["samples"][1]
+    assert len(out["warnings"]) == 1 and out["warnings"][0].startswith("no crash lane")
     with pytest.raises(ValueError, match="layers for lanes that have no sample"):
         sample_tools.build_drum_kit(track="Drums", samples={"kick": str(kick)},
                                     layers={"clap": [sample_tools.Layer(path=str(click))]}, trim_silence=False)
 
+
+
+def test_one_long_ringing_kick_is_a_hit_not_a_loop(tmp_path):
+    """AVL's Black Pearl kick: 1.6 s with a resonant tail, read as a 123 BPM loop in A
+    phrygian, so no drum search could rank it. Eight real hits are still a loop."""
+    import soundfile as sf
+    t = np.arange(int(1.7 * FS44)) / FS44
+    ring = 0.9 * np.sin(2 * np.pi * (48 + 90 * np.exp(-t * 30)) * t) * np.exp(-t * 2.5)
+    ring += np.random.default_rng(2).standard_normal(t.size) * np.exp(-t * 300) * 0.5
+    one, many = tmp_path / "22-Kick-1.wav", tmp_path / "kicks loop.wav"
+    sf.write(str(one), ring, FS44)
+    sf.write(str(many), np.tile(_kick()[: FS44 // 2], 8), FS44)
+    hit, loop = samplelib.analyze(str(one)), samplelib.analyze(str(many))
+    assert hit["kind"] == "one-shot" and hit["sounds_like"] == "kick" and "bpm" not in hit
+    assert loop["kind"] == "loop" and loop["bpm"]
+    hits = samplelib.onset_times(samplelib.onset_envelope(np.tile(_kick()[: FS44 // 2], 8), FS44), FS44)
+    assert 7 <= len(hits) <= 8 and all(0.45 < b - a < 0.55 for a, b in zip(hits, hits[1:]))   # the first can hide in the window
+
+
+def test_kit_warnings_name_what_the_grooves_will_do_wrong(tmp_path):
+    """The 90s pop kit: no crash lane (every crash silent), the snare's clap layer was the
+    clap lane's sample (doubled on 2 and 4), a sub-only kick the limiter choked on."""
+    import soundfile as sf
+    from creaper import server  # noqa: F401
+    from creaper import sample_tools
+    t = np.arange(int(0.6 * FS44)) / FS44
+    thud, clap, snare, crash = (tmp_path / n for n in ("BD pitched.wav", "clap.wav", "snare.wav", "crash.wav"))
+    sf.write(str(thud), 0.8 * np.sin(2 * np.pi * 45 * t) * np.exp(-t * 5) * (1 - np.exp(-t * 60)), FS44)   # swells in
+    for p in (clap, snare, crash):
+        sf.write(str(p), _hat(), FS44)
+    warnings = sample_tools.kit_warnings({"kick": str(thud), "snare": str(snare), "clap": str(clap)},
+                                        {"snare": [sample_tools.Layer(path=str(clap), gain_db=-7)]})
+    assert [w.split(":")[0] for w in warnings] == [
+        "no crash lane", "the snare lane's layer is the clap lane's own sample", "the kick has no attack (its first 10 ms sit 7.1 dB under its body)"]
+    sf.write(str(thud), _kick(), FS44)
+    assert sample_tools.kit_warnings({"kick": str(thud), "crash": str(crash)}, {"kick": [sample_tools.Layer(path=str(clap))]}) == []
 
 
 def test_a_loop_named_kick_cant_outrank_real_kicks(tmp_path, monkeypatch):

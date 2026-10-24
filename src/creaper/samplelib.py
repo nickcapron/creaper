@@ -197,6 +197,24 @@ def onset_envelope(x: np.ndarray, fs: int, hop: int = 512) -> np.ndarray:
     return np.maximum(0, flux - smooth)
 
 
+ONSET_GAP_S, LOOP_SPREAD = 0.08, 0.4   # hits closer than this are one hit; a loop's hits span this much of it
+
+
+def onset_times(env: np.ndarray, fs: int, hop: int = 512, threshold: float = 0.3) -> list[float]:
+    """When the hits land (s): each rise of the onset envelope over threshold x its peak,
+    rises within ONSET_GAP_S of the last counted as the same hit."""
+    if not env.size or env.max() <= 0:
+        return []
+    above = env > env.max() * threshold
+    rises = np.flatnonzero(above & ~np.concatenate(([False], above[:-1])))
+    times: list[float] = []
+    for frame in rises:
+        t = float(frame * hop / fs)
+        if not times or t - times[-1] >= ONSET_GAP_S:
+            times.append(t)
+    return times
+
+
 def estimate_bpm(x: np.ndarray, fs: int, duration: float) -> tuple[float | None, str]:
     """Tempo of a loop: the beat period that best explains the onset rhythm (its
     autocorrelation at one, two and four beats, with a mild preference for common
@@ -390,8 +408,11 @@ def analyze(path: str) -> dict:
         return {**out, "silent": True}
     out["peak_db"] = round(20 * math.log10(peak), 1)
     env = onset_envelope(x, fs)
-    onsets = int((env > env.max() * 0.3).sum()) if env.size else 0
-    is_loop = duration >= 1.5 and onsets >= 4
+    hits = onset_times(env, fs)
+    # Hits spread over the file make a loop; one long ringing hit doesn't. (Counting frames
+    # over the threshold called a 1.6 s acoustic kick with a tail a loop "in A phrygian",
+    # so it never ranked as a kick.)
+    is_loop = duration >= 1.5 and len(hits) >= 4 and hits[-1] - hits[0] >= LOOP_SPREAD * duration
     out["kind"] = "loop" if is_loop else "one-shot"
     f = listen.features(x[: int(3 * fs)], fs)
     if f.get("starts_late_ms", 0) >= 8:
@@ -422,6 +443,12 @@ def analyze(path: str) -> dict:
     return out
 
 
+UNMEASURED_DECAY_COST = 2.0
+# Synth waveform folders (Arturia's Augmented and Pigments wavetables): a 0.2 s cycle
+# that "sounds like" a kick is never the kick a role search wants.
+WAVEFORM_FOLDER = re.compile(r"wavetable|single.?cycle|waveform", re.I)
+
+
 def drum_fit(heard: dict, target) -> tuple[float, list[str]]:
     """How far a sample's measurements sit outside a palette's Drum target (0 = inside
     every range) and why. Ratios for times and brightness, 0.1 steps for the sub share,
@@ -431,7 +458,14 @@ def drum_fit(heard: dict, target) -> tuple[float, list[str]]:
                                      ("brightness_hz", "brightness_hz", None), ("punch_db", "punch_db", 3.0)):
         lo, hi = getattr(target, key)
         v = heard.get(measured_key)
-        if v is None or lo <= v <= hi:
+        if v is None:
+            if key == "decay_s" and (lo, hi) != (0.0, 5.0):
+                # No tail to read: a wavetable cycle or a click, not a drum (Arturia's
+                # "BD Smash" wavetable ranked as a perfect pop kick this way).
+                total += UNMEASURED_DECAY_COST
+                why.append("decay unmeasured (no tail to read: a waveform or a click, not a hit)")
+            continue
+        if lo <= v <= hi:
             continue
         edge = lo if v < lo else hi
         d = abs(v - edge) / scale if scale else abs(math.log(max(v, 1e-3) / max(edge, 1e-3)))
@@ -610,6 +644,8 @@ class SampleLibrary:
                 continue
             if role and role.lower() not in f.get("roles", []) and role.lower() != (f.get("analysis") or {}).get("sounds_like"):
                 continue
+            if role and WAVEFORM_FOLDER.search(f.get("folder", "")):
+                continue   # a role search wants hits and phrases, not synth waveforms (a text search still finds them)
             dur = f.get("duration_s", 0)
             looks_loop = "loop" in f.get("roles", []) or "bpm" in f or (f.get("analysis") or {}).get("kind") == "loop"
             if kind == "loop" and not looks_loop:

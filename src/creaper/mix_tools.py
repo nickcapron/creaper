@@ -37,6 +37,11 @@ PRESENCE_CUT_DB, PRESENCE_HZ = -2.0, 3000
 AIR_LOW_PCT, AIR_HZ = 2.0, 10000
 TONE_LIFT_MIN_DB, TONE_LIFT_MAX_DB = 1.5, 6.0
 VOCAL_HIGHPASS_MIN_HZ = 80   # a singer's rumble and breath noise aren't "lowest strong content"
+# A whole kit's tone (role drums, never a lone kick, which is meant to be sub): the 90s pop
+# kit had 55% of its energy under 60 Hz and 5% over 2 kHz (centroid 588 Hz) and got no EQ,
+# so the master's limiter worked on its sub while the hats stayed dull.
+DRUM_SUB_HIGH_PCT, DRUM_SUB_TRIM_DB, DRUM_SUB_HZ = 40.0, -3.0, 60
+DRUM_PRESENCE_LOW_PCT, DRUM_AIR_LOW_PCT, DRUM_TONE_MAX_DB = 6.0, 4.0, 4.0
 
 
 def tone_lift_db(share_pct: float, low_pct: float) -> float:
@@ -287,6 +292,9 @@ def eq_changes(a: dict) -> list[dict]:
         changes += [{"parameter": "Freq-Band 2", "display_value": a["carve"]["hz"]},
                     {"parameter": "Gain-Band 2", "display_value": a["carve"]["db"]},
                     {"parameter": "BW-Band 2", "display_value": 1.0}]
+    if "sub_trim_db" in a:
+        changes += [{"parameter": "Freq-Low Shelf", "display_value": DRUM_SUB_HZ},
+                    {"parameter": "Gain-Low Shelf", "display_value": a["sub_trim_db"]}]
     if "presence_db" in a:
         changes += [{"parameter": "Freq-Band 3", "display_value": PRESENCE_HZ},
                     {"parameter": "Gain-Band 3", "display_value": a["presence_db"]},
@@ -379,6 +387,16 @@ def plan_mix(channels: list[dict], style: dict | None = None) -> dict:
                 air = (bands.get("air (6-20 kHz)") or {}).get("share_pct")
                 if air is not None and air < AIR_LOW_PCT:
                     a["air_db"] = tone_lift_db(air, AIR_LOW_PCT)
+            elif c["role"] == "drums" and bands:
+                # A kit: trim a sub that is most of it, and bring dull hats and snare up.
+                if (bands.get("sub (20-60 Hz)") or {}).get("share_pct", 0) > DRUM_SUB_HIGH_PCT:
+                    a["sub_trim_db"] = DRUM_SUB_TRIM_DB
+                presence = sum((bands.get(k) or {}).get("share_pct", 0) for k in ("upper mids (2-4 kHz)", "presence (4-6 kHz)"))
+                if presence and presence < DRUM_PRESENCE_LOW_PCT:
+                    a["presence_db"] = min(DRUM_TONE_MAX_DB, tone_lift_db(presence, DRUM_PRESENCE_LOW_PCT))
+                air = (bands.get("air (6-20 kHz)") or {}).get("share_pct")
+                if air is not None and air < DRUM_AIR_LOW_PCT:
+                    a["air_db"] = min(DRUM_TONE_MAX_DB, tone_lift_db(air, DRUM_AIR_LOW_PCT))
             if c["name"] in carve:
                 a["carve"] = carve[c["name"]]
         if c["role"] in COMPRESS and not c.get("has_comp") and (c.get("crest_db") or 0) > 12:
@@ -738,14 +756,18 @@ def _soft_clip(track, start_bar: float | None, end_bar: float | None, peak: floa
         return {"skipped": "silent in that range"}
     pre_fader_peak = peak - fader
     boost = round(max(0.0, min(9.0, DRUM_SHAVE_DB - pre_fader_peak)), 1)
-    if boost < 0.5:
-        return {"skipped": "its peaks already sit at the clipper's knee"}
     if pre_fader_peak + boost <= 0.5:
         return {"skipped": f"its peaks sit {-pre_fader_peak:g} dB under the clipper's knee: too far to round"}
+    if boost < 0.5:
+        # Peaks already over the knee (after the headroom move the faders are down and the
+        # pre-fader signal hot): the clipper rounds them with no boost. Skipping here left
+        # a 90s pop kit's 18 dB of peaks for the master's limiter to flatten.
+        boost = 0.0
     clip = call("add_fx", track=track, name=SOFT_CLIPPER)
     call("set_fx_parameters", track=track, fx=clip["index"], changes=[
         {"parameter": "Boost (dB)", "display_value": boost}, {"parameter": "Output Brickwall (dB)", "display_value": 0}])
-    call("set_track_properties", track=track, volume_db=round(fader - boost, 1))
+    if boost:
+        call("set_track_properties", track=track, volume_db=round(fader - boost, 1))
     shaved = round(min(DRUM_SHAVE_DB, pre_fader_peak + boost), 1)
     return {"boost_db": boost, "peaks_rounded_db": shaved, "fader_db": round(fader - boost, 1)}
 
@@ -1322,7 +1344,7 @@ def auto_mix(
             call("set_track_properties", track=track, pan=a["pan"])
         if a.get("skipped"):
             continue
-        if any(k in a for k in ("highpass_hz", "mud_cut_db", "carve", "presence_db", "air_db")):
+        if any(k in a for k in ("highpass_hz", "mud_cut_db", "carve", "presence_db", "air_db", "sub_trim_db")):
             # After the last instrument: an EQ before a synth does nothing, and one between
             # sampler slots filters only the slots before it.
             fx = call("get_track_details", track=track).get("fx", [])

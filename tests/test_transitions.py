@@ -108,6 +108,40 @@ def test_add_transitions_places_sounds_and_drum_touches(tmp_path, monkeypatch):
     cleared = next(a for a in deletes if a["pitch"] == 38)
     assert cleared["start"] == 30.0 and cleared["end"] == 32.0             # the fill replaces the snare under it
     assert len(list(tmp_path.glob("*.wav"))) == 2
+    assert "note" not in result                                            # not a creaper kit: its lanes are unknown
+
+
+def test_a_kit_without_a_crash_lane_is_said(tmp_path, monkeypatch):
+    """The 90s pop kit had kick, snare, clap, hats, toms and tambourine and no crash: every
+    crash the grooves and transitions wrote on GM 49 played nothing, and nobody knew."""
+    item = {"id": "{ITEM}", "type": "midi", "start": {"qn": 0.0}, "end": {"qn": 128.0}}
+    pads = [{"name": "kick - BD_Lindrum_Color_A_Pitched_01"}, {"name": "kick layer - BD_Lindrum_Color_A_Orig"},
+            {"name": "snare - SD_Lindrum_Color_A_Orig_06"}, {"name": "closed hat - CH_Lindrum"}, {"name": "VST: ReaEQ (Cockos)"}]
+
+    def fake_call(command, **args):
+        if command == "get_project_overview":
+            return {"time_signature": "4/4", "regions": [
+                {"name": "Verse", "start": {"bar": 1}}, {"name": "Chorus", "start": {"bar": 9}}],
+                "tracks": [{"guid": "{DRUMS}", "number": 1, "name": "Drums", "item_count": 1},
+                           {"guid": "{FX}", "number": 2, "name": "Transitions"}]}
+        if command == "bar_to_qn":
+            return {"qn": (args["bar"] - 1) * 4}
+        if command == "qn_to_times":
+            return [q * 0.5 for q in args["qns"]]
+        if command == "get_track_details":
+            return {"items": [], "fx": []} if args.get("track") == "{FX}" else {"items": [item], "fx": pads}
+        if command == "get_instrument_notes":
+            return {"instrument": "ReaSamplOmatic5000", "note_names": []}
+        return {}
+
+    monkeypatch.setattr(at, "call", fake_call)
+    monkeypatch.setattr(server, "call", fake_call)
+    monkeypatch.setattr(at, "_fx_folder", lambda: tmp_path)
+    assert at._kit_lanes("{DRUMS}") == {"kick", "snare", "closed hat"}
+    result = at.add_transitions(intensity="subtle", elements=["crash"])
+    assert result["changes"][0]["added"] == ["crash"] and result["note"].startswith("the drum kit has no crash lane")
+    pads.append({"name": "crash - Crash_Lindrum"})
+    assert "note" not in at.add_transitions(intensity="subtle", elements=["crash"])
 
 
 def test_regions_inside_others_and_on_the_same_bar_are_one_section():

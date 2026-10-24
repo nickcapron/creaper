@@ -146,6 +146,19 @@ def _drum_items(track) -> list[dict]:
     return [i for i in call("get_track_details", track=track).get("items", []) if i.get("type") == "midi"]
 
 
+def _kit_lanes(track) -> set[str] | None:
+    """The lanes of a kit build_drum_kit made on the track, read from its sampler pads'
+    names ('kick - BD_Lindrum', 'snare layer - Clap'); None when the drums are another
+    instrument, whose lanes we can't see."""
+    fx = call("get_track_details", track=track).get("fx", [])
+    lanes = set()
+    for f in fx:
+        m = re.match(r"^([a-z][a-z ]*?)(?: layer)? - ", f.get("name", ""), re.I)
+        if m:
+            lanes.add(m.group(1).strip().lower())
+    return lanes or None
+
+
 def _item_at(items: list[dict], qn: float) -> dict | None:
     return next((i for i in items if i["start"]["qn"] - 1e-6 <= qn < i["end"]["qn"] - 1e-6), None)
 
@@ -228,6 +241,12 @@ def add_transitions(
     bar_qn = _bar_qn(overview.get("time_signature"))
     report, notes = [], []
     drum_items = _drum_items(drum_ref) if drum_ref else []
+    if drum_items and any("crash" in c["elements"] for c in changes):
+        lanes = _kit_lanes(drum_ref)
+        if lanes is not None and "crash" not in lanes:
+            notes.append("the drum kit has no crash lane, so the crashes written on GM 49 (here and after the "
+                         "groove's fills) play nothing: find_samples(role='crash') and build_drum_kit on the drum "
+                         "track with samples={'crash': ...}")
     placed = [i["start"]["bar"] for i in call("get_track_details", track=fx_ref).get("items", [])]
     for c in changes:
         done: list[str] = []

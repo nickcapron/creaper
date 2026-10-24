@@ -180,6 +180,54 @@ PALETTES: dict[str, Palette] = {
 }
 
 
+# Drum targets by family, for genres without a palette of their own (samplelib.analyze's
+# numbers, as Drum describes). Pop had none, so a 90s pop kit went unranked and was built
+# on a sub-only "pitched" LinnDrum kick (88% under 90 Hz, centroid 62 Hz): 55% of the kit's
+# energy sat under 60 Hz and the master's limiter choked on it ("the drums came out messy").
+# (Every kick measures sub-heavy here, an acoustic Pearl kick at 0.89 and a 909 at 0.97, so
+# what tells a hit from a thud is its punch and decay, not its sub share.)
+_ACOUSTIC = {"kick": Drum(sub_share=(0.4, 1.0), decay_s=(0.08, 0.6), punch_db=(3, 60)),
+             "snare": Drum(decay_s=(0.12, 0.6), brightness_hz=(500, 5000)),
+             "clap": Drum(decay_s=(0.08, 0.4), brightness_hz=(700, 4000)),
+             "hat": Drum(decay_s=(0.02, 0.3), brightness_hz=(2500, 10000))}
+_PROGRAMMED = {"kick": Drum(sub_share=(0.5, 1.0), decay_s=(0.08, 0.5), punch_db=(2, 60)),
+               "snare": Drum(decay_s=(0.1, 0.5), brightness_hz=(800, 6000)),
+               "clap": Drum(decay_s=(0.08, 0.4), brightness_hz=(700, 4000)),
+               "hat": Drum(decay_s=(0.02, 0.25), brightness_hz=(3500, 12000))}
+FAMILY_DRUMS: dict[str, dict[str, Drum]] = {
+    "pop": _PROGRAMMED,
+    "r&b and soul": {**_PROGRAMMED, "kick": Drum(sub_share=(0.5, 1.0), decay_s=(0.1, 0.6), punch_db=(0, 60))},
+    "electronic": {**_PROGRAMMED, "kick": Drum(sub_share=(0.5, 1.0), decay_s=(0.1, 0.6), punch_db=(0, 60))},
+    "electronic dance": {**_PROGRAMMED, "kick": Drum(sub_share=(0.6, 1.0), decay_s=(0.12, 0.5), punch_db=(0, 60)),
+                         "hat": Drum(decay_s=(0.02, 0.2), brightness_hz=(4000, 12000))},
+    "hip-hop": {"kick": Drum(sub_share=(0.6, 1.0), decay_s=(0.15, 1.5)),
+                "snare": Drum(decay_s=(0.08, 0.4), brightness_hz=(900, 6000)),
+                "clap": Drum(decay_s=(0.08, 0.35)),
+                "hat": Drum(decay_s=(0.01, 0.15), brightness_hz=(4000, 14000))},
+    "rock": {**_ACOUSTIC, "kick": Drum(sub_share=(0.4, 1.0), decay_s=(0.08, 0.45), punch_db=(3, 60))},
+    "metal and punk": {**_ACOUSTIC, "kick": Drum(sub_share=(0.4, 1.0), decay_s=(0.06, 0.35), punch_db=(3, 60)),
+                       "snare": Drum(decay_s=(0.1, 0.5), brightness_hz=(700, 6000))},
+    "funk and gospel": _ACOUSTIC, "country and folk": _ACOUSTIC, "jazz": _ACOUSTIC, "blues": _ACOUSTIC,
+    "latin": _ACOUSTIC, "caribbean": _ACOUSTIC, "african": _ACOUSTIC,
+}
+# Anything else: a hit with some body and a tail that can be read, so a wavetable cycle
+# or a click never outranks a drum.
+DEFAULT_DRUMS = {"kick": Drum(sub_share=(0.3, 1.0), decay_s=(0.06, 1.5)),
+                 "snare": Drum(decay_s=(0.06, 1.0), brightness_hz=(400, 7000)),
+                 "clap": Drum(decay_s=(0.06, 0.6), brightness_hz=(500, 5000)),
+                 "hat": Drum(decay_s=(0.01, 0.4), brightness_hz=(2000, 14000))}
+
+
+def drum_target(genre, lane: str) -> Drum | None:
+    """What a kick, snare, clap or hat should measure like for the genre: its own palette's
+    target, else its family's, else the general one. None for other lanes."""
+    p = palette(genre)
+    if p and lane in p.drums:
+        return p.drums[lane]
+    family = FAMILY_DRUMS.get(getattr(genre, "family", "") or "", {})
+    return family.get(lane) or DEFAULT_DRUMS.get(lane)
+
+
 def palette(genre) -> Palette | None:
     """The genre's palette, else its parent's (a few generations up)."""
     from . import find

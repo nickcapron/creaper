@@ -20,6 +20,11 @@ FAMILY_FILLS = {
 }
 VARIATION_EVERY, FILL_EVERY, BIG_FILL_EVERY = 4, 8, 16
 REST = "."
+# The off-16th hats of an energy-4 section: a touch under the beat hats (velocity 85
+# against 100), not ghosts. At the ghost level (45) a pop chorus alternated loud and
+# near-silent hats, and a kit with velocity-split hat samples switched sample on every
+# other 16th: "messy" drums.
+SIXTEENTH_HAT = "6"
 
 
 def fill_style_for(genre) -> str:
@@ -46,8 +51,8 @@ def vary_groove(pattern: dict[str, str], step: float = 0.25, bars: int = 8, fill
     alive: bar 2 of every four a light change (a ghost hat or kick), bar 4 a stronger one
     (a ghost on the backbeat, an open hat, a kick pickup), never the same twice running;
     every FILL_EVERY-th bar a fill in fill_style (a beat long, two beats every
-    BIG_FILL_EVERY bars) and a crash on the next downbeat; energy 4 hats in 16ths,
-    energy 1 the kick on the strong beats only. Returns lane -> steps, ready for
+    BIG_FILL_EVERY bars) and a crash on the next downbeat; energy 4 hats in 16ths (the
+    off-16ths a touch softer), energy 1 the kick on the strong beats only. Returns lane -> steps, ready for
     drum_pattern_notes (step as given)."""
     rng = random.Random(seed)
     per_bar = max(1, int(round(bar_qn / step)))
@@ -74,7 +79,7 @@ def vary_groove(pattern: dict[str, str], step: float = 0.25, bars: int = 8, fill
             lane = lanes[hats]
             for i in range(s0, s1):
                 if not _hit(lane[i]) and i % 2 == 1:
-                    lane[i] = "o"      # the hats go to 16ths
+                    lane[i] = SIXTEENTH_HAT   # the hats go to 16ths
         if energy is not None and energy <= 1 and kick:
             lane = lanes[kick]
             for i in range(s0, s1):

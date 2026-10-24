@@ -97,8 +97,7 @@ def find_samples(
         g = genres.find(style)
         lane = {"closed hat": "hat", "open hat": "hat", "hat": "hat", "hats": "hat", "hihat": "hat", "hi-hat": "hat",
                 "hh": "hat", "rim": "snare"}.get(role.lower(), role.lower())
-        p = palettes.palette(g)
-        target = (p.drums.get(lane) if p else None)
+        target = palettes.drum_target(g, lane)   # the genre's own, its family's, or the general one
         lofi_ok = any(w in f"{g.name} {g.family} {' '.join(g.aliases)}".lower()
                       for w in ("lo-fi", "lofi", "chiptune", "boom bap", "8-bit", "vaporwave"))
     if target is not None and listen:
@@ -243,6 +242,43 @@ def velocity_bands(n: int) -> list[tuple[int, int]]:
     return [(edges[i], edges[i + 1] - 1 if i < n - 1 else 127) for i in range(n)]
 
 
+# A kick whose first 10 ms sit under its body: weight with no hit (every kick measures
+# sub-heavy, an acoustic one included, so the sub share can't tell them apart).
+KICK_PUNCH_MIN_DB = 0.0
+
+
+def kit_warnings(samples: dict[str, str | list[str]], layers: dict[str, list[Layer]] | None) -> list[str]:
+    """What a kit as given will do wrong when the grooves play it. From the 90s pop kit:
+    no crash lane (the groove's and add_transitions' crashes on GM 49 played nothing), the
+    snare's clap layer was the clap lane's own sample (pop puts both on 2 and 4: the clap
+    doubled), and a kick with no attack to it that the limiter choked on."""
+    out = []
+    lanes = {k.strip().lower(): (v if isinstance(v, list) else [v]) for k, v in samples.items()}
+    if "crash" not in lanes:
+        out.append("no crash lane: genre grooves put a crash (GM 49) on the downbeat after each fill and "
+                   "add_transitions on section starts, and here they'd play nothing. Add one: find_samples(role='crash') "
+                   "then build_drum_kit on this track with samples={'crash': ...}")
+    owners = {str(Path(p).resolve()).lower(): lane for lane, paths in lanes.items() for p in paths}
+    for lane, given in (layers or {}).items():
+        for layer in given:
+            other = owners.get(str(Path(layer.path).resolve()).lower())
+            if other and other != lane.strip().lower():
+                out.append(f"the {lane} lane's layer is the {other} lane's own sample: a pattern with {lane} and {other} "
+                           f"on the same step (pop's 2 and 4) plays it twice, louder and smeared. Drop the layer or "
+                           f"the {other} lane")
+    kick = lanes.get("kick")
+    if kick:
+        try:
+            heard = samplelib.analyze(kick[0])
+        except Exception:  # noqa: BLE001 - a warning isn't worth failing the build
+            heard = {}
+        if heard.get("punch_db") is not None and heard["punch_db"] < KICK_PUNCH_MIN_DB:
+            out.append(f"the kick has no attack (its first 10 ms sit {-heard['punch_db']:g} dB under its body): weight "
+                       "without a hit, and the master's limiter chokes on it. Layer a click or a punchier kick on it "
+                       "(layers=), or pick one with punch (find_samples with style= ranks them)")
+    return out
+
+
 @tool()
 def build_drum_kit(
     track: Annotated[str | int, Field(description="An empty track, or one without another instrument")],
@@ -331,6 +367,9 @@ def build_drum_kit(
     if any(len(v["samples"]) > 1 for v in kit.values()):
         out["tip"] = ("lanes with alternatives switch sample by velocity: give the part a feel (apply_feel) or "
                       "varied velocities so they alternate")
+    warnings = kit_warnings(samples, layers)
+    if warnings:
+        out["warnings"] = warnings
     if trim_silence:
         late = []
         for p in pads:
