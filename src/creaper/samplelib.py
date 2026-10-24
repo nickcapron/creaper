@@ -60,6 +60,18 @@ def instrument_kinds(name: str, folder: str = "") -> list[str]:
             if any(k in words or (len(k) >= 4 and k.replace(" ", "") in joined) for k in keys)]
 
 
+def playable_sfz(path: str) -> bool:
+    """Whether creaper can build an .sfz: its samples are all there (Arturia's own .sfz
+    files name samples a partial install never downloaded) and it fits the sampler."""
+    from . import sfz
+
+    try:
+        sfz.load(path)
+        return True
+    except Exception:  # noqa: BLE001 - missing samples, too many zones, unreadable
+        return False
+
+
 def instrument_matches(entry: dict, text: str | None, role: str | None) -> bool:
     """Whether an .sfz instrument answers a find_samples search: its words, and its kind
     for the role (any drum role finds the drum kits, 'vocal' the choirs)."""
@@ -67,14 +79,26 @@ def instrument_matches(entry: dict, text: str | None, role: str | None) -> bool:
         hay = " ".join(_words(entry["name"]) + _words(entry["folder"]) + entry["kinds"])
         if not all(w in hay for w in _words(text)):
             return False
-    if role:
-        r = role.lower()
-        want = {r, {"drums": "drum kit", "drum": "drum kit", "vocal": "choir", "woodwind": "woodwinds"}.get(r, r)}
-        if r in DRUM_ROLES:
-            want.add("drum kit")
-        if not want & set(entry["kinds"]):
-            return False
+    if role and not _wanted_kinds(role) & set(entry["kinds"]):
+        return False
     return bool(text or role)
+
+
+def _wanted_kinds(role: str) -> set[str]:
+    r = role.lower()
+    want = {r, {"drums": "drum kit", "drum": "drum kit", "vocal": "choir", "woodwind": "woodwinds"}.get(r, r)}
+    if r in DRUM_ROLES:
+        want.add("drum kit")
+    return want
+
+
+def instrument_rank(entry: dict, role: str | None) -> int:
+    """0 for an instrument named for the role ('CelloEnsSusVib'), 1 for one that only sits
+    in a folder named for it: Arturia's Augmented STRINGS folder holds tape and vinyl
+    textures that would otherwise crowd out the string sections."""
+    if not role:
+        return 0
+    return 0 if _wanted_kinds(role) & set(instrument_kinds(entry["name"])) else 1
 
 
 def _words(text: str) -> list[str]:
@@ -482,9 +506,11 @@ class SampleLibrary:
                     break   # a huge tree stops here instead of walking on with nothing to add
                 for name in names:
                     if Path(name).suffix.lower() == ".sfz":
-                        rel = os.path.relpath(root, folder)
-                        instruments.append({"path": os.path.join(root, name), "name": Path(name).stem, "folder": rel,
-                                            "kinds": instrument_kinds(Path(name).stem, rel)})
+                        path = os.path.join(root, name)
+                        if playable_sfz(path):
+                            rel = os.path.relpath(root, folder)
+                            instruments.append({"path": path, "name": Path(name).stem, "folder": rel,
+                                                "kinds": instrument_kinds(Path(name).stem, rel)})
                         continue
                     if Path(name).suffix.lower() not in AUDIO_EXTENSIONS:
                         continue
@@ -543,8 +569,10 @@ class SampleLibrary:
                 pass
 
     def instruments(self, text: str | None = None, role: str | None = None) -> list[dict]:
-        """The .sfz instruments in the sample folders that answer a search."""
-        return [i for i in self.index().get("instruments", []) if instrument_matches(i, text, role)]
+        """The .sfz instruments in the sample folders that answer a search, the ones
+        named for the role first."""
+        found = [i for i in self.index().get("instruments", []) if instrument_matches(i, text, role)]
+        return sorted(found, key=lambda i: instrument_rank(i, role))
 
     def search(self, text: str | None = None, role: str | None = None, kind: str | None = None,
                bpm: float | None = None, key: str | None = None, max_duration: float | None = None) -> list[dict]:

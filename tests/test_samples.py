@@ -29,14 +29,20 @@ def test_instrument_kinds_from_library_names():
     assert kinds("Timpani") == ["percussion"] and kinds("Harp") == ["harp"]
 
 
+def _sfz(folder, name, sample="s.wav", write_sample=True):
+    """An .sfz instrument with one region (and, unless asked not to, its sample)."""
+    folder.mkdir(parents=True, exist_ok=True)
+    if write_sample:
+        sf.write(str(folder / sample), np.zeros(4410, dtype="float32"), 44100)
+    (folder / f"{name}.sfz").write_text(f"<region> sample={sample} key=36\n")
+
+
 def test_the_index_lists_sfz_instruments_and_find_samples_offers_them(tmp_path, monkeypatch):
     from creaper import sample_tools
 
     root = tmp_path / "samples"
-    (root / "AVL Drumkits" / "Kit").mkdir(parents=True)
-    (root / "AVL Drumkits" / "Kit" / "Black_Pearl.sfz").write_text("<region> sample=kick.wav key=36\n")
-    (root / "Orchestra").mkdir()
-    (root / "Orchestra" / "CelloEnsSusVib.sfz").write_text("<region> sample=c.wav\n")
+    _sfz(root / "AVL Drumkits" / "Kit", "Black_Pearl", "kick.wav")
+    _sfz(root / "Orchestra", "CelloEnsSusVib", "c.wav")
     lib = samplelib.SampleLibrary(tmp_path / "data")
     lib.set_folders([str(root)])
     assert {i["name"]: i["kinds"] for i in lib.index()["instruments"]} == {
@@ -50,10 +56,27 @@ def test_the_index_lists_sfz_instruments_and_find_samples_offers_them(tmp_path, 
     assert "build_sampled_instrument" in out["instruments_note"]
 
 
+def test_instruments_named_for_the_role_come_before_ones_in_a_folder_named_for_it(tmp_path):
+    root = tmp_path / "samples"
+    _sfz(root / "Augmented STRINGS" / "Factory", "Bizarre Radio FM")     # a texture in a strings folder
+    _sfz(root / "VSCO", "SViolinVib")
+    lib = samplelib.SampleLibrary(tmp_path / "data")
+    lib.set_folders([str(root)])
+    assert [i["name"] for i in lib.instruments(None, "strings")] == ["SViolinVib", "Bizarre Radio FM"]
+
+
+def test_an_sfz_missing_its_samples_isnt_listed(tmp_path):
+    root = tmp_path / "samples"
+    _sfz(root, "Broken Cello", "gone.wav", write_sample=False)
+    _sfz(root, "Cello", "c.wav")
+    lib = samplelib.SampleLibrary(tmp_path / "data")
+    lib.set_folders([str(root)])
+    assert [i["name"] for i in lib.index()["instruments"]] == ["Cello"]
+
+
 def test_an_index_from_before_instruments_is_rebuilt(tmp_path):
     root = tmp_path / "samples"
-    root.mkdir()
-    (root / "Guitar.sfz").write_text("<region> sample=g.wav\n")
+    _sfz(root, "Guitar", "g.wav")
     lib = samplelib.SampleLibrary(tmp_path / "data")
     lib.set_folders([str(root)])
     lib._save_index({"folders": [str(root)], "built": "old", "files": []})
