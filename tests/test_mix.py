@@ -1,6 +1,6 @@
 """auto_mix's plan: roles, levels, EQ, compression, panning, sends, sidechains."""
 from creaper import mix_tools
-from creaper.mix_tools import plan_mix, role_of
+from creaper.mix_tools import plan_mix, role_of, section_balance
 
 
 def test_roles_from_names_and_sound():
@@ -38,11 +38,23 @@ def test_plan_sets_levels_relative_to_the_drums_for_the_genre():
     plan = plan_mix(chans, {"family": "electronic dance", "mix": {"low_end": "heavy"}})
     gains = {a["name"]: a["gain_db"] for a in plan["channels"]}
     assert plan["anchor_lufs"] == -10
-    assert gains == {"Kick": 0, "Bass": -5.0, "Pad": -12.0, "Vocal": 4.0}   # bass -1 LU (heavy low end), pad -10, vocal -1
+    assert gains == {"Kick": 0, "Bass": -5.0, "Pad": -12.0, "Vocal": 6.0}   # bass -1 LU (heavy low end), pad -10, vocal +1
     assert [{k: d[k] for k in ("source", "target", "depth")} for d in plan["sidechains"]] == [
         {"source": "Kick", "target": "Bass", "depth": "medium"}, {"source": "Kick", "target": "Pad", "depth": "light"}]
     pop = plan_mix(chans, {"family": "pop", "mix": {"low_end": "moderate"}})
-    assert {a["name"]: a["gain_db"] for a in pop["channels"]}["Vocal"] == 6.0 and not pop["sidechains"]
+    # Pop wants the vocal 3 LU over the drums (+8 here); boosts stop at MAX_BOOST_DB.
+    assert {a["name"]: a["gain_db"] for a in pop["channels"]}["Vocal"] == mix_tools.MAX_BOOST_DB == 6.0 and not pop["sidechains"]
+
+
+def test_a_sung_vocal_sits_over_the_drums_and_the_balance_says_so():
+    chans = [channel("Drums", "drums", -10), channel("Vocal", "vocal", -10), channel("Keys", "keys", -10)]
+    gains = {a["name"]: a["gain_db"] for a in plan_mix(chans, {"family": "electronic dance"})["channels"]}
+    assert gains["Vocal"] == 1.0 and gains["Keys"] == -7.0
+    # measure_tracks' advice follows the same place, so the model isn't told to cut what the plan raised
+    # (it cut a disco vocal 8 dB after "6 LU over its place": the export had it 5 LU under the drums).
+    flags = section_balance({"Chorus": {"Drums": -20.0, "Vocal": -13.0, "Keys": -27.0}},
+                            {"Drums": "drums", "Vocal": "vocal", "Keys": "keys"})
+    assert flags == ["Chorus: Vocal is 6.0 LU over its place (a vocal part sits about 1 LU over the drums)"]
 
 
 def test_a_cue_keeps_its_drone_under_the_solo_melody():
@@ -493,12 +505,26 @@ def test_tone_pass_presence_air_carve_and_low_heavy_keys():
     acts = {a["name"]: a for a in mix_tools.plan_mix(channels)["channels"]}
     assert acts["Bass"]["carve"] == {"hz": 32, "db": mix_tools.CARVE_DB}     # where the kick is loudest
     assert acts["Kick"]["carve"] == {"hz": 63, "db": mix_tools.CARVE_DB}     # and the other way round
-    assert acts["Lead"]["presence_db"] == mix_tools.PRESENCE_LIFT_DB and acts["Lead"]["air_db"] == mix_tools.AIR_LIFT_DB
+    # Lifts scale with the deficit: 5% of 2-6 kHz against the 8% floor is +2 dB, 0.5% air against 2% is the +6 cap.
+    assert acts["Lead"]["presence_db"] == 2.0 and acts["Lead"]["air_db"] == 6.0
     assert acts["Vocal"]["presence_db"] == mix_tools.PRESENCE_CUT_DB and "air_db" not in acts["Vocal"]
     assert acts["Pad"]["highpass_hz"] >= 250
     # Every EQ sets band 5 on purpose: a bass with only a carve isn't high-passed at ReaEQ's default 100 Hz.
     bass_eq = {c["parameter"]: c["display_value"] for c in mix_tools.eq_changes(acts["Bass"])}
     assert bass_eq["Freq-High Pass 5"] == mix_tools.NO_HIGHPASS_HZ and bass_eq["Freq-Band 2"] == 32
+
+
+def test_a_dull_sung_vocal_gets_a_real_lift_and_keeps_its_high_pass():
+    from creaper import mix_tools
+    # The DiffSinger vocal in the synth-funk song: 3% of its energy over 2 kHz, "lowest strong
+    # content" at 88 Hz (breath and rumble) that pulled its high-pass down to 53 Hz.
+    spec = _spec(upper=2, presence=1, air=1)
+    spec["octave_bands_db"] = {"31.5 Hz": -40, "63 Hz": -30, "125 Hz": -15, "1 kHz": -10}
+    vocal = {"name": "Vocal", "role": "vocal", "level": -13, "spectrum": spec}
+    act = {a["name"]: a for a in mix_tools.plan_mix([{"name": "Drums", "role": "drums", "level": -10}, vocal])["channels"]}["Vocal"]
+    assert act["presence_db"] == 4.5 and act["air_db"] == 3.0   # 10 log10(8/3) and 10 log10(2/1), to the half dB
+    assert act["highpass_hz"] >= mix_tools.VOCAL_HIGHPASS_MIN_HZ
+    assert mix_tools.tone_lift_db(0, 8) == mix_tools.TONE_LIFT_MAX_DB and mix_tools.tone_lift_db(7.9, 8) == mix_tools.TONE_LIFT_MIN_DB
 
 
 def test_low_strings_and_brass_keep_their_fundamentals():

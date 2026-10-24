@@ -21,8 +21,10 @@ from pydantic import Field
 from . import analysis, genres, plugin_profiles
 from .server import DESTRUCTIVE, Bar, analyze_audio, call, setup_sidechain, tool
 
-# Loudness of each role while it plays (max short-term LUFS), relative to the drums.
-ROLE_LEVELS = {"kick": 0, "drums": 0, "snare": -3, "perc": -9, "bass": -2, "vocal": -1, "lead": -5,
+# Loudness of each role while it plays (max short-term LUFS), relative to the drums. The
+# voice is the record: it sits over the drums (at 1 LU under them a synth-funk vocal was
+# "muddied into the mix"; the wall genres below pull it back inside the guitars).
+ROLE_LEVELS = {"kick": 0, "drums": 0, "snare": -3, "perc": -9, "bass": -2, "vocal": 1, "lead": -5,
                "keys": -7, "pad": -10, "fx": -12, "other": -7}
 HIGHPASS_HZ = {"snare": 100, "perc": 300, "vocal": 110, "lead": 150, "keys": 140, "pad": 180, "fx": 150, "other": 120}
 REVERB_DB = {"vocal": -12, "lead": -15, "keys": -15, "pad": -9, "snare": -21, "perc": -24, "other": -18}
@@ -31,8 +33,21 @@ COMPRESS = {"vocal": (3.0, 5, 80), "bass": (4.0, 20, 120), "lead": (2.5, 10, 100
 HEADROOM_PEAK_DB = -6.0
 # The tone pass (shares of each part's own energy, %).
 PRESENCE_LOW_PCT, PRESENCE_HIGH_PCT = 8.0, 30.0   # 2-6 kHz for vocals and leads: lift under, cut over
-PRESENCE_LIFT_DB, PRESENCE_CUT_DB, PRESENCE_HZ = 1.5, -2.0, 3000
-AIR_LOW_PCT, AIR_LIFT_DB, AIR_HZ = 2.0, 1.5, 10000
+PRESENCE_CUT_DB, PRESENCE_HZ = -2.0, 3000
+AIR_LOW_PCT, AIR_HZ = 2.0, 10000
+TONE_LIFT_MIN_DB, TONE_LIFT_MAX_DB = 1.5, 6.0
+VOCAL_HIGHPASS_MIN_HZ = 80   # a singer's rumble and breath noise aren't "lowest strong content"
+
+
+def tone_lift_db(share_pct: float, low_pct: float) -> float:
+    """The lift that brings a band's share of a part's energy up to its floor,
+    10 log10(floor / share), between 1.5 and 6 dB in half-dB steps. A DiffSinger vocal
+    had 3% of its energy over 2 kHz against a mix's 20-25%: the fixed 1.5 dB left it
+    dull, and dull reads as buried whatever its level."""
+    if share_pct <= 0:
+        return TONE_LIFT_MAX_DB
+    db = 10 * math.log10(low_pct / share_pct)
+    return max(TONE_LIFT_MIN_DB, min(TONE_LIFT_MAX_DB, round(db * 2) / 2))
 CARVE_DB = -2.5          # kick and bass each cut where the other is loudest below 120 Hz
 LOW_HEAVY_KEYS_PCT = 15  # keys and pads with more of their energy under 250 Hz get a higher high pass
 # ... except parts whose low register is their job: that high pass took the fundamentals
@@ -124,6 +139,8 @@ def highpass_for(role: str, spectrum: dict | None) -> int | None:
     lowest = lowest_strong_hz(spectrum)
     if lowest is not None:
         hz = min(hz, 0.6 * lowest)
+    if role == "vocal":
+        hz = max(hz, VOCAL_HIGHPASS_MIN_HZ)
     return int(round(hz)) if hz >= 40 else None
 
 
@@ -160,8 +177,10 @@ def section_balance(levels: dict[str, dict[str, float | None]], roles: dict[str,
             role = roles.get(t, "other")
             if role in ("kick", "drums") and (v == anchor or not drums):
                 continue
-            off = v - (anchor + ROLE_LEVELS.get(role, -7))
-            where = (f"about {-ROLE_LEVELS.get(role, -7):g} LU under the drums" if drums else "in line with the rest")
+            place = ROLE_LEVELS.get(role, -7)
+            off = v - (anchor + place)
+            where = (f"about {abs(place):g} LU {'over' if place > 0 else 'under'} the drums" if drums
+                     else "in line with the rest")
             if off > OVER_LU:
                 out.append(f"{section}: {t} is {off:.1f} LU over its place (a {role} part sits {where})")
             elif -SPILL_LU <= off < -UNDER_LU and role != "fx":
@@ -312,7 +331,7 @@ def plan_mix(channels: list[dict], style: dict | None = None) -> dict:
     if style.get("family") in WALL_FAMILIES:
         # The guitars are the wall the voice sits inside: at the pop balance a black metal
         # vocal sat 14 dB over its guitars ("all I can hear is the singing").
-        offsets["vocal"] -= 3 if style["family"] == "metal and punk" else 1
+        offsets["vocal"] -= 5 if style["family"] == "metal and punk" else 2
         offsets["keys"] = max(offsets["keys"], -3)
         offsets["lead"] = max(offsets["lead"], -3)
     if style.get("family") in MELODY_OVER_BED_FAMILIES:
@@ -354,12 +373,12 @@ def plan_mix(channels: list[dict], style: dict | None = None) -> dict:
             if c["role"] in ("vocal", "lead"):
                 presence = sum((bands.get(k) or {}).get("share_pct", 0) for k in ("upper mids (2-4 kHz)", "presence (4-6 kHz)"))
                 if presence and presence < PRESENCE_LOW_PCT:
-                    a["presence_db"] = PRESENCE_LIFT_DB
+                    a["presence_db"] = tone_lift_db(presence, PRESENCE_LOW_PCT)
                 elif presence > PRESENCE_HIGH_PCT:
                     a["presence_db"] = PRESENCE_CUT_DB
                 air = (bands.get("air (6-20 kHz)") or {}).get("share_pct")
                 if air is not None and air < AIR_LOW_PCT:
-                    a["air_db"] = AIR_LIFT_DB
+                    a["air_db"] = tone_lift_db(air, AIR_LOW_PCT)
             if c["name"] in carve:
                 a["carve"] = carve[c["name"]]
         if c["role"] in COMPRESS and not c.get("has_comp") and (c.get("crest_db") or 0) > 12:
@@ -1082,7 +1101,8 @@ PLATE_DECAY_S = {"pop": 2, "r&b and soul": 2, "hip-hop": 2, "rock": 2, "metal an
 
 
 VOCAL_COMP, DRUM_BUS_COMP = "Comp FET-76", "Bus FORCE"
-VOCAL_COMP_DB = 4.0   # what the vocal's 1176 takes off its loud words: an even, forward voice
+VOCAL_COMP_DB = 6.0   # what the vocal's 1176 takes off its loud words: an even, forward voice (4 dB
+                      # left a synth-funk vocal loose enough that the user reached for a bus compressor)
 
 
 def _add_first(track: str | int, names: tuple[str, ...], **where) -> dict:
