@@ -112,9 +112,10 @@ Sounds:
   of instrument: a ROMpler or preset player for an M1 house piano or organ, FM for DX7
   pianos and bells, a Rhodes or Wurlitzer model for those, a piano model only for a real
   piano. If nothing close is installed, say what you're using; never call a sound
-  something it isn't. With no guitar instrument or samples, say so rather than faking one.
-- Designed factory presets sound finished; a patch built from a default rarely does.
-  Beyond Arturia: audition_sounds with REAPER's presets and saved sounds.
+  something it isn't. Real guitars, orchestra and acoustic drums: the .sfz instruments
+  find_samples(role) lists, played by build_sampled_instrument(sfz_path); with none, say
+  so rather than faking one.
+- Beyond Arturia: audition_sounds with REAPER's presets and saved sounds.
 - To adjust a sound: get_fx_parameters (search "cutoff", "env", "attack", "reson"...),
   then set_fx_parameters with display_value for numbers and display_text for menus.
   Move controls part way: brightness, resonance, drive and presence at their extremes

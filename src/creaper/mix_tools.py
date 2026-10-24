@@ -973,16 +973,23 @@ def _delay_return(bpm: float) -> dict:
             return {"track": t["guid"], "name": t["name"], "reused": True}
     made = call("create_track", name="Delay")
     guid = made["track"].get("guid") or "Delay"
-    call("add_fx", track=guid, name="ReaDelay")
     dotted_eighth_ms = round(0.75 * 60000 / bpm, 1)
-    set_result = call("set_fx_parameters", track=guid, fx=1, changes=[
-        {"parameter": "Wet", "display_value": 0}, {"parameter": "Dry", "display_value": -150},
-        {"parameter": "Length (time)", "display_value": dotted_eighth_ms},
-        {"parameter": "Length (musical)", "display_value": 0},
-        {"parameter": "Feedback", "display_value": -9},
-        {"parameter": "Lowpass", "display_value": 5000}, {"parameter": "Hipass", "display_value": 300}])
+    fx = _add_first(guid, (TAPE_DELAY, "ReaDelay"))
+    if TAPE_DELAY.lower() in (fx.get("name") or "").lower():
+        # A tape echo: each repeat darker and thinner than the last, with a little flutter.
+        changes = [{"parameter": "Dry / Wet", "display_value": 1.0}, {"parameter": "Rates Sync", "display_text": "Off"},
+                   {"parameter": "Repeat Rate Left", "display_value": min(1000.0, dotted_eighth_ms)},
+                   {"parameter": "Intensity", "display_value": 0.3},
+                   {"parameter": "Bass", "display_value": -0.5}, {"parameter": "Treble", "display_value": -0.5}]
+    else:
+        changes = [{"parameter": "Wet", "display_value": 0}, {"parameter": "Dry", "display_value": -150},
+                   {"parameter": "Length (time)", "display_value": dotted_eighth_ms},
+                   {"parameter": "Length (musical)", "display_value": 0},
+                   {"parameter": "Feedback", "display_value": -9},
+                   {"parameter": "Lowpass", "display_value": 5000}, {"parameter": "Hipass", "display_value": 300}]
+    set_result = call("set_fx_parameters", track=guid, fx=fx.get("index", 1), changes=changes)
     failed = [c for c in set_result.get("results", []) if isinstance(c, dict) and c.get("error")]
-    out = {"track": guid, "name": "Delay", "time_ms": dotted_eighth_ms, "reused": False}
+    out = {"track": guid, "name": "Delay", "time_ms": dotted_eighth_ms, "reused": False, "plugin": fx.get("name")}
     if failed:
         out["not_set"] = [c.get("parameter") for c in failed]
     return out
@@ -1050,26 +1057,58 @@ def _predelay_ms(bpm: float) -> float:
     return round(max(20.0, min(40.0, 60000 / bpm / 16)), 1)
 
 
+# The user's Arturia effects, preferred to REAPER's own where they're installed: the
+# stock ReaVerbate and ReaDelay were the plainest part of every mix ("amateurish").
+PLATE_REVERB, HALL_REVERB, TAPE_DELAY = "Rev PLATE-140", "Rev INTENSITY", "Delay TAPE-201"
+HALL_FAMILIES = {"classical", "film and games", "ambient and experimental"}
+PLATE_DECAY_S = {"pop": 2, "r&b and soul": 2, "hip-hop": 2, "rock": 2, "metal and punk": 2}   # else 3
+
+
+def _add_first(track: str | int, names: tuple[str, ...]) -> dict:
+    """Adds the first of these plugins that's installed; the last one is REAPER's own."""
+    for name in names[:-1]:
+        try:
+            return call("add_fx", track=track, name=name)
+        except Exception:  # noqa: BLE001 - not installed: the next one
+            continue
+    return call("add_fx", track=track, name=names[-1])
+
+
 def _reverb_return(bpm: float = 120.0, family: str | None = None) -> str:
-    """The shared reverb: an existing return (left as the user set it), or ReaVerbate
-    sized for the genre, with a tempo-aware pre-delay and its lows and highs filtered
-    off so it gives depth without mud."""
+    """The shared reverb: an existing return (left as the user set it), or Arturia's
+    plate (a hall for film, ambient and classical), else ReaVerbate sized for the genre,
+    with a tempo-aware pre-delay and its lows and highs filtered off so it gives depth
+    without mud."""
     overview = call("get_project_overview")
     for t in overview["tracks"]:
         if t["name"].lower() == "drum room":
             continue  # the drums' short room isn't the main reverb
-        if re.search(r"verb", t["name"], re.I) or any("verb" in f.lower() for f in t.get("fx", [])):
+        if re.search(r"verb", t["name"], re.I) or any(re.search(r"verb|\bRev [A-Z]", f, re.I) for f in t.get("fx", [])):
             if not t.get("item_count"):
                 return t["name"]
     call("create_track", name="Reverb")
-    call("add_fx", track="Reverb", name="ReaVerbate")
-    call("set_fx_parameters", track="Reverb", fx=1, changes=[
-        {"parameter": "Wet", "display_value": 0}, {"parameter": "Dry", "display_value": -150},
-        {"parameter": "Room size", "value": REVERB_SIZE.get(family or "", 0.5)},
-        {"parameter": "Dampening", "value": 0.5},
-        {"parameter": "Delay", "display_value": _predelay_ms(bpm)},
-        {"parameter": "Hipass", "display_value": REVERB_FILTER_HZ[0]},
-        {"parameter": "Lowpass", "display_value": REVERB_FILTER_HZ[1]}])
+    hall = family in HALL_FAMILIES
+    fx = _add_first("Reverb", (HALL_REVERB if hall else PLATE_REVERB, "ReaVerbate"))
+    name = (fx.get("name") or "").lower()
+    if PLATE_REVERB.lower() in name:
+        changes = [{"parameter": "Blend Dry/wet", "display_value": 1.0},
+                   {"parameter": "Decay Time", "display_value": PLATE_DECAY_S.get(family or "", 3)},
+                   {"parameter": "Pre Delay", "display_value": _predelay_ms(bpm)},
+                   {"parameter": "HP Filter", "display_value": REVERB_FILTER_HZ[0]}]   # its own shelf darkens the top
+    elif HALL_REVERB.lower() in name:
+        changes = [{"parameter": "Dry/Wet Balance", "display_value": 1.0},
+                   {"parameter": "Size", "display_value": REVERB_SIZE.get(family or "", 0.5)},
+                   {"parameter": "Predelay", "display_value": _predelay_ms(bpm)},
+                   {"parameter": "Pre Filter Frequency", "display_value": REVERB_FILTER_HZ[0]},
+                   {"parameter": "Post Filter Frequency", "display_value": REVERB_FILTER_HZ[1]}]
+    else:
+        changes = [{"parameter": "Wet", "display_value": 0}, {"parameter": "Dry", "display_value": -150},
+                   {"parameter": "Room size", "value": REVERB_SIZE.get(family or "", 0.5)},
+                   {"parameter": "Dampening", "value": 0.5},
+                   {"parameter": "Delay", "display_value": _predelay_ms(bpm)},
+                   {"parameter": "Hipass", "display_value": REVERB_FILTER_HZ[0]},
+                   {"parameter": "Lowpass", "display_value": REVERB_FILTER_HZ[1]}]
+    call("set_fx_parameters", track="Reverb", fx=fx.get("index", 1), changes=changes)
     return "Reverb"
 
 
@@ -1078,7 +1117,7 @@ def auto_mix(
     style: Annotated[str | None, Field(description="Genre (get_genre_profile) to balance for, e.g. 'house', 'pop'")] = None,
     start_bar: Bar = None,
     end_bar: Annotated[float | None, Field(description="Measure this range (default: the whole song)")] = None,
-    reverb: Annotated[bool, Field(description="Feed a reverb return (an existing one, or a new ReaVerbate)")] = True,
+    reverb: Annotated[bool, Field(description="Feed a reverb return (an existing one, or a new one: Arturia's plate or hall when installed, else ReaVerbate)")] = True,
     sidechain: Annotated[bool, Field(description="Duck bass (and pads) under the kick in dance styles, depth measured")] = True,
     glue: Annotated[bool, Field(description=(
         "Glue the mix together: the drums through one calibrated bus compressor and a shared short room, leads "

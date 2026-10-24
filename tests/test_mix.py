@@ -291,6 +291,62 @@ def test_the_main_reverb_is_never_the_drum_room(monkeypatch):
     assert mix_tools._reverb_return() == "Reverb" and any(c == "create_track" for c, _ in calls)
 
 
+def _fx_fake(monkeypatch, installed):
+    """auto_mix's returns against a REAPER with these plugins (add_fx fails on others)."""
+    from creaper import mix_tools
+    calls = []
+
+    def fake_call(command, **args):
+        calls.append((command, args))
+        if command == "get_project_overview":
+            return {"tracks": [], "tempo_bpm": 120}
+        if command == "create_track":
+            return {"track": {"guid": "{NEW}", "number": 5}}
+        if command == "add_fx":
+            if not any(n.lower() in args["name"].lower() for n in installed):
+                raise RuntimeError(f"no FX named '{args['name']}'")
+            return {"name": f"VST3: {args['name']} (Arturia)" if "Rea" not in args["name"] else f"VST: {args['name']} (Cockos)",
+                    "index": 1}
+        if command == "set_fx_parameters":
+            return {"results": [{"parameter": c["parameter"]} for c in args["changes"]]}
+        return {}
+
+    monkeypatch.setattr(mix_tools, "call", fake_call)
+    settings = lambda: {c["parameter"]: c.get("display_value", c.get("display_text", c.get("value")))  # noqa: E731
+                        for cmd, a in calls if cmd == "set_fx_parameters" for c in a["changes"]}
+    return mix_tools, calls, settings
+
+
+def test_the_returns_use_the_users_arturia_effects(monkeypatch):
+    mix_tools, calls, settings = _fx_fake(monkeypatch, ["Rev PLATE-140", "Rev INTENSITY", "Delay TAPE-201"])
+    assert mix_tools._reverb_return(120, "pop") == "Reverb"
+    assert [a["name"] for c, a in calls if c == "add_fx"] == ["Rev PLATE-140"]
+    assert settings() == {"Blend Dry/wet": 1.0, "Decay Time": 2, "Pre Delay": 31.2, "HP Filter": 280}
+    mix_tools, calls, settings = _fx_fake(monkeypatch, ["Rev PLATE-140", "Rev INTENSITY", "Delay TAPE-201"])
+    mix_tools._reverb_return(90, "film and games")                       # a hall for a cue
+    assert [a["name"] for c, a in calls if c == "add_fx"] == ["Rev INTENSITY"] and settings()["Size"] == 0.65
+    mix_tools, calls, settings = _fx_fake(monkeypatch, ["Delay TAPE-201"])
+    out = mix_tools._delay_return(120)
+    assert out["plugin"].startswith("VST3: Delay TAPE-201") and settings()["Repeat Rate Left"] == 375.0
+    assert settings()["Dry / Wet"] == 1.0 and settings()["Rates Sync"] == "Off"
+
+
+def test_the_returns_fall_back_to_reapers_own(monkeypatch):
+    mix_tools, calls, settings = _fx_fake(monkeypatch, ["ReaVerbate", "ReaDelay"])
+    mix_tools._reverb_return(120, "pop")
+    assert [a["name"] for c, a in calls if c == "add_fx"] == ["Rev PLATE-140", "ReaVerbate"]
+    assert settings()["Room size"] == 0.35
+    mix_tools, calls, settings = _fx_fake(monkeypatch, ["ReaVerbate", "ReaDelay"])
+    assert mix_tools._delay_return(120)["plugin"] == "VST: ReaDelay (Cockos)" and settings()["Feedback"] == -9
+
+
+def test_an_arturia_reverb_return_is_reused(monkeypatch):
+    from creaper import mix_tools
+    monkeypatch.setattr(mix_tools, "call", lambda command, **a: {"tracks": [
+        {"name": "Space", "item_count": 0, "fx": ["VST3: Rev PLATE-140 (Arturia)"]}]} if command == "get_project_overview" else {})
+    assert mix_tools._reverb_return() == "Space"
+
+
 def test_mix_bus_glue_goes_before_the_limiter(monkeypatch):
     from creaper import mix_tools, server
     calls = []

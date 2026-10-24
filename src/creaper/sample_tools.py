@@ -65,7 +65,7 @@ def find_samples(
     search: Annotated[str | None, Field(description="Words in the file or folder name, e.g. '808 kick', 'vinyl', 'amen'")] = None,
     role: Annotated[str | None, Field(description=(
         "kick, snare, clap, closed hat, open hat, crash, ride, tom, rim, shaker, percussion, 808, bass, pad, lead, "
-        "keys, pluck, chord, arp, vocal, fx, guitar, strings, brass, loop"))] = None,
+        "keys, pluck, chord, arp, vocal, fx, guitar, strings, brass, woodwinds, drums, loop"))] = None,
     kind: Annotated[Literal["loop", "one-shot"] | None, Field(description="Loops (with a tempo) or single hits")] = None,
     bpm: Annotated[float | None, Field(description="Loops at (or double/half) this tempo")] = None,
     key: Annotated[str | None, Field(description="Loops in this key, e.g. 'A minor'")] = None,
@@ -82,8 +82,10 @@ def find_samples(
     the genre's drums, and lo-fi files (8-bit, or recorded under 32 kHz) are flagged unless
     the style is lo-fi. Use it to find drum hits, loops, risers or vocals;
     place_loop puts a loop in time and key, build_drum_kit and
-    build_sampled_instrument turn hits into playable instruments. (Saved plugin
-    sounds are in list_sounds.) Read-only."""
+    build_sampled_instrument turn hits into playable instruments. It also lists the
+    sampled instruments (.sfz) the folders hold, real guitars, orchestral sections and
+    acoustic drum kits among them, ready for build_sampled_instrument(sfz_path). (Saved
+    plugin sounds are in list_sounds.) Read-only."""
     if refresh:
         library.index(refresh=True)
     hits = library.search(search, role, kind, bpm, key)
@@ -142,10 +144,15 @@ def find_samples(
         shown.append(entry)
     total = len(library.index().get("files", []))
     out = {"matches": len(hits), "shown": shown, "library_files": total}
+    instruments = library.instruments(search, role)
+    if instruments:
+        out["instruments"] = [{"sfz_path": i["path"], "name": i["name"], "kinds": i["kinds"]} for i in instruments[:12]]
+        out["instruments_note"] = ("Sampled instruments, recorded from the real thing: build_sampled_instrument(track, "
+                                   "sfz_path=...) plays one (a drum kit's keys: map_drum_kit)")
     if target is not None:
         out["fit"] = "ranked by fit to the genre's drums: score 0 fits, lower is better; off says what's outside"
 
-    if not hits:
+    if not hits and not instruments:
         out["tip"] = ("Nothing matched. Try fewer words, a role instead of a name, or sample_folders(add=...) to "
                       "index another folder.")
     return out

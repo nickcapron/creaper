@@ -20,6 +20,46 @@ def test_names():
     assert "snare" in samplelib.roles_from_name("SNAREA12")
 
 
+def test_instrument_kinds_from_library_names():
+    kinds = samplelib.instrument_kinds
+    assert kinds("CelloEnsSusVib") == ["strings"] and kinds("SViolinPizz") == ["strings"]
+    assert kinds("FHornSus") == ["brass"] and kinds("BassoonStac") == ["woodwinds"]
+    assert kinds("EGuitarFSBS-dist1 bridge 20220911", "FreePats Distorted Guitar 1") == ["guitar"]
+    assert kinds("Black_Pearl_2023_repack", "AVL Drumkits/BLACK_PEARL_2023_repack") == ["drum kit"]
+    assert kinds("Timpani") == ["percussion"] and kinds("Harp") == ["harp"]
+
+
+def test_the_index_lists_sfz_instruments_and_find_samples_offers_them(tmp_path, monkeypatch):
+    from creaper import sample_tools
+
+    root = tmp_path / "samples"
+    (root / "AVL Drumkits" / "Kit").mkdir(parents=True)
+    (root / "AVL Drumkits" / "Kit" / "Black_Pearl.sfz").write_text("<region> sample=kick.wav key=36\n")
+    (root / "Orchestra").mkdir()
+    (root / "Orchestra" / "CelloEnsSusVib.sfz").write_text("<region> sample=c.wav\n")
+    lib = samplelib.SampleLibrary(tmp_path / "data")
+    lib.set_folders([str(root)])
+    assert {i["name"]: i["kinds"] for i in lib.index()["instruments"]} == {
+        "Black_Pearl": ["drum kit"], "CelloEnsSusVib": ["strings"]}
+    assert [i["name"] for i in lib.instruments(None, "snare")] == ["Black_Pearl"]
+    assert [i["name"] for i in lib.instruments("cello", None)] == ["CelloEnsSusVib"]
+    assert lib.instruments(None, None) == [] and lib.instruments(None, "guitar") == []
+    monkeypatch.setattr(sample_tools, "library", lib)
+    out = sample_tools.find_samples(role="strings", listen=False)
+    assert out["instruments"][0]["sfz_path"].endswith("CelloEnsSusVib.sfz") and "tip" not in out
+    assert "build_sampled_instrument" in out["instruments_note"]
+
+
+def test_an_index_from_before_instruments_is_rebuilt(tmp_path):
+    root = tmp_path / "samples"
+    root.mkdir()
+    (root / "Guitar.sfz").write_text("<region> sample=g.wav\n")
+    lib = samplelib.SampleLibrary(tmp_path / "data")
+    lib.set_folders([str(root)])
+    lib._save_index({"folders": [str(root)], "built": "old", "files": []})
+    assert [i["name"] for i in lib.index()["instruments"]] == ["Guitar"]
+
+
 def _drum_loop(bpm: float, bars: int = 2) -> np.ndarray:
     beat = 60 / bpm
     n = int(bars * 4 * beat * d.FS)

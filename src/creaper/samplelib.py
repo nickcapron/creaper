@@ -40,6 +40,41 @@ ROLE_WORDS = {
 }
 DRUM_ROLES = {"kick", "snare", "clap", "closed hat", "open hat", "crash", "ride", "cymbal", "tom", "rim", "shaker",
               "tambourine", "cowbell", "percussion", "808"}
+# What an .sfz instrument is, from its file and folder names (VSCO's "CelloEnsSusVib",
+# FreePats' "EGuitarFSBS", AVL's "Drumkits").
+INSTRUMENT_WORDS = {
+    "guitar": ("guitar", "gtr"), "strings": ("violin", "viola", "cello", "contrabass", "strings", "string"),
+    "brass": ("horn", "trumpet", "trombone", "tuba", "brass"),
+    "woodwinds": ("flute", "piccolo", "oboe", "clarinet", "bassoon", "sax", "woodwind", "woodwinds"),
+    "drum kit": ("drumkit", "drumkits", "drums", "kit"),
+    "percussion": ("timpani", "glockenspiel", "marimba", "xylophone", "vibraphone", "percussion", "perc", "bells"),
+    "keys": ("piano", "upright", "organ", "rhodes", "harpsichord", "celesta"), "harp": ("harp",),
+    "choir": ("choir", "chorus", "voices"), "bass": ("bass guitar", "ebass", "bassguitar"),
+}
+
+
+def instrument_kinds(name: str, folder: str = "") -> list[str]:
+    words = _words(name) + _words(folder)
+    joined = "".join(words)
+    return [kind for kind, keys in INSTRUMENT_WORDS.items()
+            if any(k in words or (len(k) >= 4 and k.replace(" ", "") in joined) for k in keys)]
+
+
+def instrument_matches(entry: dict, text: str | None, role: str | None) -> bool:
+    """Whether an .sfz instrument answers a find_samples search: its words, and its kind
+    for the role (any drum role finds the drum kits, 'vocal' the choirs)."""
+    if text:
+        hay = " ".join(_words(entry["name"]) + _words(entry["folder"]) + entry["kinds"])
+        if not all(w in hay for w in _words(text)):
+            return False
+    if role:
+        r = role.lower()
+        want = {r, {"drums": "drum kit", "drum": "drum kit", "vocal": "choir", "woodwind": "woodwinds"}.get(r, r)}
+        if r in DRUM_ROLES:
+            want.add("drum kit")
+        if not want & set(entry["kinds"]):
+            return False
+    return bool(text or role)
 
 
 def _words(text: str) -> list[str]:
@@ -433,10 +468,11 @@ class SampleLibrary:
     def _index(self, refresh: bool) -> dict:
         index = self._load_index()
         folders = self.folders()
-        if index and not refresh and index.get("folders") == folders and not index.get("partial"):
+        if (index and not refresh and index.get("folders") == folders and not index.get("partial")
+                and "instruments" in index):
             return index
         old = {f["path"]: f for f in index.get("files", [])}
-        files = []
+        files, instruments = [], []
         started = time.time()
         for folder in folders:
             if len(files) >= MAX_FILES or time.time() - started > MAX_INDEX_S:
@@ -445,6 +481,11 @@ class SampleLibrary:
                 if len(files) >= MAX_FILES or time.time() - started > MAX_INDEX_S:
                     break   # a huge tree stops here instead of walking on with nothing to add
                 for name in names:
+                    if Path(name).suffix.lower() == ".sfz":
+                        rel = os.path.relpath(root, folder)
+                        instruments.append({"path": os.path.join(root, name), "name": Path(name).stem, "folder": rel,
+                                            "kinds": instrument_kinds(Path(name).stem, rel)})
+                        continue
                     if Path(name).suffix.lower() not in AUDIO_EXTENSIONS:
                         continue
                     path = os.path.join(root, name)
@@ -473,7 +514,8 @@ class SampleLibrary:
                     files.append(entry)
                     if len(files) >= MAX_FILES:
                         break
-        index = {"folders": folders, "built": time.strftime("%Y-%m-%d %H:%M"), "files": files}
+        index = {"folders": folders, "built": time.strftime("%Y-%m-%d %H:%M"), "files": files,
+                 "instruments": instruments}
         if len(files) >= MAX_FILES or time.time() - started > MAX_INDEX_S:
             index["partial"] = True   # cut short: the next call carries on (unchanged files are reused)
         self._save_index(index)
@@ -499,6 +541,10 @@ class SampleLibrary:
                     self._save_index(index)
             except OSError:
                 pass
+
+    def instruments(self, text: str | None = None, role: str | None = None) -> list[dict]:
+        """The .sfz instruments in the sample folders that answer a search."""
+        return [i for i in self.index().get("instruments", []) if instrument_matches(i, text, role)]
 
     def search(self, text: str | None = None, role: str | None = None, kind: str | None = None,
                bpm: float | None = None, key: str | None = None, max_duration: float | None = None) -> list[dict]:
