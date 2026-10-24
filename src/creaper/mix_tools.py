@@ -575,16 +575,21 @@ def _glue_drums(channels: list[dict], start_bar: float | None, end_bar: float | 
     existing = call("get_track_details", track=target).get("fx", [])
     if str(target) in ADDED_COMPRESSORS:
         # The dynamics stage just compressed this kit: that compressor glues it.
-        return {"where": how, "compressor": "the dynamics stage's ReaComp", "track": target}
-    if any("comp" in f["name"].lower() or "glue" in f["name"].lower() for f in existing):
+        return {"where": how, "compressor": "the dynamics stage's compressor", "track": target}
+    if any(re.search(r"comp|glue|bus force", f["name"], re.I) for f in existing):
         return {"skipped": f"there's already a compressor where the drum glue would go ({how[3:]})"}
-    comp = call("add_fx", track=target, name="ReaComp", **({"position": position} if position else {}))
-    profile = plugin_profiles.find_profile(comp["name"])
+    # Arturia's Bus FORCE where it's installed (a bus compressor made for this, its slow
+    # attack letting the hits through), else ReaComp at 4:1 with a 10 ms attack.
+    comp = _add_first(target, (DRUM_BUS_COMP, "ReaComp"), **({"position": position} if position else {}))
+    profile = plugin_profiles.find_profile(comp.get("name"))
     changes = [dict(c) for c in profile.setup] if profile else []
-    changes += [{"parameter": "Ratio", "display_value": 4}, {"parameter": "Attack", "display_value": 10},
-                {"parameter": "Release", "display_value": 80}]
+    if profile and profile.name == DRUM_BUS_COMP:
+        changes += [dict(c) for c in profile.glue]
+    else:
+        changes += [{"parameter": "Ratio", "display_value": 4}, {"parameter": "Attack", "display_value": 10},
+                    {"parameter": "Release", "display_value": 80}]
     call("set_fx_parameters", track=target, fx=comp["index"], changes=changes)
-    result = {"where": how, "compressor": comp["name"], "track": target}
+    result = {"where": how, "compressor": comp.get("name"), "track": target}
     if profile and profile.drive:
         from . import batch
 
@@ -631,14 +636,22 @@ def _shape_dynamics(channels: list[dict], actions: list[dict], family: str | Non
             continue
         entry: dict = {"track": c["name"], "peak_to_loudness_db": round(plr, 1)}
         try:
-            comp = call("add_fx", track=c["ref"], name="ReaComp")
+            # Drums: Arturia's Bus FORCE where it's installed (this compressor also glues
+            # the kit, see _glue_drums), else ReaComp.
+            comp = _add_first(c["ref"], (DRUM_BUS_COMP, "ReaComp")) if drum else call("add_fx", track=c["ref"], name="ReaComp")
+            profile = plugin_profiles.find_profile(comp.get("name"))
             ratio, attack, release, target = (4, 15, 80, DRUM_COMP_DB) if drum else (2, 20, 150, TONAL_COMP_DB)
-            call("set_fx_parameters", track=c["ref"], fx=comp["index"], changes=[
-                {"parameter": "Ratio", "display_value": ratio}, {"parameter": "Attack", "display_value": attack},
-                {"parameter": "Release", "display_value": release}])
-            entry["compressor"] = {"ratio": ratio}
-            work.append({"c": c, "entry": entry, "comp": comp, "drum": drum, "target": target,
-                         "profile": plugin_profiles.find_profile(comp["name"])})
+            if profile and profile.name == DRUM_BUS_COMP:
+                changes = [dict(s) for s in profile.setup] + [
+                    {"parameter": "Comp Attack", "display_value": attack},
+                    {"parameter": "Comp Release", "display_value": release},
+                    {"parameter": "Comp Force", "display_value": ratio}]
+            else:
+                changes = [{"parameter": "Ratio", "display_value": ratio}, {"parameter": "Attack", "display_value": attack},
+                           {"parameter": "Release", "display_value": release}]
+            call("set_fx_parameters", track=c["ref"], fx=comp["index"], changes=changes)
+            entry["compressor"] = {"plugin": comp.get("name"), "ratio": ratio}
+            work.append({"c": c, "entry": entry, "comp": comp, "drum": drum, "target": target, "profile": profile})
         except Exception as e:  # noqa: BLE001 - one part's trouble shouldn't stop the mix
             entry["error"] = str(e)
             work.append({"c": c, "entry": entry, "comp": None, "drum": drum})
@@ -1064,14 +1077,39 @@ HALL_FAMILIES = {"classical", "film and games", "ambient and experimental"}
 PLATE_DECAY_S = {"pop": 2, "r&b and soul": 2, "hip-hop": 2, "rock": 2, "metal and punk": 2}   # else 3
 
 
-def _add_first(track: str | int, names: tuple[str, ...]) -> dict:
+VOCAL_COMP, DRUM_BUS_COMP = "Comp FET-76", "Bus FORCE"
+VOCAL_COMP_DB = 4.0   # what the vocal's 1176 takes off its loud words: an even, forward voice
+
+
+def _add_first(track: str | int, names: tuple[str, ...], **where) -> dict:
     """Adds the first of these plugins that's installed; the last one is REAPER's own."""
     for name in names[:-1]:
         try:
-            return call("add_fx", track=track, name=name)
+            return call("add_fx", track=track, name=name, **where)
         except Exception:  # noqa: BLE001 - not installed: the next one
             continue
-    return call("add_fx", track=track, name=names[-1])
+    return call("add_fx", track=track, name=names[-1], **where)
+
+
+def _calibrate_vocal_comps(comps: list[dict], start_bar: float | None, end_bar: float | None, report: dict) -> None:
+    """Sets each vocal FET-76's input gain so it takes VOCAL_COMP_DB off, all in shared
+    renders; one whose calibration fails is taken out rather than left squashing."""
+    from . import server
+
+    results = server._calibrate_compressors([
+        {"track": v["track"], "fx": v["fx"], "profile": v["profile"], "target": VOCAL_COMP_DB, "span": None}
+        for v in comps], start_bar, end_bar)
+    for v, cal in zip(comps, results):
+        if "error" in cal:
+            try:
+                call("remove_fx", track=v["track"], fx=v["fx"])
+            except Exception:  # noqa: BLE001
+                pass
+            report.setdefault("warnings", []).append(f"{v['a']['name']}: its FET-76 couldn't be calibrated "
+                                                     f"({cal['error']}), so it was taken out")
+            continue
+        v["a"]["compress"] = {"compressor": VOCAL_COMP, "reduction_db": cal.get("loud_part_reduction_db"),
+                              "input_gain_db": cal.get("value")}
 
 
 def _reverb_return(bpm: float = 120.0, family: str | None = None) -> str:
@@ -1248,6 +1286,7 @@ def auto_mix(
     already_sending = {src for src, r in ((t["name"], t) for t in call("get_routing")["tracks"])
                        for snd in r.get("sends") or [] if verb and snd["to"] == verb}
     by_ref = {c["ref"]: c for c in channels}
+    vocal_comps: list[dict] = []
     for a in plan["channels"]:
         c = by_ref[a["ref"]]
         track = a["ref"]
@@ -1270,12 +1309,20 @@ def auto_mix(
                 {"parameter": "Width Boost (dB)", "display_value": -20 if a.get("mono_low") else a["widen_db"]}])
         if "compress" in a:
             k = a["compress"]
-            comp = call("add_fx", track=track, name="ReaComp")
-            call("set_fx_parameters", track=track, fx=comp["index"], changes=[
-                {"parameter": "Threshold", "display_value": k["threshold_db"]},
-                {"parameter": "Ratio", "display_value": k["ratio"]},
-                {"parameter": "Attack", "display_value": k["attack_ms"]},
-                {"parameter": "Release", "display_value": k["release_ms"]}])
+            comp = _add_first(track, (VOCAL_COMP, "ReaComp")) if a["role"] == "vocal" else \
+                call("add_fx", track=track, name="ReaComp")
+            fet = plugin_profiles.find_profile(comp.get("name") or "") if a["role"] == "vocal" else None
+            if fet and fet.name == VOCAL_COMP:
+                # The 1176 on a vocal: its glue settings, then calibrated below to VOCAL_COMP_DB.
+                call("set_fx_parameters", track=track, fx=comp["index"],
+                     changes=[dict(c) for c in fet.setup + fet.glue])
+                vocal_comps.append({"a": a, "track": track, "fx": comp["index"], "profile": fet})
+            else:
+                call("set_fx_parameters", track=track, fx=comp["index"], changes=[
+                    {"parameter": "Threshold", "display_value": k["threshold_db"]},
+                    {"parameter": "Ratio", "display_value": k["ratio"]},
+                    {"parameter": "Attack", "display_value": k["attack_ms"]},
+                    {"parameter": "Release", "display_value": k["release_ms"]}])
         if room and a["role"] in DRUM_ROLES:
             if a["name"] not in room_sending:  # a level set earlier stays
                 call("set_send", source=track, destination=room["track"], volume_db=ROOM_DB[a["role"]])
@@ -1283,6 +1330,8 @@ def auto_mix(
             call("set_send", source=track, destination=verb, volume_db=a["reverb_send_db"])
         elif a["name"] in already_sending:
             a["reverb_send_kept"] = True  # the user's (or an earlier pass's) send level stays
+    if vocal_comps:
+        _calibrate_vocal_comps(vocal_comps, start_bar, end_bar, report)
     delay = None
     if glue:
         # Leads and vocals share one echo, as they share the reverb. Busy sequenced parts

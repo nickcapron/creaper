@@ -209,6 +209,38 @@ def test_dynamics_stage_compresses_peaky_parts_and_clips_drums(monkeypatch):
     assert "soft_clip" not in done[1]
 
 
+@pytest.mark.parametrize("installed", [True, False])
+def test_dynamics_stage_puts_bus_force_on_the_drums_when_installed(monkeypatch, installed):
+    from creaper import mix_tools
+    calls = []
+
+    def fake_call(cmd, **kw):
+        calls.append((cmd, kw))
+        if cmd == "add_fx":
+            if kw["name"] == "Bus FORCE" and not installed:
+                raise RuntimeError("no FX named 'Bus FORCE'")
+            return {"index": 2, "name": f"VST3: {kw['name']} (Arturia)" if kw["name"] == "Bus FORCE"
+                    else "VST: ReaComp (Cockos)"}
+        if cmd == "get_track_details":
+            return {"volume_db": 0.0}
+        return {}
+
+    monkeypatch.setattr(mix_tools, "call", fake_call)
+    monkeypatch.setattr(server, "_calibrate_compressor", lambda *a, **k: {"loud_part_reduction_db": 2.4, "value": -18.0})
+    monkeypatch.setattr(server, "analyze_audio", lambda **kw: {"levels": {"sample_peak_dbfs": -9.0}})
+    channels = [{"name": "Drums", "ref": "Drums", "role": "drums", "level": -20, "peak_db": -4},
+                {"name": "Pad", "ref": "Pad", "role": "pad", "level": -20, "peak_db": -8}]
+    done = mix_tools._shape_dynamics(channels, [], "rock", None, None)
+    sets = {kw["track"]: [c["parameter"] for c in kw["changes"]] for c, kw in calls if c == "set_fx_parameters"
+            and any("Attack" in ch["parameter"] for ch in kw["changes"])}
+    if installed:
+        assert "Bus FORCE" in done[0]["compressor"]["plugin"] and "Comp Force" in sets["Drums"]
+        assert "Comp Path Mute" in sets["Drums"]                  # its compressor path opened first
+    else:
+        assert "ReaComp" in done[0]["compressor"]["plugin"] and "Ratio" in sets["Drums"]
+    assert "ReaComp" in done[1]["compressor"]["plugin"]           # keys and pads keep ReaComp
+
+
 def test_genres_that_breathe_keep_their_dynamics():
     from creaper import mix_tools
     out = mix_tools._shape_dynamics([{"name": "Drums", "ref": "D", "role": "drums", "level": -20, "peak_db": -2}],

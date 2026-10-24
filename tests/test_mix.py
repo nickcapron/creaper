@@ -261,6 +261,48 @@ def test_a_whole_kit_on_one_track_is_glued_after_its_instrument(monkeypatch):
     assert added["track"] == "{D}" and added["position"] == 2 and "itself" in result["where"]
 
 
+def test_the_drum_bus_uses_bus_force_when_installed(monkeypatch):
+    from creaper import server
+    mix_tools, calls = _glue_fake(monkeypatch, [{"guid": "{D}", "name": "Drums"}])
+    plain = mix_tools.call
+    calibrated = []
+
+    def with_bus_force(command, **args):
+        if command == "add_fx":
+            calls.append((command, args))
+            return {"name": f"VST3: {args['name']} (Arturia)", "index": 2}
+        return plain(command, **args)
+
+    monkeypatch.setattr(mix_tools, "call", with_bus_force)
+    monkeypatch.setattr(server, "_calibrate_compressor",
+                        lambda track, fx, profile, *a, **k: calibrated.append(profile.name) or {"value": -14})
+    result = mix_tools._glue_drums([{"name": "Drums", "ref": "{D}", "role": "drums", "level": -10}], None, None)
+    assert next(a for c, a in calls if c == "add_fx")["name"] == "Bus FORCE" and "Bus FORCE" in result["compressor"]
+    changes = [c for cmd, a in calls if cmd == "set_fx_parameters" for c in a["changes"]]
+    assert {"parameter": "Comp Path Mute", "display_text": "Off"} in changes      # its compressor path opened
+    assert {"parameter": "Comp Attack", "display_value": 30} in changes and calibrated == ["Bus FORCE"]
+    mix_tools, calls = _glue_fake(monkeypatch, [{"guid": "{D}", "name": "Drums"}])
+    monkeypatch.setattr(mix_tools, "call", lambda command, **a: {"fx": [{"index": 2, "name": "VST3: Bus FORCE (Arturia)"}]}
+                        if command == "get_track_details" else plain(command, **a))
+    assert "skipped" in mix_tools._glue_drums([{"name": "Drums", "ref": "{D}", "role": "drums", "level": -10}], None, None)
+
+
+def test_a_vocal_fet_is_calibrated_or_taken_out(monkeypatch):
+    from creaper import mix_tools, plugin_profiles, server
+    calls = []
+    monkeypatch.setattr(mix_tools, "call", lambda command, **a: calls.append((command, a)) or {})
+    fet = plugin_profiles.find_profile("VST3: Comp FET-76 (Arturia)")
+    monkeypatch.setattr(server, "_calibrate_compressors", lambda jobs, s, e: [
+        {"value": -20.0, "loud_part_reduction_db": 4.1} if j["track"] == "Lead Vox" else {"error": "too quiet"}
+        for j in jobs])
+    comps = [{"a": {"name": "Lead Vox"}, "track": "Lead Vox", "fx": 3, "profile": fet},
+             {"a": {"name": "Whisper"}, "track": "Whisper", "fx": 2, "profile": fet}]
+    report: dict = {}
+    mix_tools._calibrate_vocal_comps(comps, None, None, report)
+    assert comps[0]["a"]["compress"] == {"compressor": "Comp FET-76", "reduction_db": 4.1, "input_gain_db": -20.0}
+    assert ("remove_fx", {"track": "Whisper", "fx": 2}) in calls and "Whisper" in report["warnings"][0]
+
+
 def test_the_delay_return_is_a_dotted_eighth_and_reused_when_there(monkeypatch):
     mix_tools, calls = _glue_fake(monkeypatch, [])
     made = mix_tools._delay_return(120)
