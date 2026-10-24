@@ -49,15 +49,24 @@ INSTRUMENT_WORDS = {
     "drum kit": ("drumkit", "drumkits", "drums", "kit"),
     "percussion": ("timpani", "glockenspiel", "marimba", "xylophone", "vibraphone", "percussion", "perc", "bells"),
     "keys": ("piano", "upright", "organ", "rhodes", "harpsichord", "celesta"), "harp": ("harp",),
-    "choir": ("choir", "chorus", "voices"), "bass": ("bass guitar", "ebass", "bassguitar"),
+    "choir": ("choir", "chorus", "voices"), "bass": ("bass", "ebass", "bassguitar"),
 }
 
 
+INSTRUMENT_EXCLUDES = {"keys": ("bass",)}   # an "UprightBass" is a bass, not an upright piano
+
+
 def instrument_kinds(name: str, folder: str = "") -> list[str]:
+    """Whole words only: 'harp' isn't in 'Harpsichord', 'bass' isn't in 'bassoon'. A key
+    of several words ('bass guitar') has to appear as those words in a row."""
     words = _words(name) + _words(folder)
-    joined = "".join(words)
-    return [kind for kind, keys in INSTRUMENT_WORDS.items()
-            if any(k in words or (len(k) >= 4 and k.replace(" ", "") in joined) for k in keys)]
+    pairs = {" ".join(words[i:i + 2]) for i in range(len(words) - 1)}
+    out = []
+    for kind, keys in INSTRUMENT_WORDS.items():
+        if any((k in words) if " " not in k else (k in pairs) for k in keys):
+            if not any(x in words for x in INSTRUMENT_EXCLUDES.get(kind, ())):
+                out.append(kind)
+    return out
 
 
 def playable_sfz(path: str) -> bool:
@@ -66,7 +75,7 @@ def playable_sfz(path: str) -> bool:
     from . import sfz
 
     try:
-        sfz.load(path)
+        sfz.load(path, loops=False)   # no WAV reads: loop points are for building, not listing
         return True
     except Exception:  # noqa: BLE001 - missing samples, too many zones, unreadable
         return False
@@ -103,6 +112,7 @@ def instrument_rank(entry: dict, role: str | None) -> int:
 
 def _words(text: str) -> list[str]:
     t = re.sub(r"([a-z])([A-Z])", r"\1 \2", text)
+    t = re.sub(r"([A-Z])([A-Z][a-z])", r"\1 \2", t)   # SViolin, FHorn, EGuitar: a letter prefix, then the word
     t = re.sub(r"([A-Za-z])(\d)", r"\1 \2", t)
     t = re.sub(r"(\d)([A-Za-z])", r"\1 \2", t)
     return [w for w in re.split(r"[^A-Za-z0-9#]+", t.lower()) if w]
@@ -496,7 +506,9 @@ class SampleLibrary:
                 and "instruments" in index):
             return index
         old = {f["path"]: f for f in index.get("files", [])}
-        files, instruments = [], []
+        old_inst = {i["path"]: i for i in index.get("instruments", []) if "mtime" in i}
+        old_bad = index.get("unplayable_sfz", {})
+        files, instruments, unplayable = [], [], {}
         started = time.time()
         for folder in folders:
             if len(files) >= MAX_FILES or time.time() - started > MAX_INDEX_S:
@@ -507,10 +519,23 @@ class SampleLibrary:
                 for name in names:
                     if Path(name).suffix.lower() == ".sfz":
                         path = os.path.join(root, name)
-                        if playable_sfz(path):
+                        try:
+                            mtime = int(os.stat(path).st_mtime)
+                        except OSError:
+                            continue
+                        # Checked once per file version: an .sfz names hundreds of samples. A
+                        # missing sample installed later shows up on refresh=True.
+                        prev = old_inst.get(path)
+                        if prev and prev.get("mtime") == mtime and not refresh:
+                            instruments.append(prev)
+                        elif old_bad.get(path) == mtime and not refresh:
+                            unplayable[path] = mtime
+                        elif playable_sfz(path):
                             rel = os.path.relpath(root, folder)
                             instruments.append({"path": path, "name": Path(name).stem, "folder": rel,
-                                                "kinds": instrument_kinds(Path(name).stem, rel)})
+                                                "kinds": instrument_kinds(Path(name).stem, rel), "mtime": mtime})
+                        else:
+                            unplayable[path] = mtime
                         continue
                     if Path(name).suffix.lower() not in AUDIO_EXTENSIONS:
                         continue
@@ -541,7 +566,7 @@ class SampleLibrary:
                     if len(files) >= MAX_FILES:
                         break
         index = {"folders": folders, "built": time.strftime("%Y-%m-%d %H:%M"), "files": files,
-                 "instruments": instruments}
+                 "instruments": instruments, "unplayable_sfz": unplayable}
         if len(files) >= MAX_FILES or time.time() - started > MAX_INDEX_S:
             index["partial"] = True   # cut short: the next call carries on (unchanged files are reused)
         self._save_index(index)

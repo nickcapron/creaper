@@ -1,3 +1,5 @@
+import os
+
 import drum_synth as d
 import numpy as np
 import pytest
@@ -27,6 +29,27 @@ def test_instrument_kinds_from_library_names():
     assert kinds("EGuitarFSBS-dist1 bridge 20220911", "FreePats Distorted Guitar 1") == ["guitar"]
     assert kinds("Black_Pearl_2023_repack", "AVL Drumkits/BLACK_PEARL_2023_repack") == ["drum kit"]
     assert kinds("Timpani") == ["percussion"] and kinds("Harp") == ["harp"]
+    # Whole words: a harpsichord isn't a harp, a bassoon isn't a bass, an upright bass isn't a piano.
+    assert kinds("Harpsichord") == ["keys"] and kinds("UprightBass") == ["bass"] and kinds("VSUpright1") == ["keys"]
+    assert kinds("Bass Fat Pizzicato", "Augmented STRINGS") == ["strings", "bass"]
+    assert kinds("Thorn Pad") == [] and kinds("Tubular Bells") == ["percussion"]
+
+
+def test_sfz_instruments_are_checked_once_per_file_version(tmp_path, monkeypatch):
+    root = tmp_path / "samples"
+    _sfz(root, "Cello", "c.wav")
+    _sfz(root, "Broken", "gone.wav", write_sample=False)
+    checks = []
+    real = samplelib.playable_sfz
+    monkeypatch.setattr(samplelib, "playable_sfz", lambda p: checks.append(p) or real(p))
+    lib = samplelib.SampleLibrary(tmp_path / "data")
+    lib.set_folders([str(root)])
+    assert [i["name"] for i in lib.index()["instruments"]] == ["Cello"] and len(checks) == 2
+    checks.clear()
+    lib._save_index({**lib.index(), "built": "old", "partial": True})   # a rebuild without refresh
+    assert [i["name"] for i in lib.index()["instruments"]] == ["Cello"] and checks == []
+    lib.index(refresh=True)                      # refresh= re-checks both (a sample may have arrived)
+    assert sorted(os.path.basename(c) for c in checks) == ["Broken.sfz", "Cello.sfz"]
 
 
 def _sfz(folder, name, sample="s.wav", write_sample=True):

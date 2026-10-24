@@ -228,12 +228,13 @@ def playable(regions: list[dict]) -> list[dict]:
     return kept
 
 
-def zones(regions: list[dict], frames_of=None) -> list[dict]:
+def zones(regions: list[dict], frames_of=None, loops: bool = True) -> list[dict]:
     """The sampler's zones from SFZ regions: one per key and velocity range, with its
     round robins (seq_position order) as 'files'; the root from pitch_keycenter with
     transpose and tune; a loop from loop_start/loop_end or the WAV's smpl chunk when
     loop_mode loops (or the WAV has a loop and loop_mode is unset). Only playable()
-    regions. frames_of(path) gives (frames, sample rate) of a file, for the loop."""
+    regions. frames_of(path) gives (frames, sample rate) of a file, for the loop. loops=False
+    skips reading the WAVs (a listing needs the zones, not their loop points)."""
     groups: dict[tuple, list[dict]] = {}
     for r in playable(regions):
         own = r.get("_own", set(r))
@@ -245,7 +246,7 @@ def zones(regions: list[dict], frames_of=None) -> list[dict]:
             center = note_value(r["key"]) if "key" in r and not ({"lokey", "hikey"} & own) else None
         if r.get("pitch_keycenter") not in (None, "sample"):
             center = note_value(r["pitch_keycenter"])
-        loop = wav_loop(r["path"]) if r["path"].lower().endswith(".wav") else None
+        loop = wav_loop(r["path"]) if loops and r["path"].lower().endswith(".wav") else None
         if center is None:
             center = (loop or {}).get("unity_note") or 60
         root = center - float(r.get("transpose", 0)) - float(r.get("tune", 0)) / 100
@@ -288,7 +289,7 @@ def loop_fields(span: tuple[int, int], frames: int, rate: int) -> dict:
     return {"loop": {"start_ms": round(a / rate * 1000, 3), "end_frac": round((b + 1) / frames, 6)}}
 
 
-def load(path: str, frames_of=None) -> list[dict]:
+def load(path: str, frames_of=None, loops: bool = True) -> list[dict]:
     p = Path(path)
     if p.suffix.lower() != ".sfz" or not p.is_file():
         raise ValueError(f"there's no .sfz file at {path}")
@@ -298,4 +299,4 @@ def load(path: str, frames_of=None) -> list[dict]:
     missing = [r["path"] for r in playable(regions) if not Path(r["path"]).is_file()]
     if missing:
         raise ValueError(f"{len(missing)} of its samples are missing, e.g. {missing[0]}")
-    return zones(regions, frames_of)
+    return zones(regions, frames_of, loops)

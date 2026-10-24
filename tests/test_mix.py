@@ -253,6 +253,19 @@ def test_a_folder_that_also_holds_the_bass_isnt_compressed_as_drums(monkeypatch)
     assert not any(c == "add_fx" for c, _ in calls)
 
 
+def test_an_arturia_reverb_the_drums_send_to_is_never_the_drum_bus(monkeypatch):
+    # The reverb return is recognised by its FX ("Rev PLATE-140"), not only by "verb" in its name.
+    kick = {"name": "Kick", "ref": "{K}", "role": "kick", "level": -10}
+    snare = {"name": "Snare", "ref": "{S}", "role": "snare", "level": -12}
+    tracks = [{"guid": "{K}", "name": "Kick"}, {"guid": "{S}", "name": "Snare"},
+              {"guid": "{P}", "name": "Plate", "item_count": 0, "fx": ["VST3: Rev PLATE-140 (Arturia)"]}]
+    routing = [{"name": "Kick", "sends": [{"to": "Plate"}]}, {"name": "Snare", "sends": [{"to": "Plate"}]}]
+    mix_tools, calls = _glue_fake(monkeypatch, tracks, routing)
+    result = mix_tools._glue_drums([kick, snare], None, None)
+    added = next(a for c, a in calls if c == "add_fx")
+    assert added["track"] == "{BUS}" and "new Drum Bus" in result["where"]
+
+
 def test_a_whole_kit_on_one_track_is_glued_after_its_instrument(monkeypatch):
     # creaper's own songs have one Drums track: they used to get no drum glue at all.
     mix_tools, calls = _glue_fake(monkeypatch, [{"guid": "{D}", "name": "Drums"}])
@@ -295,12 +308,15 @@ def test_a_vocal_fet_is_calibrated_or_taken_out(monkeypatch):
     monkeypatch.setattr(server, "_calibrate_compressors", lambda jobs, s, e: [
         {"value": -20.0, "loud_part_reduction_db": 4.1} if j["track"] == "Lead Vox" else {"error": "too quiet"}
         for j in jobs])
-    comps = [{"a": {"name": "Lead Vox"}, "track": "Lead Vox", "fx": 3, "profile": fet},
-             {"a": {"name": "Whisper"}, "track": "Whisper", "fx": 2, "profile": fet}]
+    planned = {"ratio": 3.0, "attack_ms": 5, "release_ms": 80, "threshold_db": -16}
+    comps = [{"a": {"name": "Lead Vox", "compress": dict(planned)}, "track": "Lead Vox", "fx": 3, "profile": fet},
+             {"a": {"name": "Whisper", "compress": dict(planned)}, "track": "Whisper", "fx": 2, "profile": fet}]
     report: dict = {}
     mix_tools._calibrate_vocal_comps(comps, None, None, report)
     assert comps[0]["a"]["compress"] == {"compressor": "Comp FET-76", "reduction_db": 4.1, "input_gain_db": -20.0}
     assert ("remove_fx", {"track": "Whisper", "fx": 2}) in calls and "Whisper" in report["warnings"][0]
+    # The plan no longer claims a compressor that was taken out.
+    assert "compress" not in comps[1]["a"] and comps[1]["a"]["compressor_removed"] == "too quiet"
 
 
 def test_the_delay_return_is_a_dotted_eighth_and_reused_when_there(monkeypatch):

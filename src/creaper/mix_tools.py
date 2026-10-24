@@ -544,8 +544,8 @@ def _glue_drums(channels: list[dict], start_bar: float | None, end_bar: float | 
     routing = {t["name"]: t for t in call("get_routing")["tracks"]}
     # A bus every drum already sends to (not a sidechain input): use it, never add another.
     def is_return(name: str) -> bool:  # the reverb/delay returns the drums send to aren't buses
-        fx = " ".join(by_name.get(name, {}).get("fx", [])).lower()
-        return bool(re.search(r"verb|delay|echo|return", name, re.I) or re.search(r"verb|delay|echo", fx))
+        fx = " ".join(by_name.get(name, {}).get("fx", []))
+        return bool(re.search(r"verb|delay|echo|return", name, re.I) or re.search(RETURN_FX, fx, re.I))
 
     dests = [{s["to"] for s in routing.get(c["name"], {}).get("sends") or []
               if not s.get("note") and not is_return(s["to"])} for c in drums]
@@ -1062,6 +1062,10 @@ REVERB_SIZE = {"pop": 0.35, "r&b and soul": 0.35, "hip-hop": 0.35, "classical": 
                "ambient and experimental": 0.7}
 REVERB_FILTER_HZ = (280, 7000)   # a reverb without its lows (mud) and highs (hiss, sibilance) sits behind
 ROOM_FILTER_HZ = (150, 8000)
+# An FX name that makes a track a reverb return (REAPER's, or an Arturia "Rev PLATE-140"),
+# and one that makes it any effects return: the drum glue must never land on one.
+REVERB_FX = r"verb|\bRev [A-Z]"
+RETURN_FX = REVERB_FX + r"|delay|echo"
 
 
 def _predelay_ms(bpm: float) -> float:
@@ -1107,6 +1111,8 @@ def _calibrate_vocal_comps(comps: list[dict], start_bar: float | None, end_bar: 
                 pass
             report.setdefault("warnings", []).append(f"{v['a']['name']}: its FET-76 couldn't be calibrated "
                                                      f"({cal['error']}), so it was taken out")
+            v["a"].pop("compress", None)       # the plan mustn't claim a compressor that isn't there
+            v["a"]["compressor_removed"] = cal["error"]
             continue
         v["a"]["compress"] = {"compressor": VOCAL_COMP, "reduction_db": cal.get("loud_part_reduction_db"),
                               "input_gain_db": cal.get("value")}
@@ -1121,7 +1127,7 @@ def _reverb_return(bpm: float = 120.0, family: str | None = None) -> str:
     for t in overview["tracks"]:
         if t["name"].lower() == "drum room":
             continue  # the drums' short room isn't the main reverb
-        if re.search(r"verb", t["name"], re.I) or any(re.search(r"verb|\bRev [A-Z]", f, re.I) for f in t.get("fx", [])):
+        if re.search(r"verb", t["name"], re.I) or any(re.search(REVERB_FX, f, re.I) for f in t.get("fx", [])):
             if not t.get("item_count"):
                 return t["name"]
     call("create_track", name="Reverb")
@@ -1330,8 +1336,14 @@ def auto_mix(
             call("set_send", source=track, destination=verb, volume_db=a["reverb_send_db"])
         elif a["name"] in already_sending:
             a["reverb_send_kept"] = True  # the user's (or an earlier pass's) send level stays
+    from . import batch
+
+    hints = {k: v for k, v in spans.items() if not str(k).startswith("_")}
     if vocal_comps:
-        _calibrate_vocal_comps(vocal_comps, start_bar, end_bar, report)
+        # Under the span hints: each vocal's loud bars are known, so the FET-76s calibrate
+        # in shared short renders instead of each searching the whole song first.
+        with batch.span_hints(hints):
+            _calibrate_vocal_comps(vocal_comps, start_bar, end_bar, report)
     delay = None
     if glue:
         # Leads and vocals share one echo, as they share the reverb. Busy sequenced parts
@@ -1349,9 +1361,7 @@ def auto_mix(
                 report["delay_return"] = {**delay, "fed_by": [a["name"] for a in senders]}
             except Exception as e:  # noqa: BLE001
                 report.setdefault("warnings", []).append(f"delay return: {e}")
-    from . import batch
-
-    with batch.span_hints({k: v for k, v in spans.items() if not str(k).startswith("_")}):
+    with batch.span_hints(hints):
         return _mix_stages(report, plan, channels, profile, spans, room, verb, start_bar, end_bar, dynamics,
                            sidechain, glue, colour, section_moves)
 
