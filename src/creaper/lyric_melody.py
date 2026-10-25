@@ -6,15 +6,19 @@ unstressed ones between them, the last word of a line is held and a breath follo
 pickups start before the bar, lines that repeat their words repeat their tune, and the
 pitches follow the chords (chord tones on the stressed syllables, steps between).
 
-English syllables and stresses are found by rule (no dictionary): close enough for
-song lyrics, and a hyphen in the input ('to-night') is always kept as written."""
+English syllables and stresses come from the CMU Pronouncing Dictionary when VocalVST's
+copy is installed (the singer splits a word's sounds over the syllables it is given, so
+the count has to be the dictionary's: 'neon' on one note came out "neonnoonn"), by
+rule otherwise, and a hyphen in the input ('to-night') is always kept as written."""
 
 from __future__ import annotations
 
 import math
+import os
 import random
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from . import composer
 from .harmony import Key
@@ -58,6 +62,60 @@ VELOCITY = {"stressed": 100, "unstressed": 76, "final": 90}
 
 # ------------------------------------------------------------------ syllables
 
+# VocalVST ships the CMU dictionary beside its binary and looks a hyphenated word up
+# whole, then splits the sounds over the typed syllables: fewer syllables than the word
+# has vowels squeezes two vowels onto one note, more pads with the last vowel. So when
+# that dictionary is on this machine its syllable count and stresses decide, and the
+# spelling rules only shape the pieces (and stand in for words it lacks, and in CI).
+_dictionary_cache: dict[str, str] | None = None
+
+
+def _cmudict_paths() -> list[Path]:
+    local = Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData/Local"))
+    programs = Path(os.environ.get("ProgramFiles") or r"C:\Program Files")
+    tail = Path("VocalVST.vst3/Contents/x86_64-win/cmudict.dict")
+    paths = [local / "Programs/Common/VST3" / tail, programs / "Common Files/VST3" / tail]
+    if os.environ.get("CREAPER_CMUDICT"):
+        paths.insert(0, Path(os.environ["CREAPER_CMUDICT"]))
+    return paths
+
+
+def _read_cmudict(path: Path) -> dict[str, str]:
+    """word -> its stress digits, one per syllable ('saturday' -> '100'); the first
+    pronunciation of a word stands, 'word(2)' variants are skipped."""
+    out: dict[str, str] = {}
+    with path.open(encoding="utf-8", errors="replace") as f:
+        for line in f:
+            if not line.strip() or line[0] in ";#":
+                continue
+            word, _, phones = line.partition(" ")
+            if "(" in word:
+                continue
+            digits = "".join(c for c in phones if c in "012")
+            if digits:
+                out[word] = digits
+    return out
+
+
+def dictionary() -> dict[str, str]:
+    """The pronouncing dictionary, read once (126k words, 0.1 s); {} when none is installed."""
+    global _dictionary_cache
+    if _dictionary_cache is None:
+        _dictionary_cache = {}
+        for path in _cmudict_paths():
+            try:
+                if path.is_file():
+                    _dictionary_cache = _read_cmudict(path)
+                    break
+            except OSError:
+                continue
+    return _dictionary_cache
+
+
+def _dictionary_key(word: str) -> str:
+    return re.sub(r"[^a-z']", "", word.lower())
+
+
 def _vowel_groups(w: str) -> list[tuple[int, int]]:
     """(start, end) of each vowel group in a lowercase word; y counts as a vowel after
     a consonant, u after q doesn't."""
@@ -80,18 +138,47 @@ def _vowel_groups(w: str) -> list[tuple[int, int]]:
 
 
 def syllabify(word: str) -> list[str]:
-    """A word's syllables, by rule: 'baby' -> ba-by, 'candle' -> can-dle, 'waiting' ->
-    wait-ing, 'burned' and 'lines' stay whole. A hyphenated word is split as written."""
+    """A word's syllables: 'baby' -> ba-by, 'candle' -> can-dle, 'waiting' -> wait-ing,
+    'burned' and 'lines' stay whole. The spelling rules cut the word; the dictionary,
+    when installed, says how many pieces there are ('ne-on', 'fi-re', 'eve-ning'). A
+    hyphenated word is split as written."""
     if "-" in word.strip("-"):
         return [p for p in word.split("-") if p]
-    # Work on the letters without apostrophes, cutting the original word at the same letters.
-    idx = [i for i, c in enumerate(word) if c != "'"]
-    core = "".join(word[i] for i in idx).lower()
-    if not any(c.isalpha() for c in core):
+    if not any(c.isalpha() for c in word):
         return [word]
-    groups = _vowel_groups(core)
-    if len(groups) <= 1:
-        return [word]
+    pieces = _syllabify_by_rule(word)
+    want = len(dictionary().get(_dictionary_key(word), ""))
+    if want and want != len(pieces):
+        pieces = _repiece(word, pieces, want)
+    return pieces
+
+
+def _repiece(word: str, pieces: list[str], want: int) -> list[str]:
+    """The word in `want` pieces: more come from cutting the rule's merged endings back
+    apart ('fi-re') and then vowel groups between their letters ('ne-on', 'po-em', the
+    longest group first); fewer merge the shortest piece into its neighbour ('eve-ning')."""
+    bounds = {sum(len(p) for p in pieces[:i]) for i in range(1, len(pieces))}
+    while len(bounds) + 1 < want:
+        idx = [i for i, c in enumerate(word) if c != "'"]
+        core = "".join(word[i] for i in idx).lower()
+        groups = _vowel_groups(core)
+        candidates = [idx[c] for c in _rule_cuts(core, groups) if idx[c] not in bounds]
+        for a, b in sorted(groups, key=lambda g: g[0] - g[1]):          # longest vowel group first
+            candidates += [idx[k] for k in range(a + 1, b) if idx[k] not in bounds]
+        if not candidates:
+            break
+        bounds.add(candidates[0])
+    while len(bounds) + 1 > want and bounds:
+        edges = [0] + sorted(bounds) + [len(word)]
+        lengths = [b - a for a, b in zip(edges, edges[1:])]
+        i = lengths.index(min(lengths))
+        bounds.discard(edges[i + 1] if i == 0 else edges[i])             # the first merges forward, the rest back
+    edges = [0] + sorted(bounds) + [len(word)]
+    return [word[a:b] for a, b in zip(edges, edges[1:]) if b > a]
+
+
+def _rule_cuts(core: str, groups: list[tuple[int, int]]) -> list[int]:
+    """Where the spelling rules cut between vowel groups (positions in `core`)."""
     cuts: list[int] = []
     for (_, end_a), (start_b, _) in zip(groups, groups[1:]):
         cons = core[end_a:start_b]
@@ -108,7 +195,18 @@ def syllabify(word: str) -> list[str]:
         else:
             # Three or more: after the first unless the first two are a digraph (chil-dren, sun-shine, ex-tra).
             cut = end_a + (2 if cons[:2] in DIGRAPHS else 1)
-        cuts.append(idx[cut])
+        cuts.append(cut)
+    return cuts
+
+
+def _syllabify_by_rule(word: str) -> list[str]:
+    # Work on the letters without apostrophes, cutting the original word at the same letters.
+    idx = [i for i, c in enumerate(word) if c != "'"]
+    core = "".join(word[i] for i in idx).lower()
+    groups = _vowel_groups(core)
+    if len(groups) <= 1:
+        return [word]
+    cuts = [idx[c] for c in _rule_cuts(core, groups)]
     pieces = [p for p in (word[a:b] for a, b in zip([0] + cuts, cuts + [len(word)])) if p]
     if len(pieces) > 1:
         last = pieces[-1].lower().replace("'", "")
@@ -123,11 +221,18 @@ def syllabify(word: str) -> list[str]:
 
 
 def stresses(word: str, pieces: list[str]) -> list[bool]:
-    """Which syllables of a word are stressed, by rule."""
-    w = re.sub(r"[^a-z']", "", word.lower())
+    """Which syllables of a word are stressed: the dictionary's primary and secondary
+    stresses when it knows the word in this many pieces, the spelling rules otherwise."""
+    w = _dictionary_key(word)
     n = len(pieces)
     if n == 1:
         return [w not in FUNCTION_WORDS]
+    digits = dictionary().get(w, "")
+    if len(digits) == n:
+        marks = [d != "0" for d in digits]
+        if not any(marks):
+            marks[0] = True
+        return marks
     first = re.sub(r"[^a-z]", "", pieces[0].lower())
     prefixed = first in UNSTRESSED_PREFIXES and w not in PREFIX_EXCEPTIONS
     start = 1 if prefixed else 0

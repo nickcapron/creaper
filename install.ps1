@@ -12,7 +12,7 @@
 
 $ErrorActionPreference = 'Stop'
 # The creaper release this installs (a tag, so what's installed is what was released).
-$Release = 'v0.44.4'
+$Release = 'v0.45.0'
 
 $ProgressPreference = 'SilentlyContinue'
 

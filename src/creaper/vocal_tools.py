@@ -1090,9 +1090,11 @@ def _wait_for_render_switch(track: str | int, fx: int, log_size: int, seconds: f
         render = next((p for p in params if p.get("name") == "Render"), None)
         if render is None or str(render.get("display", "")).lower() == "off" or float(render.get("value") or 0) < 0.5:
             return
-    raise ValueError("VocalVST never took its Render switch (it stays On), so the plugin isn't running its timer "
-                     "in this REAPER and no render will come. Open its window (update_fx with show=True) and press "
-                     "Render there, or restart REAPER; its own host.log says whether a render happened")
+    raise ValueError(f"VocalVST never took its Render switch (it stays On after {seconds:.0f} s): the plugin's "
+                     "timer isn't being serviced in this REAPER right now, so no render will come from the switch. "
+                     "Its Render button renders directly: open its window (update_fx with show=True) and press "
+                     "Render there; pressing play in REAPER once has also woken it. Its own host.log says whether "
+                     "a render happened")
 
 
 # The audio check is the fallback for a plugin that can't write its log; every check is
@@ -1251,6 +1253,13 @@ def render_vocalvst(
     # The pass: the plugin records only what the transport plays through it, by position,
     # so it has to run past the last note, not just the items' ends.
     start, end = vocalvst_pass_span(items, parts)
+    # The audio the take is checked against is snapshotted before the pass, so that nothing
+    # renders between the pass and the Render switch: in a Donny Benet session the offline
+    # render that sat there left the plugin's timer unserviced three times out of three
+    # (its note events and the switch waited until the window was opened or REAPER
+    # played), while the switch was always taken straight after a pass.
+    span = (start, end + 1.0)
+    before = _track_audio(track, *span)
     stopped_itself = _silent_pass(start, end)
     captured = vocalvst_captured(call("capture_fx_state", track=track, fx=fx["index"])["chunk"])
     if not captured["notes"]:
@@ -1268,8 +1277,6 @@ def render_vocalvst(
                          "silences the track partway (a muted item, an automation lane), then call again")
 
     log_size = VOCALVST_LOG.stat().st_size if VOCALVST_LOG.exists() else 0
-    span = (captured["from_seconds"], captured["to_seconds"] + 1.0)
-    before = _track_audio(track, *span)
     call("set_fx_parameter", track=track, fx=fx["index"], parameter="Render", display_text="On")
     _wait_for_render_switch(track, fx["index"], log_size)
     report = _wait_for_render(log_size, timeout_seconds, before, lambda: _track_audio(track, *span))
@@ -1336,8 +1343,8 @@ def write_vocal_melody(
     item_id: ItemId,
     lyrics: Annotated[str, Field(description=(
         "The words, one line per sung phrase, lines split by '/' or newlines: \"Saturday night I'm coming round / "
-        "in my white suit for you\". A hyphen in a word fixes its syllables ('to-night'); otherwise they're found "
-        "by rule"))],
+        "in my white suit for you\". A hyphen in a word fixes its syllables ('to-night'); otherwise they come from "
+        "the singer's own dictionary (so 'neon' is ne-on and 'fire' fi-re, as VocalVST sings them), or by rule"))],
     chords: Annotated[list | str, Field(description=(
         "The chords under the line, as text ('Am7 Fmaj7 G6 Am7', chord_length QN each) or timed chords "
         "(chord, start, length) like write_melody takes"))],

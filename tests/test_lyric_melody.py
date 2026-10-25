@@ -5,6 +5,16 @@ from creaper import harmony, lyric_melody as lm
 from creaper.music_tools import _events
 
 
+@pytest.fixture(autouse=True)
+def _by_rule(monkeypatch):
+    """The rules alone, whether or not VocalVST's dictionary is on this machine."""
+    monkeypatch.setattr(lm, "_dictionary_cache", {})
+
+
+def _dictionary(monkeypatch, **words):
+    monkeypatch.setattr(lm, "_dictionary_cache", words)
+
+
 @pytest.mark.parametrize("word, pieces", [
     ("baby", ["ba", "by"]), ("candle", ["can", "dle"]), ("table", ["ta", "ble"]), ("people", ["peo", "ple"]),
     ("waiting", ["wai", "ting"]), ("tonight", ["to", "night"]), ("Saturday", ["Sa", "tur", "day"]),
@@ -24,6 +34,40 @@ def test_syllables_by_rule(word, pieces):
 def test_stresses_by_rule(word, pattern):
     pieces = lm.syllabify(word)
     assert "".join("S" if s else "u" for s in lm.stresses(word, pieces)) == pattern
+
+
+@pytest.mark.parametrize("word, pieces", [
+    ("neon", ["ne", "on"]), ("Neon,", ["Ne", "on,"]), ("fire", ["fi", "re"]), ("poem", ["po", "em"]),
+    ("hour", ["ho", "ur"]), ("evening", ["eve", "ning"]), ("Saturday", ["Sa", "tur", "day"]), ("baby", ["ba", "by"]),
+    ("rhythm", ["rhythm"]), ("ne-on", ["ne", "on"]),
+])
+def test_the_dictionary_sets_the_syllable_count(monkeypatch, word, pieces):
+    """VocalVST splits a word's sounds over the syllables it is typed with, so 'neon' on
+    one note sang two vowels at once; the dictionary's count is the one the singer needs."""
+    _dictionary(monkeypatch, neon="10", fire="10", poem="10", hour="10", evening="10", saturday="100", baby="10",
+                rhythm="10")
+    assert lm.syllabify(word) == pieces
+
+
+def test_the_dictionary_sets_the_stresses_and_function_words_stay_light(monkeypatch):
+    _dictionary(monkeypatch, saxophone="102", champagne="01", **{"i'm": "1", "the": "0"})
+    assert lm.stresses("saxophone", lm.syllabify("saxophone")) == [True, False, True]
+    assert lm.stresses("champagne", lm.syllabify("champagne")) == [False, True]
+    assert lm.stresses("I'm", ["I'm"]) == [False]
+    assert lm.stresses("remember", lm.syllabify("remember")) == [False, True, False]   # not in this dictionary: by rule
+
+
+def test_the_plugins_dictionary_is_read_from_its_install(tmp_path, monkeypatch):
+    f = tmp_path / "cmudict.dict"
+    f.write_text(";;; comment\nneon N IY1 AA0 N\nneon(2) N IY1 AO0 N\nsaturday S AE1 T ER0 D IY0\n\nthe DH AH0\n",
+                 encoding="utf-8")
+    monkeypatch.setenv("CREAPER_CMUDICT", str(f))
+    monkeypatch.setattr(lm, "_dictionary_cache", None)
+    assert lm.dictionary() == {"neon": "10", "saturday": "100", "the": "0"}
+    assert lm.syllabify("neon") == ["ne", "on"]
+    monkeypatch.setenv("CREAPER_CMUDICT", str(tmp_path / "missing.dict"))
+    monkeypatch.setattr(lm, "_dictionary_cache", None)
+    assert lm._cmudict_paths()[0] == tmp_path / "missing.dict"
 
 
 def test_a_lines_last_word_is_stressed_and_punctuation_dropped():

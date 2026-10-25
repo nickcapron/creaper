@@ -546,6 +546,9 @@ def test_render_vocalvst_sets_lyrics_plays_the_pass_then_renders(tmp_path, monke
     play = next(kw for c, kw in calls if c == "transport")
     assert play["action"] == "play" and play["start_seconds"] == 1.7 and play["end_seconds"] == 5.5
     assert cmds.index("render_audio") < cmds.index("set_fx_parameter", cmds.index("set_fx_parameter") + 1)
+    # The snapshot renders before the pass: a render between the pass and the switch stalled the plugin.
+    assert cmds.index("render_audio") < cmds.index("transport")
+    assert "render_audio" not in cmds[cmds.index("transport"):cmds.index("set_fx_parameter", cmds.index("set_fx_parameter") + 1)]
     assert out["result"].startswith("Rendered: 1 phrase") and out["captured"]["notes"] == 6
     assert out["lyrics"] == "we ride at dawn to night" and "warning" not in out
 
