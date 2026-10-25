@@ -1,6 +1,6 @@
 -- @description creaper bridge: lets Claude work in REAPER through the creaper MCP server
 -- @author nickcapron
--- @version 0.44.0
+-- @version 0.44.1
 -- @link https://github.com/nickcapron/creaper
 -- @provides
 --   [nomain] creaper_json.lua
@@ -13,7 +13,7 @@
 --   Every change it makes is a named undo point ("creaper: ..."), so Ctrl+Z
 --   reverts anything Claude did.
 
-local BRIDGE_VERSION = "0.44.0"
+local BRIDGE_VERSION = "0.44.1"
 local PROTOCOL = 2
 
 ----------------------------------------------------------------------- JSON
@@ -85,6 +85,28 @@ local function with_undo(description, fn)
   reaper.UpdateArrange()
   if not ok then error(result, 0) end
   return result
+end
+
+-- REAPER closes the audio device for every offline render and opens it again after,
+-- and opening WaveOut takes over a second: measured in the test REAPER, 8 bars of a
+-- ten-track song rendered in 3.3-3.8 s with the device open and 2.1-2.4 s with it
+-- closed. A mix's calibration is dozens of renders in a row, so the bridge closes the
+-- device at a render and leaves it closed until the renders stop (DEVICE_IDLE_S),
+-- until the transport is asked to play or record, or until REAPER opens it itself
+-- (pressing play does: measured, the transport runs and the device comes back).
+local DEVICE_IDLE_S = 20
+local device_closed_at = nil
+
+local function close_audio_for_renders()
+  if reaper.GetPlayState() == 0 and reaper.Audio_IsRunning() then reaper.Audio_Quit() end
+  if not reaper.Audio_IsRunning() then device_closed_at = reaper.time_precise() end
+end
+
+local function ensure_audio()
+  if device_closed_at then
+    device_closed_at = nil
+    if not reaper.Audio_IsRunning() then reaper.Audio_Init() end
+  end
 end
 
 ------------------------------------------------------------- musical time
@@ -1609,6 +1631,7 @@ function commands.transport(p)
         reaper.GetSetRepeat(p.loop and 1 or 0)
         stop_at = (not p.loop) and qn_to_time(end_qn) or nil
       end
+      ensure_audio()
       reaper.OnPlayButton()
     end
   else
@@ -1749,6 +1772,7 @@ local render_shift = 0
 -- RENDER_DIR, restoring the user's render settings and track selection afterwards.
 local function render_range(t, master, start_t, end_t)
   local count_before = reaper.GetProjectStateChangeCount(0)
+  close_audio_for_renders()
   busy = { what = "rendering", until_time = os.time() + math.ceil((end_t - start_t) * 1.5 + 30) }
   if announce then announce() end
   local wanted = {}
@@ -2037,6 +2061,7 @@ function commands.record(p)
   local end_qn = resolve_qn(p, "end")
   if start_qn then reaper.SetEditCurPos(qn_to_time(start_qn), true, false) end
   stop_at = end_qn and qn_to_time(end_qn) or nil
+  ensure_audio()
   reaper.Main_OnCommand(1013, 0) -- Transport: Record
   beat_now = true -- tell clients right away that a stop will bring up the prompt
   return { recording = reaper.GetPlayState() & 4 ~= 0, armed = armed,
@@ -3511,6 +3536,9 @@ local function step()
     reaper.GetSet_LoopTimeRange(true, true, restore_loop.start, restore_loop.stop, false)
     reaper.GetSetRepeat(restore_loop.rep)
     restore_loop = nil
+  end
+  if device_closed_at and (reaper.Audio_IsRunning() or now - device_closed_at > DEVICE_IDLE_S) then
+    ensure_audio() -- the renders have stopped (or REAPER opened the device itself): the user's sound is back
   end
 
   if now < claim_after then return end
