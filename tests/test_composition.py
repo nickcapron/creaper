@@ -126,6 +126,24 @@ def test_fills_land_every_8th_bar_with_a_crash_after():
     assert drop["kick"][16 * 7 + 8:16 * 8] == "." * 8
 
 
+def test_fills_come_as_often_as_the_energy_wants():
+    from creaper import grooves
+    pattern = {"kick": "x...x...x...x...", "snare": "....x.......x...", "closed hat": "x.x.x.x.x.x.x.x."}
+
+    def fill_bars(energy):
+        v = grooves.vary_groove(pattern, 0.25, 16, "snare_roll", energy=energy, seed=2)
+        return [b for b in range(16) if v["snare"][b * 16:(b + 1) * 16].endswith("X")]
+
+    assert fill_bars(None) == [7, 15] == fill_bars(3)       # the stock 8 and 16
+    assert fill_bars(1) == [15]                              # a breakdown: one fill, into the next section
+    assert fill_bars(2) == [7, 15]
+    assert fill_bars(4) == [3, 7, 11, 15]                    # a drop: every 4 bars
+    big = grooves.vary_groove(pattern, 0.25, 16, "snare_roll", energy=4, seed=2)["snare"]
+    small = grooves.vary_groove(pattern, 0.25, 16, "snare_roll", energy=2, seed=2)["snare"]
+    assert big[16 * 7:16 * 8].count("o") > small[16 * 7:16 * 8].count("o")   # the drop's 8th-bar fill is the big one
+    assert big[16 * 15:].count("o") == big[16 * 7:16 * 8].count("o")
+
+
 def test_energy_doubles_the_hats_or_thins_the_kick():
     from creaper import grooves
     pattern = {"kick": "x.x.x.x.x.x.x.x.", "closed hat": "x.x.x.x.x.x.x.x."}

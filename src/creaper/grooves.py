@@ -19,6 +19,11 @@ FAMILY_FILLS = {
     "film and games": "tom", "ambient and experimental": "none",
 }
 VARIATION_EVERY, FILL_EVERY, BIG_FILL_EVERY = 4, 8, 16
+# How often the fills come at each section energy (bars; 0: never): a breakdown or intro
+# gets one small fill into the next section, a chorus or drop one every 4 bars with a big
+# one every 8. Without an energy the stock 8 and 16 apply.
+FILL_EVERY_BY_ENERGY = {1: 16, 2: 8, 3: 8, 4: 4}
+BIG_FILL_EVERY_BY_ENERGY = {1: 0, 2: 0, 3: 16, 4: 8}
 REST = "."
 # The off-16th hats of an energy-4 section: a touch under the beat hats (velocity 85
 # against 100), not ghosts. At the ghost level (45) a pop chorus alternated loud and
@@ -50,10 +55,13 @@ def vary_groove(pattern: dict[str, str], step: float = 0.25, bars: int = 8, fill
     """The pattern laid out over `bars` bars and developed, as a drummer keeps a groove
     alive: bar 2 of every four a light change (a ghost hat or kick), bar 4 a stronger one
     (a ghost on the backbeat, an open hat, a kick pickup), never the same twice running;
-    every FILL_EVERY-th bar a fill in fill_style (a beat long, two beats every
-    BIG_FILL_EVERY bars) and a crash on the next downbeat; energy 4 hats in 16ths (the
-    off-16ths a touch softer), energy 1 the kick on the strong beats only. Returns lane -> steps, ready for
-    drum_pattern_notes (step as given)."""
+    a fill in fill_style every FILL_EVERY-th bar (a beat long, two beats every
+    BIG_FILL_EVERY bars; with an energy, FILL_EVERY_BY_ENERGY: every 16 bars in a
+    breakdown, every 4 in a drop) and a crash on the next downbeat; energy 4 hats in
+    16ths (the off-16ths a touch softer), energy 1 the kick on the strong beats only.
+    Returns lane -> steps, ready for drum_pattern_notes (step as given)."""
+    fill_every = FILL_EVERY_BY_ENERGY.get(energy, FILL_EVERY) if energy is not None else FILL_EVERY
+    big_every = BIG_FILL_EVERY_BY_ENERGY.get(energy, BIG_FILL_EVERY) if energy is not None else BIG_FILL_EVERY
     rng = random.Random(seed)
     per_bar = max(1, int(round(bar_qn / step)))
     length = bars * per_bar
@@ -86,12 +94,12 @@ def vary_groove(pattern: dict[str, str], step: float = 0.25, bars: int = 8, fill
                 if (i - s0) not in (0, per_bar // 2):
                     lane[i] = REST      # a thinner kick in the calm sections
         last = b == bars - 1
-        if (b + 1) % FILL_EVERY == 0 and fill_style != "none":
-            big = (b + 1) % BIG_FILL_EVERY == 0
+        if (b + 1) % fill_every == 0 and fill_style != "none":
+            big = bool(big_every) and (b + 1) % big_every == 0
             _fill(lanes, ensure, fill_style, s1, beat * (2 if big else 1), backbeat, kick)
             if not last:
                 ensure("crash")[s1] = "X"
-        elif (b + 1) % VARIATION_EVERY == 0 or ((b + 1) % FILL_EVERY == 0 and fill_style == "none"):
+        elif (b + 1) % VARIATION_EVERY == 0 or ((b + 1) % fill_every == 0 and fill_style == "none"):
             _variation(lanes, ensure, rng, s0, per_bar, backbeat, kick, hats, used, strong=True)
         elif (b + 1) % VARIATION_EVERY == 2:
             _variation(lanes, ensure, rng, s0, per_bar, backbeat, kick, hats, used, strong=False)

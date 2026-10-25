@@ -299,6 +299,67 @@ def fill_kit_gaps(samples: dict, layers: dict[str, list[Layer]]) -> list[str]:
     return done
 
 
+KIT_PEAK_DB = -6.0           # the loudest lane's full-velocity hit, after balancing
+LANE_TRIM_LIMIT_DB = 18.0    # no lane moves further than this from its file's own level
+PEAK_OVER_KICK_DB = 6.0      # no lane's peak ends further over the kick's than this (a clicky sample with a quiet
+#                              body would otherwise be boosted to the top and the trim drag the whole kit 20 dB down)
+OTHER_LANE_DB = -6.0         # a lane the targets don't name (a hit named after its sample)
+
+
+def hit_level_db(path: str) -> tuple[float, float] | None:
+    """A sample's hit level (dB RMS over its first 60 ms from the onset, the window
+    measure_tracks reads a kit's hits with) and its peak (dBFS); None when it's silent."""
+    from .mix_tools import HIT_WINDOW_S
+
+    x, fs, _ = samplelib._load(path, seconds=1.0)
+    env = np.abs(x)
+    if not x.size or env.max() <= 1e-5:
+        return None
+    a = int(np.flatnonzero(env > env.max() * 0.1)[0])
+    seg = x[a: a + int(HIT_WINDOW_S * fs)]
+    rms = 10 * math.log10(float(np.mean(np.square(seg))) + 1e-20)
+    return rms, 20 * math.log10(float(env.max()))
+
+
+def kit_levels(pads: list[dict], setup: list[dict]) -> dict[str, dict]:
+    """What to add to each lane's samplers so the kit plays balanced: each lane's loudest
+    main sample measured (hit_level_db) against the kick's, moved toward measure_tracks'
+    lane targets (DRUM_LANE_DB: snare -2, cymbals -8, hats -10 ...) within
+    LANE_TRIM_LIMIT_DB, then the whole kit trimmed so its loudest full-velocity hit
+    peaks at KIT_PEAK_DB. A kit built as the files come ships with the kick 12-15 dB over
+    the hats and peaking over 0 dBFS (the Donny Benet session); this is the plain fix."""
+    from .mix_tools import lane_target
+
+    measured: dict[str, tuple[float, float]] = {}      # lane -> (hit level, peak) of its loudest main sample
+    for pad, cfg in zip(pads, setup):
+        if cfg["layer"]:
+            continue
+        try:
+            got = hit_level_db(pad["path"])
+        except Exception:  # noqa: BLE001 - an unreadable sample stays at 0 dB
+            got = None
+        if got and (cfg["lane"] not in measured or got[0] > measured[cfg["lane"]][0]):
+            measured[cfg["lane"]] = got
+    if not measured:
+        return {}
+    kick = next((lane for lane in measured if lane_target(lane) == 0), None)
+    loudest = max(measured, key=lambda lane: measured[lane][0])
+    reference, ref_peak = measured[kick] if kick else measured[loudest]
+    out: dict[str, dict] = {}
+    for lane, (level, peak) in measured.items():
+        target = lane_target(lane)
+        if target is None:
+            target = OTHER_LANE_DB
+        offset = max(-LANE_TRIM_LIMIT_DB, min(LANE_TRIM_LIMIT_DB, target - (level - reference)))
+        offset = min(offset, ref_peak + PEAK_OVER_KICK_DB - peak)
+        out[lane] = {"against_kick_db": round(level - reference, 1), "target_db": target, "set_db": offset, "peak_db": peak}
+    trim = KIT_PEAK_DB - max(v["peak_db"] + v["set_db"] for v in out.values())
+    for v in out.values():
+        v["set_db"] = round(v["set_db"] + trim, 1)
+        v.pop("peak_db")
+    return out
+
+
 def kit_warnings(samples: dict[str, str | list[str]], layers: dict[str, list[Layer]] | None) -> list[str]:
     """What a kit as given will do wrong when the grooves play it. From the 90s pop kit:
     no crash lane (the groove's and add_transitions' crashes on GM 49 played nothing), the
@@ -349,6 +410,10 @@ def build_drum_kit(
     fill_gaps: Annotated[bool, Field(description=(
         "Fill what the grooves need and the kit lacks, from the library: a crash lane when none is given, and a "
         "punch layer under a kick that has no attack. The result says what was added"))] = True,
+    balance: Annotated[bool, Field(description=(
+        "Set each lane's level from its sample's measured hit level so the kit comes out balanced (snare 2 dB "
+        "under the kick, hats 10, cymbals 8: the targets measure_tracks judges a kit by) and trimmed to peak at "
+        "-6 dBFS. False leaves every sampler at 0 dB, as the files are"))] = True,
 ) -> dict:
     """Builds a drum kit from sample files in REAPER's own sampler (ReaSamplOmatic5000
     on the General MIDI keys), so drum patterns and genre grooves land on the right
@@ -403,6 +468,9 @@ def build_drum_kit(
     unknown = set(layers or {}) - set(samples)
     if unknown:
         raise ValueError(f"layers for lanes that have no sample: {', '.join(sorted(unknown))}")
+    levels = kit_levels(pads, setup) if balance else {}
+    for cfg in setup:
+        cfg["gain_db"] = round(cfg["gain_db"] + levels.get(cfg["lane"], {}).get("set_db", 0.0), 1)
     if isinstance(track, str) and not any(t["name"] == track for t in call("get_project_overview").get("tracks", [])):
         call("create_track", name=track)
     result = call("build_sampler_kit", timeout=120.0, track=track, pads=pads, velocity_db=velocity_db, release_s=release_s)
@@ -423,6 +491,12 @@ def build_drum_kit(
             f" (velocity {cfg['min_vel']}-{cfg['max_vel']})" if (cfg["min_vel"], cfg["max_vel"]) != (1, 127) else ""))
     out = {"track": result.get("track"), "kit": kit,
            "note": "Lanes sit on General MIDI keys, so add_drum_pattern and add_genre_groove find them without a drum map."}
+    if levels:
+        out["levels"] = {lane: f"{v['set_db']:+.1f} dB (hits {v['against_kick_db']:+.0f} dB against the kick, "
+                               f"target {v['target_db']:+.0f})" for lane, v in levels.items()}
+        out["levels_note"] = ("each sampler's Volume set from its sample's measured hit level, the kit trimmed to peak "
+                              "near -6 dBFS; the drum bus needs no EQ or gain to balance the lanes, so leave the "
+                              "samplers alone unless measure_tracks' hit levels say otherwise")
     if any(len(v["samples"]) > 1 for v in kit.values()):
         out["tip"] = ("lanes with alternatives switch sample by velocity: give the part a feel (apply_feel) or "
                       "varied velocities so they alternate")

@@ -376,12 +376,22 @@ def test_build_drum_kit_with_alternatives_and_layers(tmp_path, monkeypatch):
     assert [p["note"] for p in pads] == [36, 36, 38, 38]          # the layer shares the kick's key
     sets = [kw for cmd, kw in calls if cmd == "set_fx_parameters"]
     by_fx = {kw["fx"]: {c["parameter"]: c["display_value"] for c in kw["changes"]} for kw in sets}
-    assert by_fx[2] == {"Volume": -9}                              # the kick's click layer
-    assert by_fx[3] == {"Minimum velocity": 1, "Maximum velocity": 64}   # the soft snare takes the soft hits
-    assert by_fx[4] == {"Minimum velocity": 65, "Maximum velocity": 127}
+    # Balanced at build time: the snare's hits measure 6.9 dB under the kick's and belong 2 under, so it
+    # comes up 4.9 dB; then the kit is trimmed so its loudest full-velocity hit (that snare) peaks at -6.
+    kick_db = by_fx[1]["Volume"]
+    assert kick_db == pytest.approx(-10.9, abs=0.2)
+    assert by_fx[2] == {"Volume": pytest.approx(kick_db - 9, abs=0.01)}            # the kick's click layer, 9 under its lane
+    assert by_fx[3] == {"Minimum velocity": 1, "Maximum velocity": 64, "Volume": pytest.approx(-6.0, abs=0.2)}
+    assert by_fx[4] == {"Minimum velocity": 65, "Maximum velocity": 127, "Volume": by_fx[3]["Volume"]}
+    assert out["levels"]["snare"].startswith("-6.0 dB (hits -7 dB against the kick, target -2)")
     assert out["kit"]["snare"]["samples"] == ["snare soft (velocity 1-64)", "snare loud (velocity 65-127)"]
-    assert "layer, -9 dB" in out["kit"]["kick"]["samples"][1]
     assert len(out["warnings"]) == 1 and out["warnings"][0].startswith("no crash lane")
+    calls.clear()
+    plain = sample_tools.build_drum_kit(track="Drums", samples={"kick": str(kick), "snare": [str(loud), str(soft)]},
+                                        layers={"kick": [sample_tools.Layer(path=str(click), gain_db=-9)]},
+                                        trim_silence=False, balance=False)
+    sets = {kw["fx"]: {c["parameter"]: c["display_value"] for c in kw["changes"]} for cmd, kw in calls if cmd == "set_fx_parameters"}
+    assert sets[2] == {"Volume": -9} and 1 not in sets and "levels" not in plain   # as the files come
     with pytest.raises(ValueError, match="layers for lanes that have no sample"):
         sample_tools.build_drum_kit(track="Drums", samples={"kick": str(kick)},
                                     layers={"clap": [sample_tools.Layer(path=str(click))]}, trim_silence=False)
@@ -490,3 +500,41 @@ def test_a_kit_without_a_crash_or_a_kick_attack_is_filled_from_the_library(tmp_p
     kept = sample_tools.build_drum_kit(track="Drums", samples={"kick": str(soft_kick), "snare": str(dull)}, layers={"kick": []},
                                        trim_silence=False)
     assert len(kept["added"]) == 1 and "crash" in kept["added"][0]         # layers={'kick': []} keeps the kick bare
+
+
+def test_kit_levels_balance_the_lanes_and_trim_the_kit(tmp_path):
+    import soundfile as sf
+    from creaper import server  # noqa: F401
+    from creaper import sample_tools
+    kick, hat, crash, cowbell = (tmp_path / n for n in ("kick.wav", "hat.wav", "crash.wav", "cow.wav"))
+    sf.write(str(kick), _kick(), FS44)
+    sf.write(str(hat), _hat() * 0.1, FS44)             # a hat 20 dB too quiet
+    sf.write(str(crash), np.tile(_hat(), 4), FS44)
+    sf.write(str(cowbell), _hat(), FS44)
+    pads = [{"note": 36, "path": str(kick)}, {"note": 42, "path": str(hat)}, {"note": 49, "path": str(crash)},
+            {"note": 56, "path": str(cowbell)}]
+    setup = [{"lane": lane, "layer": False, "gain_db": 0.0} for lane in ("kick", "closed hat", "crash", "cowbell")]
+    levels = sample_tools.kit_levels(pads, setup)
+    against = {lane: v["against_kick_db"] + v["set_db"] - levels["kick"]["set_db"] for lane, v in levels.items()}
+    assert against["closed hat"] == pytest.approx(-10, abs=0.1) and against["crash"] == pytest.approx(-8, abs=0.1)
+    assert against["cowbell"] == pytest.approx(-8, abs=0.1)        # named in the targets (perc family)
+    peaks = {"kick": sample_tools.hit_level_db(str(kick))[1], "closed hat": sample_tools.hit_level_db(str(hat))[1],
+             "crash": sample_tools.hit_level_db(str(crash))[1], "cowbell": sample_tools.hit_level_db(str(cowbell))[1]}
+    assert max(peaks[lane] + v["set_db"] for lane, v in levels.items()) == pytest.approx(sample_tools.KIT_PEAK_DB, abs=0.01)
+    # A clicky sample with a quiet body (a sharp peak, little RMS) is not boosted past the kick's peak by more
+    # than PEAK_OVER_KICK_DB, so the trim doesn't drag the whole kit down (a rig kit lost 22 dB that way).
+    clicky = tmp_path / "click snare.wav"
+    spike = _hat() * 0.02
+    spike[0] = 0.99
+    sf.write(str(clicky), spike, FS44)
+    with_click = sample_tools.kit_levels(pads + [{"note": 38, "path": str(clicky)}],
+                                         setup + [{"lane": "snare", "layer": False, "gain_db": 0.0}])
+    kick_peak, click_peak = sample_tools.hit_level_db(str(kick))[1], sample_tools.hit_level_db(str(clicky))[1]
+    assert with_click["snare"]["set_db"] - with_click["kick"]["set_db"] == pytest.approx(
+        kick_peak + sample_tools.PEAK_OVER_KICK_DB - click_peak, abs=0.1)
+    assert with_click["kick"]["set_db"] >= -12.5
+    # No kick: the loudest lane is the reference; a lane the targets don't know sits 6 under.
+    other = sample_tools.kit_levels(pads[1:] + [{"note": 60, "path": str(cowbell)}],
+                                    setup[1:] + [{"lane": "gong", "layer": False, "gain_db": 0.0}])
+    assert other["gong"]["target_db"] == sample_tools.OTHER_LANE_DB and "kick" not in other
+    assert sample_tools.kit_levels([], []) == {}

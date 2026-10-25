@@ -834,17 +834,18 @@ def add_genre_groove(
         "Fill this many bars (instead of repeats): a whole section, varied as it goes"))] = None,
     variations: Annotated[bool, Field(description=(
         "Keep it alive as a drummer would: a small change every 2nd and 4th bar, a fill every 8th (in the genre's "
-        "fill style, bigger every 16th) and a crash after it. False repeats the stock groove exactly"))] = True,
+        "fill style, bigger every 16th; with energy, every 16 bars at 1, every 4 at 4) and a crash after it. False "
+        "repeats the stock groove exactly"))] = True,
     energy: Annotated[int | None, Field(ge=1, le=4, description=(
-        "The section's energy: 4 (chorus, drop) puts the hats in 16ths, 1 (intro, breakdown) thins the kick to "
-        "the strong beats; default: as written"))] = None,
+        "The section's energy: 4 (chorus, drop) puts the hats in 16ths and a fill every 4 bars, 1 (intro, "
+        "breakdown) thins the kick to the strong beats and fills once in 16; default: as written"))] = None,
     seed: Annotated[int | None, Field(description="Same seed, same variations")] = None,
 ) -> dict:
     """Programs a genre's drum groove (from its genre profile, with the genre's swing)
     on the track's drum instrument in one call, developed over the bars: small
-    variations every 2nd and 4th bar, a fill every 8th in the genre's own fill style
-    (snare or clap roll, toms, a drop-out), a crash on the downbeat after it, and hats
-    and kick that follow the section's energy. Write one call per section (bars=, its
+    variations every 2nd and 4th bar, a fill in the genre's own fill style (snare or
+    clap roll, toms, a drop-out) every 8th bar, or as often as the section's energy
+    wants, a crash on the downbeat after it, and hats and kick that follow the energy. Write one call per section (bars=, its
     energy) so the verse and chorus differ. For your own pattern use add_drum_pattern,
     which this calls. Returns the lanes and notes used, how varied the bars are, and how
     drums work in that genre."""
