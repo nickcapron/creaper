@@ -939,3 +939,24 @@ def test_an_older_vocalvst_without_the_controls_is_said(tmp_path, monkeypatch):
     out = vocal_tools.render_vocalvst(track="Vocal", lyrics="we ride at dawn to-night", seed=12)
     assert not any(c == "set_fx_parameters" for c, kw in calls)
     assert "Seed" in out["controls_missing"] and "seed" not in out and "seed_used" not in out
+
+
+def test_a_knob_the_plugin_refuses_is_reported_not_claimed(tmp_path, monkeypatch):
+    from creaper import vocal_tools
+
+    calls, state = _vocalvst_bridge(tmp_path, monkeypatch)
+    inner = vocal_tools.call
+
+    def refusing(cmd, **kw):
+        if cmd == "get_fx_parameters" and "search" not in kw:
+            return {"parameters": [{"name": n} for n in ("Render", "Breaths", "Seed")]}
+        if cmd == "set_fx_parameters":
+            calls.append((cmd, kw))
+            return {"results": [{"parameter": c["parameter"], "error": "no value shows as 4242"}
+                                if c["parameter"] == "Seed" else {"parameter": c["parameter"]} for c in kw["changes"]]}
+        return inner(cmd, **kw)
+
+    monkeypatch.setattr(vocal_tools, "call", refusing)
+    out = vocal_tools.render_vocalvst(track="Vocal", lyrics="we ride at dawn to-night", breaths=0.5, seed=4242)
+    assert out["breaths"] == 0.5 and "seed" not in out
+    assert "Seed: no value shows as 4242" in out["controls_failed"] and "controls_missing" not in out

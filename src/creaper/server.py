@@ -327,13 +327,15 @@ def _bring_media_online() -> None:
 def call(cmd: str, timeout: float = 30.0, **params: Any) -> Any:
     state = epoch = None
     if cmd in RENDERS:
+        # The media check first: bringing items back online moves REAPER's count (and the
+        # cache's epoch), and a render made with them online is the one worth keeping.
+        _bring_media_online()
         state = _render_cache.state()
         if state is not None:
             hit = _render_cache.lookup(cmd, params, state)
             if hit is not None:
                 return hit
-        _bring_media_online()
-        epoch = _render_cache.epoch   # after the media check: a render made with the items back online is good
+        epoch = _render_cache.epoch
     result = bridge.call(cmd, params, timeout=timeout)
     if cmd in RENDERS and time.time() - _media_tried[0] > MEDIA_RETRY_S and _all_silent(result):
         _media_tried[0] = time.time()
@@ -343,8 +345,10 @@ def call(cmd: str, timeout: float = 30.0, **params: Any) -> Any:
         bridge.call("run_action", {"command": MEDIA_ONLINE_ACTION}, timeout=600.0)
         _render_cache.changed()
         _discard(result)
-        result = bridge.call(cmd, params, timeout=timeout)
+        if state is not None:
+            state = _render_cache.state()   # the action moved the count: the second render is of this state
         epoch = _render_cache.epoch
+        result = bridge.call(cmd, params, timeout=timeout)
     if cmd in RENDERS:
         if state is not None:
             _render_cache.store(cmd, params, result, state, epoch)
@@ -461,19 +465,23 @@ class RenderCache:
 
     def lookup(self, cmd: str, params: dict, state: tuple) -> Any | None:
         """The kept result for this render in this state, its files linked afresh, or None."""
+        key = self.key(cmd, params)
         with self._lock:
-            entry = self._entries.get(self.key(cmd, params))
+            entry = self._entries.get(key)
             if entry is None:
                 self.misses += 1
                 return None
             if entry["state"] != state or entry["epoch"] != self.epoch or time.time() - entry["at"] > CACHE_TTL_S:
                 self.misses += 1
-                dead = self._entries.pop(self.key(cmd, params))   # it can't hit again
-                self._drop(dead["files"])
-                return None
-            files, result = list(entry["files"]), entry["result"]
+                dead = self._entries.pop(key)   # it can't hit again
+            else:
+                dead = None
+                files, result = list(entry["files"]), entry["result"]
+        if dead is not None:
+            self._drop(dead["files"])         # disk work outside the lock
+            return None
         if not all(f.exists() for f in files):
-            self._forget(self.key(cmd, params))
+            self._forget(key)
             return None
         renders = bridge.directory / "renders"
         stamp = uuid.uuid4().hex[:8]
@@ -494,12 +502,16 @@ class RenderCache:
         """Keeps a render just made under the state it was looked up in, unless something
         changed under it (the state or this process's commands moved) or it's silent (an
         offline file renders as silence, and comes back). The bridge's render result
-        carries the count after the render, so no second round trip is needed for it."""
+        carries the state after the render (count, project tab and bridge run), so no
+        second round trip is needed for it."""
         files = _render_files(result)
         if epoch is None or self.epoch != epoch or not files or _all_silent(result):
             return
-        count = result.get("state_change_count") if isinstance(result, dict) else None
-        state = (before[0], before[1], count) if count is not None else self.state()
+        s = result.get("state") if isinstance(result, dict) else None
+        if isinstance(s, dict) and s.get("change_count") is not None:
+            state = (s.get("instance"), s.get("project"), s["change_count"])
+        else:
+            state = self.state()
         if state != before:
             return
         folder = self.folder()
@@ -1762,7 +1774,7 @@ def setup_sidechain(
                                         sidechain=True)
             result["threshold_db"] = cal.get("value", threshold)
             result["measured_ducking_db"] = cal.get("loud_part_reduction_db")
-            if "repeat_noise_db" in cal:   # the renders couldn't be read (batch._model_result): say why
+            if cal.get("measured") is False:   # the renders couldn't be read (batch._model_result): say why
                 result["ducking_note"] = cal["note"]
         except Exception as e:  # noqa: BLE001 - the table threshold still ducks about right
             result["note"] = f"ducking set from the table, not measured ({e})"

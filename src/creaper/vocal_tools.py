@@ -1054,16 +1054,22 @@ def _log_details(log_size: int) -> dict:
     return out
 
 
-def _set_knobs(track: str | int, fx: int, wanted: dict[str, float]) -> list[str]:
+def _set_knobs(track: str | int, fx: int, wanted: dict[str, float]) -> tuple[list[str], dict[str, str]]:
     """Sets VocalVST's newer controls (Breaths, Formant, Seed, Phrase gap: added after
-    Render on 2026-10-24) by their displayed values; returns the names this build lacks."""
+    Render on 2026-10-24) by their displayed values, in one call. Returns the names this
+    build lacks, and {name: error} for any the plugin refused (set_fx_parameters reports
+    each change's failure instead of raising)."""
     if not wanted:
-        return []
+        return [], {}
     have = {p.get("name") for p in call("get_fx_parameters", track=track, fx=fx).get("parameters", [])}
     changes = [{"parameter": name, "display_value": value} for name, value in wanted.items() if name in have]
+    failed: dict[str, str] = {}
     if changes:   # one call, one undo point
-        call("set_fx_parameters", track=track, fx=fx, changes=changes)
-    return [name for name in wanted if name not in have]
+        done = call("set_fx_parameters", track=track, fx=fx, changes=changes) or {}
+        for change, res in zip(changes, done.get("results") or []):
+            if isinstance(res, dict) and res.get("error"):
+                failed[change["parameter"]] = str(res["error"])
+    return [name for name in wanted if name not in have], failed
 
 
 def _wait_for_render_switch(track: str | int, fx: int, seconds: float = 10.0) -> None:
@@ -1232,7 +1238,7 @@ def render_vocalvst(
         # A 0-1 knob: the normalized value is the displayed one, so no display matching.
         call("set_fx_parameter", track=track, fx=fx["index"], parameter="Expression", value=float(expression))
     knobs = {"Breaths": breaths, "Formant": formant, "Seed": seed, "Phrase gap": phrase_gap_s}
-    missing = _set_knobs(track, fx["index"], {k: v for k, v in knobs.items() if v is not None})
+    missing, failed = _set_knobs(track, fx["index"], {k: v for k, v in knobs.items() if v is not None})
 
     # The pass: the plugin records only what the transport plays through it, by position,
     # so it has to run past the last note, not just the items' ends.
@@ -1261,7 +1267,8 @@ def render_vocalvst(
     report = _wait_for_render(log_size, timeout_seconds, before, lambda: _track_audio(track, *span))
     out = {"track": track, "mode": mode, "lyrics": text or None, "written_notes": len(line), "captured": captured,
            "expression": expression if expression is not None else "the plugin's own",
-           **{k.lower().replace(" ", "_"): v for k, v in knobs.items() if v is not None and k not in missing},
+           **{k.lower().replace(" ", "_"): v for k, v in knobs.items()
+              if v is not None and k not in missing and k not in failed},
            **_log_details(log_size),
            "pass": {"from_seconds": round(start, 3), "to_seconds": round(end, 3)},
            "voicebank": Path(bank).name, "voice": speaker or "the bank's default",
@@ -1275,6 +1282,9 @@ def render_vocalvst(
     if missing:
         out["controls_missing"] = (f"this VocalVST build has no {', '.join(missing)} control, so those were left "
                                    "out: rebuild and reinstall the plugin (2026-10-24 or later) to use them")
+    if failed:
+        out["controls_failed"] = ("the plugin didn't take " + "; ".join(f"{k}: {v}" for k, v in failed.items())
+                                  + ", so the take used its previous setting there")
     if extended:
         out["extended_items"] = "lengthened to hold their notes, which ran past their ends: " + ", ".join(extended)
     if captured["notes"] > len(line):

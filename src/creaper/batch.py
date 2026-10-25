@@ -271,7 +271,7 @@ def _read_noise_floor(jobs: list[dict], idx: list[int], searches: dict, lo_bar, 
 
 def _model_result(s: "DriveSearch") -> dict:
     modelled = s.predicted is not None
-    out = {"control": s.profile.drive, "value": round(s.drive, 2),
+    out = {"control": s.profile.drive, "value": round(s.drive, 2), "measured": False,
            "loud_part_reduction_db": None, "target_db": s.target,      # nothing was read: see predicted_reduction_db
            **({"predicted_reduction_db": s.target} if modelled else {}),
            "calibration": s.steps, **s.where, "repeat_noise_db": s.noise,

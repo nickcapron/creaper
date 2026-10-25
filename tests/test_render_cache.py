@@ -174,8 +174,8 @@ def test_the_render_result_carries_its_state_so_nothing_is_asked_twice(monkeypat
 
     def with_count(cmd, params=None, timeout=30.0):
         r = original(cmd, params, timeout)
-        if cmd in server.RENDERS:
-            r["state_change_count"] = fake.count            # a 0.44.2 bridge says what state it rendered
+        if cmd in server.RENDERS:                           # a 0.44.3 bridge says what state it rendered
+            r["state"] = {"change_count": fake.count, "project": fake.project, "instance": fake.instance}
         return r
 
     fake.call = with_count
@@ -212,6 +212,7 @@ def test_a_render_made_right_after_media_came_back_online_is_kept(monkeypatch, t
     def media(cmd, params=None, timeout=30.0):
         if cmd == "media_online":
             n, offline[0] = offline[0], 0
+            fake.count += n                                   # selecting and onlining items moves REAPER's count
             return {"offline": n, "tracks": ["Pad"] if n else [], "missing": [], "offline_when_inactive": True}
         return original(cmd, params, timeout)
 

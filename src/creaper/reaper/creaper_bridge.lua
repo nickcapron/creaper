@@ -1,6 +1,6 @@
 -- @description creaper bridge: lets Claude work in REAPER through the creaper MCP server
 -- @author nickcapron
--- @version 0.44.2
+-- @version 0.44.3
 -- @link https://github.com/nickcapron/creaper
 -- @provides
 --   [nomain] creaper_json.lua
@@ -13,7 +13,7 @@
 --   Every change it makes is a named undo point ("creaper: ..."), so Ctrl+Z
 --   reverts anything Claude did.
 
-local BRIDGE_VERSION = "0.44.2"
+local BRIDGE_VERSION = "0.44.3"
 local PROTOCOL = 2
 
 ----------------------------------------------------------------------- JSON
@@ -31,6 +31,8 @@ local BRIDGE_DIR = join(reaper.GetResourcePath(), "creaper")
 local REQUESTS_DIR = join(BRIDGE_DIR, "requests")   -- protocol 2: <id>.json per request
 local RESPONSES_DIR = join(BRIDGE_DIR, "responses") -- protocol 2: <id>.json per answer
 local REQUEST_PATH = join(BRIDGE_DIR, "request.json")   -- protocol 1 (older servers)
+math.randomseed(os.time())
+local INSTANCE = string.format("%d%04d", os.time(), math.random(0, 9999))   -- this run of the bridge
 local RESPONSE_PATH = join(BRIDGE_DIR, "response.json") -- protocol 1
 local HEARTBEAT_PATH = join(BRIDGE_DIR, "bridge.json")
 local RENDER_DIR = join(BRIDGE_DIR, "renders")
@@ -1776,7 +1778,19 @@ local render_shift = {}
 
 local function shifted_count()
   local proj = reaper.EnumProjects(-1)
+  for p in pairs(render_shift) do   -- tabs that closed (a new tab may reuse the pointer)
+    if p ~= proj and not reaper.ValidatePtr(p, "ReaProject*") then render_shift[p] = nil end
+  end
   return reaper.GetProjectStateChangeCount(0) - (render_shift[proj] or 0)
+end
+
+-- Whether the audio a render would produce has changed since the last one: REAPER's
+-- project state change count (less what renders themselves add), which project tab,
+-- and which run of the bridge (the count starts over when REAPER restarts). The server
+-- keeps renders while all three hold; every render result carries it too.
+local function render_state()
+  local _, path = reaper.EnumProjects(-1, "")
+  return { change_count = shifted_count(), project = path ~= "" and path or nil, instance = INSTANCE }
 end
 
 -- Renders [start_t, end_t] of a track (stem) or the master to a 32-bit float WAV in
@@ -1874,7 +1888,7 @@ function commands.render_audio(p)
     track = track_ref(t),
     start = time_to_pos(start_t),
     ["end"] = time_to_pos(end_t),
-    state_change_count = shifted_count(), -- for the server's render cache: the state this render is of
+    state = render_state(), -- for the server's render cache: the state this render is of
     warning = #realtime > 0 and ("these plugins only produce sound in real time, so this offline render "
       .. "may be missing their audio: " .. table.concat(realtime, ", ")
       .. ". To measure them, record or render their output to an audio track first.") or nil,
@@ -1900,7 +1914,7 @@ function commands.render_stems(p)
     -- for several), so matching by number found nothing: stems came back empty and
     -- export_stems/measure_tracks on one track did nothing.
     return { stems = { { track = track_ref(tracks[1]), file = files[1] } }, files = files,
-             start = time_to_pos(start_t), ["end"] = time_to_pos(end_t), state_change_count = shifted_count() }
+             start = time_to_pos(start_t), ["end"] = time_to_pos(end_t), state = render_state() }
   end
   for _, tr in ipairs(tracks) do
     local number = int(reaper.GetMediaTrackInfo_Value(tr, "IP_TRACKNUMBER"))
@@ -1910,7 +1924,7 @@ function commands.render_stems(p)
     end
   end
   return { stems = by_track, files = files, start = time_to_pos(start_t), ["end"] = time_to_pos(end_t),
-           state_change_count = shifted_count() }
+           state = render_state() }
 end
 
 -- The plugin settings creaper changed (touched_params), by track and plugin GUID.
@@ -3390,18 +3404,10 @@ local function handle(raw)
 end
 
 reaper.RecursiveCreateDirectory(BRIDGE_DIR, 0)
-math.randomseed(os.time())
-local INSTANCE = string.format("%d%04d", os.time(), math.random(0, 9999))
 local CLAIMED_PATH = REQUEST_PATH .. "." .. INSTANCE
 
--- Whether the audio a render would produce has changed since the last one: REAPER's
--- project state change count moves on every edit (the user's or the bridge's; what
--- renders themselves add is taken off), the path says which project tab, and the
--- instance which run of the bridge (the count starts over when REAPER restarts). The
--- server keeps renders while all three hold.
 function commands.project_state()
-  local _, path = reaper.EnumProjects(-1, "")
-  return { change_count = shifted_count(), project = path ~= "" and path or nil, instance = INSTANCE }
+  return render_state()
 end
 
 -- Replaces a file atomically (write a temp file, rename it over). On Windows

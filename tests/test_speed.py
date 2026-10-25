@@ -315,6 +315,7 @@ def test_a_track_that_renders_differently_each_time_is_set_by_the_model():
     assert pad_result["repeat_noise_db"] > batch.NOISE_FLOOR_DB and pad_result["method"].startswith("the compressor model")
     assert pad_result["value"] == pad_result["predicted_start"] == bench.threshold["Pad"]   # the model's threshold stands
     assert pad_result["loud_part_reduction_db"] is None and pad_result["predicted_reduction_db"] == 1.5   # never "measured"
+    assert pad_result["measured"] is False and "measured" not in kick
     assert pad_result["calibration"][-1]["unreadable"] and "differ from each other" in pad_result["note"]
     # Three passes for the pad (dry, one wet, the noise check), not seven of walking the threshold at random.
     assert sum("Pad" in p for p in bench.passes) == 3

@@ -737,7 +737,7 @@ def _shape_dynamics(channels: list[dict], actions: list[dict], family: str | Non
 def _unread(cal: dict) -> dict:
     """What a calibration says when its renders couldn't be read (batch._model_result):
     the model's reduction and the reason, so a report never shows a target as measured."""
-    if "repeat_noise_db" not in cal:
+    if cal.get("measured") is not False:
         return {}
     return {k: cal[k] for k in ("predicted_reduction_db", "repeat_noise_db", "note") if k in cal}
 
@@ -1449,7 +1449,8 @@ def _mix_stages(report: dict, plan: dict, channels: list[dict], profile: dict | 
             try:
                 done_sc = setup_sidechain(source=d.get("source_ref", d["source"]), target=d.get("target_ref", d["target"]),
                                           depth=d["depth"])
-                d.update({k: done_sc[k] for k in ("measured_ducking_db", "threshold_db", "detector_lowpass_hz", "note")
+                d.update({k: done_sc[k] for k in ("measured_ducking_db", "threshold_db", "detector_lowpass_hz", "note",
+                                                  "ducking_note")
                           if k in done_sc})
             except Exception as e:  # noqa: BLE001
                 report.setdefault("warnings", []).append(f"sidechain {d['source']} -> {d['target']}: {e}")
