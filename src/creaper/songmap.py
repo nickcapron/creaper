@@ -22,12 +22,15 @@ KIND_ENERGY = {"intro": 1, "verse": 2, "pre": 3, "chorus": 4, "post": 3, "bridge
 
 # The calmer way to play each comping rhythm, for the verses: a Donny Benet song had its
 # chords pulsing 16ths through every section until the model rewrote the verses as stabs
-# by hand. Rhythms that define their genre (bossa, montuno, tresillo, waltz) stay.
+# by hand. Each partner has fewer hits a bar than its source (composer._COMP:
+# pulse_16 16, eighths 8, push 5, offbeat 4, stabs 3, charleston 2) or longer ones.
+# Rhythms that define their genre (bossa, montuno, skank, tresillo, waltz) stay.
 CALMER_COMPING = {
     "pulse_16": "stabs", "eighths": "stabs", "quarters": "half_notes", "half_notes": "sustain", "offbeat": "stabs",
-    "skank": "offbeat", "stabs": "half_notes", "charleston": "stabs", "strum": "half_notes", "arpeggio_up": "broken",
-    "arpeggio_updown": "arpeggio_up", "broken": "sustain", "alberti": "broken", "push": "stabs", "gospel": "sustain",
+    "stabs": "half_notes", "charleston": "sustain", "strum": "half_notes", "arpeggio_up": "broken",
+    "arpeggio_updown": "arpeggio_up", "broken": "sustain", "alberti": "broken", "push": "stabs", "gospel": "half_notes",
 }
+PEAK_KINDS = ("chorus", "pre")     # section kinds (composer.section_kind: a drop is a chorus) that comp in full
 CALM_ENERGY = 2     # sections at this energy or below comp the calmer way
 
 
@@ -35,7 +38,7 @@ def comp_rhythm(comping: str, energy: int, kind: str) -> str:
     """How the chords are played in a section: the genre's own comping where the song
     is up (chorus, drop, pre-chorus, any section at energy 3 or more), its calmer
     partner (CALMER_COMPING) in verses and bridges, so the chorus has somewhere to go."""
-    if kind in ("chorus", "drop", "pre") or energy > CALM_ENERGY:
+    if kind in PEAK_KINDS or energy > CALM_ENERGY:
         return comping
     return CALMER_COMPING.get(comping, comping)
 

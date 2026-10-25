@@ -946,8 +946,9 @@ def _vocalvst_fx(track: str | int) -> tuple[dict, list[dict]]:
 
 PASS_LEAD_SECONDS = 0.3
 PASS_TAIL_SECONDS = 0.5
-# Every failure past this point ends with it: a Donny Benet session stopped the whole
-# song (no mix, master, check or export) to wait for the user when the render failed.
+# The dead ends (no voicebank, a switch never taken, a render that never came) end with
+# it: a Donny Benet session stopped the whole song (no mix, master, check or export) to
+# wait for the user when the render failed. Pass errors the model fixes and retries don't.
 NO_WAIT = (" Meanwhile the song goes on without the vocal: mute this track if it's silent, finish the mix, master, "
            "check_song and export, then come back to it. Don't wait for the user.")
 
@@ -1160,7 +1161,7 @@ def _log_details(log_size: int) -> dict:
     seed = re.search(r"voice: seed (\d+)", new)
     if seed:
         out["seed_used"] = int(seed.group(1))
-    device = re.search(r"device: ([^(\r\n]+)", new)
+    device = re.search(r"device:\s*([^(\r\n]+)", new)      # builds of 2026-10-24/25 wrote 'device:DirectML'
     if device:
         out["device"] = device.group(1).strip()
     timing = re.search(r"timing: (model|rule[^\r\n]*)", new)
@@ -1408,17 +1409,17 @@ def render_vocalvst(
     captured = vocalvst_captured(call("capture_fx_state", track=track, fx=fx["index"])["chunk"])
     if not captured["notes"]:
         raise ValueError("VocalVST recorded no notes during the pass: check the track isn't muted, the item is "
-                         "on it and the plugin is enabled, then call again." + NO_WAIT)
+                         "on it and the plugin is enabled, then call again")
     if not stopped_itself and captured["notes"] < len(line):
         raise ValueError(f"REAPER didn't reach the end of the pass in time and was stopped with {captured['notes']} "
                          f"of {len(line)} notes captured. If REAPER was in the background with its audio device "
-                         "closed (Preferences > Audio), bring it to the front, then call again." + NO_WAIT)
+                         "closed (Preferences > Audio), bring it to the front, then call again")
     if captured["notes"] < len(line):
         missed = len(line) - captured["notes"]
         raise ValueError(f"VocalVST captured {captured['notes']} of the track's {len(line)} notes over the pass "
                          f"({start:.1f} s to {end:.1f} s): {missed} were missed, so the phrase wasn't rendered. "
                          "Check that every note sits inside an unmuted item on this track and nothing else "
-                         "silences the track partway (a muted item, an automation lane), then call again." + NO_WAIT)
+                         "silences the track partway (a muted item, an automation lane), then call again")
 
     log_size = VOCALVST_LOG.stat().st_size if VOCALVST_LOG.exists() else 0
     call("set_fx_parameter", track=track, fx=fx["index"], parameter="Render", display_text="On")
@@ -1444,17 +1445,18 @@ def render_vocalvst(
         out["lyric_check"] = lyric_check
     if woken:
         out["woken"] = woken
-    if report.startswith("Rendered") and lyrics and mode != "scat" and hear_words and asr.available():
-        try:
-            out["heard"] = _hear_take(track, parts, lyrics, span)
-        except Exception as e:  # noqa: BLE001  (a failed hearing mustn't undo the take)
-            out["heard"] = {"error": f"couldn't transcribe the take: {e}"}
-        if out["heard"].get("unclear_lines"):
-            out["next"] = ("rewrite the lines in heard.unclear_lines (their missed words first; lyric_check says "
-                           "what trips the singer), then " + HEAR_NEXT + "; the vocal isn't done while any remain")
-    elif report.startswith("Rendered") and lyrics and mode != "scat" and hear_words and not asr.available():
-        out["heard"] = ("not checked: pip install \"creaper[asr]\" (faster-whisper, MIT) lets render_vocalvst "
-                        "report what a listener makes of each line")
+    if report.startswith("Rendered") and lyrics and mode != "scat" and hear_words:
+        if not asr.available():
+            out["heard"] = ("not checked: pip install \"creaper[asr]\" (faster-whisper, MIT) lets render_vocalvst "
+                            "report what a listener makes of each line")
+        else:
+            try:
+                out["heard"] = _hear_take(track, parts, lyrics, span)
+            except Exception as e:  # noqa: BLE001  (a failed hearing mustn't undo the take)
+                out["heard"] = {"error": f"couldn't transcribe the take: {e}"}
+            if out["heard"].get("unclear_lines"):
+                out["next"] = ("rewrite the lines in heard.unclear_lines (their missed words first; lyric_check "
+                               "says what trips the singer), then " + HEAR_NEXT + "; the vocal isn't done while any remain")
     if not report.startswith("Rendered"):
         out["warning"] = "the plugin reports: " + report
     if missing:

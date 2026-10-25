@@ -136,6 +136,8 @@ def test_fills_come_as_often_as_the_energy_wants():
 
     assert fill_bars(None) == [7, 15] == fill_bars(3)       # the stock 8 and 16
     assert fill_bars(1) == [15]                              # a breakdown: one fill, into the next section
+    short = grooves.vary_groove(pattern, 0.25, 8, "snare_roll", energy=1, seed=2)["snare"]
+    assert short[16 * 7:16 * 8].endswith("X") and "X" not in short[:16 * 7]   # an 8-bar breakdown fills into the drop
     assert fill_bars(2) == [7, 15]
     assert fill_bars(4) == [3, 7, 11, 15]                    # a drop: every 4 bars
     big = grooves.vary_groove(pattern, 0.25, 16, "snare_roll", energy=4, seed=2)["snare"]

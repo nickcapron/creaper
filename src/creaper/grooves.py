@@ -62,6 +62,8 @@ def vary_groove(pattern: dict[str, str], step: float = 0.25, bars: int = 8, fill
     Returns lane -> steps, ready for drum_pattern_notes (step as given)."""
     fill_every = FILL_EVERY_BY_ENERGY.get(energy, FILL_EVERY) if energy is not None else FILL_EVERY
     big_every = BIG_FILL_EVERY_BY_ENERGY.get(energy, BIG_FILL_EVERY) if energy is not None else BIG_FILL_EVERY
+    if energy is not None and bars >= 2:
+        fill_every = min(fill_every, bars)      # an 8-bar breakdown still fills into what follows
     rng = random.Random(seed)
     per_bar = max(1, int(round(bar_qn / step)))
     length = bars * per_bar

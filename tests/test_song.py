@@ -574,12 +574,19 @@ def test_mastering_moves_get_the_balance_checked_again(monkeypatch):
 
 
 def test_verses_comp_calmer_than_choruses():
-    from creaper import genres, songmap
+    from creaper import composer, genres, songmap
     assert songmap.comp_rhythm("pulse_16", 2, "verse") == "stabs"
     assert songmap.comp_rhythm("pulse_16", 4, "chorus") == "pulse_16"
     assert songmap.comp_rhythm("pulse_16", 2, "pre") == "pulse_16"          # a pre-chorus builds
     assert songmap.comp_rhythm("stabs", 3, "verse") == "stabs"               # a hot verse keeps the genre's comping
     assert songmap.comp_rhythm("bossa", 1, "verse") == "bossa"               # genre-defining rhythms stay
+    assert songmap.comp_rhythm("skank", 1, "verse") == "skank"
+    hits = {k: len(v) for k, v in composer._COMP.items()}
+    for source, calmer in songmap.CALMER_COMPING.items():          # calmer means fewer hits, or longer ones
+        if source in hits and calmer in hits:
+            assert hits[calmer] < hits[source] or (hits[calmer] == hits[source] and calmer == "half_notes"), (source, calmer)
+        elif calmer == "sustain":
+            assert source in hits or source in ("broken",)
     g = next(g for g in (genres.GENRES.values() if isinstance(genres.GENRES, dict) else genres.GENRES)
              if g.comping == "pulse_16")
     plan = songmap.plan_song(g, [("intro", 4), ("verse", 8), ("chorus", 8), ("verse 2", 8), ("chorus 2", 8)], seed=1)
@@ -595,6 +602,7 @@ def test_the_mix_stage_asks_for_auto_mix_and_a_sounding_vocal(monkeypatch, tmp_p
     overview = {"tracks": [
         {"name": "Drums", "guid": "{D}", "fx": ["VST3: ReaEQ (Cockos)"]},
         {"name": "Bass", "guid": "{B}", "fx": ["VST3: Analog Lab V"]},
+        {"name": "Keys", "guid": "{K}", "fx": ["VST3i: Equator 2 (ROLI)", "VST: Compact Grand"]},   # instruments, not EQ
         {"name": "Vox", "guid": "{V}", "fx": ["VST3i: VocalVST (vocalvst)"]},
         {"name": "Vox 2", "guid": "{V2}", "fx": ["VST3i: VocalVST (vocalvst)"], "mute": True},
     ]}
@@ -603,14 +611,27 @@ def test_the_mix_stage_asks_for_auto_mix_and_a_sounding_vocal(monkeypatch, tmp_p
         "get_track_details": {"items": [{"type": "midi", "muted": False, "start": {"seconds": 2.0}, "end": {"seconds": 6.0}}]},
     }[cmd])
     sounding = {"{V}": False}
-    monkeypatch.setattr(vocal_tools, "_track_audio", lambda track, a, b: (sounding.get(track, True), b""))
-    ctx = song_tools._Context("disco", {})
+    probed = []
+    monkeypatch.setattr(vocal_tools, "_track_audio", lambda track, a, b: probed.append((a, b)) or (sounding.get(track, True), b""))
+    ctx = song_tools._Context("disco", {"brief": "a disco song"})
     rows = song_tools._mix_rows(ctx)
     assert [(r["check"], r["status"]) for r in rows] == [("auto_mix", "fail"), ("vocal take", "warn")]
-    assert "hand-set effects on Drums" in rows[0]["fix"] and rows[1]["track"] == "Vox"
+    assert "hand-set effects on Drums are" in rows[0]["fix"] and rows[1]["track"] == "Vox"
     assert "mute the track and finish the song" in rows[1]["fix"]
+    assert probed == [(2.0, 7.0)]            # the muted vocal isn't probed; a short window, not the whole item
     sounding["{V}"] = True
     assert song_tools._mix_rows(song_tools._Context("disco", {"auto_mix": {"at": "now"}})) == []
+    # Tracks added after the run are named; a probe that can't run is said, not passed.
+    later = song_tools._mix_rows(song_tools._Context("disco", {"auto_mix": {"at": "now", "tracks": ["Drums", "Bass", "Vox"]}}))
+    assert [(r["check"], r["status"]) for r in later] == [("auto_mix", "warn")] and "Keys" in later[0]["detail"]
+    monkeypatch.setattr(vocal_tools, "_track_audio", lambda track, a, b: (_ for _ in ()).throw(RuntimeError("bridge away")))
+    broken = song_tools._mix_rows(song_tools._Context("disco", {"auto_mix": {"at": "now"}}))
+    assert [(r["check"], r["status"]) for r in broken] == [("vocal take", "warn")] and "bridge away" in broken[0]["detail"]
+    monkeypatch.setattr(vocal_tools, "_track_audio", lambda track, a, b: (True, b""))
+    # No song plan (unsaved, or no start_song): nothing to hold the mix to. A plan whose mix stage was
+    # signed off before auto_mix left marks isn't failed after an upgrade.
+    assert song_tools._mix_rows(song_tools._Context("disco", {})) == []
+    assert song_tools._mix_rows(song_tools._Context("disco", {"stages": {"mix": {"done": True}}})) == []
     # auto_mix leaves its mark in the song plan.
     plan = tmp_path / "song - creaper song.json"
     plan.write_text("{}")

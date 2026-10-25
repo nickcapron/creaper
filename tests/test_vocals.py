@@ -1084,3 +1084,14 @@ def test_render_vocalvst_reports_the_phrases_a_partial_render_kept(tmp_path, mon
     out = vocal_tools.render_vocalvst(track=1, lyrics="one two three four five six", hear_words=False)
     assert out["phrases_kept"] == 3 and out["result"].startswith("Rendered: 4 phrases")
     assert "only the phrases that changed" in out["next"]
+
+
+def test_the_plugins_log_details_are_read_with_or_without_the_space(tmp_path, monkeypatch):
+    from creaper import vocal_tools
+
+    log = tmp_path / "host.log"
+    log.write_text("2026-10-25T19:00:00.000-07:00#ab12/Vocal voice: seed 42; 15 of 16 phrases from earlier takes, formant 0\n"
+                   "2026-10-25T19:00:00.100-07:00#ab12/Vocal timing: model\n"
+                   "2026-10-25T19:00:00.200-07:00#ab12/Vocal device:DirectML (ONNX Runtime 1.24.4)\n")
+    monkeypatch.setattr(vocal_tools, "VOCALVST_LOG", log)
+    assert vocal_tools._log_details(0) == {"seed_used": 42, "device": "DirectML", "timing": "model"}

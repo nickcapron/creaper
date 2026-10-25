@@ -304,6 +304,7 @@ LANE_TRIM_LIMIT_DB = 18.0    # no lane moves further than this from its file's o
 PEAK_OVER_KICK_DB = 6.0      # no lane's peak ends further over the kick's than this (a clicky sample with a quiet
 #                              body would otherwise be boosted to the top and the trim drag the whole kit 20 dB down)
 OTHER_LANE_DB = -6.0         # a lane the targets don't name (a hit named after its sample)
+RS5K_VOLUME_MAX_DB = 12.0    # ReaSamplOmatic5000's Volume stops here
 
 
 def hit_level_db(path: str) -> tuple[float, float] | None:
@@ -311,7 +312,7 @@ def hit_level_db(path: str) -> tuple[float, float] | None:
     measure_tracks reads a kit's hits with) and its peak (dBFS); None when it's silent."""
     from .mix_tools import HIT_WINDOW_S
 
-    x, fs, _ = samplelib._load(path, seconds=1.0)
+    x, fs, _ = samplelib._load(path, seconds=5.0)
     env = np.abs(x)
     if not x.size or env.max() <= 1e-5:
         return None
@@ -331,14 +332,20 @@ def kit_levels(pads: list[dict], setup: list[dict]) -> dict[str, dict]:
     from .mix_tools import lane_target
 
     measured: dict[str, tuple[float, float]] = {}      # lane -> (hit level, peak) of its loudest main sample
+    layer_peaks: dict[str, float] = {}                 # lane -> its loudest layer's peak after the layer's own gain
+    lanes: list[str] = []
     for pad, cfg in zip(pads, setup):
-        if cfg["layer"]:
-            continue
+        if cfg["lane"] not in lanes:
+            lanes.append(cfg["lane"])
         try:
             got = hit_level_db(pad["path"])
-        except Exception:  # noqa: BLE001 - an unreadable sample stays at 0 dB
+        except Exception:  # noqa: BLE001 - an unreadable sample moves with the kit
             got = None
-        if got and (cfg["lane"] not in measured or got[0] > measured[cfg["lane"]][0]):
+        if not got:
+            continue
+        if cfg["layer"]:
+            layer_peaks[cfg["lane"]] = max(layer_peaks.get(cfg["lane"], -200.0), got[1] + cfg["gain_db"])
+        elif cfg["lane"] not in measured or got[0] > measured[cfg["lane"]][0]:
             measured[cfg["lane"]] = got
     if not measured:
         return {}
@@ -346,16 +353,25 @@ def kit_levels(pads: list[dict], setup: list[dict]) -> dict[str, dict]:
     loudest = max(measured, key=lambda lane: measured[lane][0])
     reference, ref_peak = measured[kick] if kick else measured[loudest]
     out: dict[str, dict] = {}
-    for lane, (level, peak) in measured.items():
-        target = lane_target(lane)
-        if target is None:
-            target = OTHER_LANE_DB
-        offset = max(-LANE_TRIM_LIMIT_DB, min(LANE_TRIM_LIMIT_DB, target - (level - reference)))
-        offset = min(offset, ref_peak + PEAK_OVER_KICK_DB - peak)
-        out[lane] = {"against_kick_db": round(level - reference, 1), "target_db": target, "set_db": offset, "peak_db": peak}
-    trim = KIT_PEAK_DB - max(v["peak_db"] + v["set_db"] for v in out.values())
+    for lane in lanes:
+        if lane in measured:
+            level, peak = measured[lane]
+            target = lane_target(lane)
+            if target is None:
+                target = OTHER_LANE_DB
+            offset = max(-LANE_TRIM_LIMIT_DB, min(LANE_TRIM_LIMIT_DB, target - (level - reference)))
+            offset = min(offset, ref_peak + PEAK_OVER_KICK_DB - peak)
+            against: float | None = round(level - reference, 1)
+        else:   # silent or unreadable: left where its file is, but moved with the kit
+            level, peak, target, offset, against = None, -200.0, None, 0.0, None
+        out[lane] = {"against_kick_db": against, "target_db": target, "set_db": offset,
+                     "peak_db": max(peak, layer_peaks.get(lane, -200.0)) + offset}
+    trim = KIT_PEAK_DB - max(v["peak_db"] for v in out.values())
     for v in out.values():
-        v["set_db"] = round(v["set_db"] + trim, 1)
+        wanted = v["set_db"] + trim
+        v["set_db"] = round(min(RS5K_VOLUME_MAX_DB, wanted), 1)
+        if wanted > RS5K_VOLUME_MAX_DB:
+            v["capped"] = True
         v.pop("peak_db")
     return out
 
@@ -492,8 +508,11 @@ def build_drum_kit(
     out = {"track": result.get("track"), "kit": kit,
            "note": "Lanes sit on General MIDI keys, so add_drum_pattern and add_genre_groove find them without a drum map."}
     if levels:
-        out["levels"] = {lane: f"{v['set_db']:+.1f} dB (hits {v['against_kick_db']:+.0f} dB against the kick, "
-                               f"target {v['target_db']:+.0f})" for lane, v in levels.items()}
+        out["levels"] = {lane: f"{v['set_db']:+.1f} dB" + (
+            f" (hits {v['against_kick_db']:+.0f} dB against the kick, target {v['target_db']:+.0f})"
+            if v["against_kick_db"] is not None else " (unmeasured: moved with the kit)")
+            + (" at the sampler's +12 dB ceiling, so still under its target" if v.get("capped") else "")
+            for lane, v in levels.items()}
         out["levels_note"] = ("each sampler's Volume set from its sample's measured hit level, the kit trimmed to peak "
                               "near -6 dBFS; the drum bus needs no EQ or gain to balance the lanes, so leave the "
                               "samplers alone unless measure_tracks' hit levels say otherwise")

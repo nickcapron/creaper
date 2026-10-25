@@ -533,6 +533,27 @@ def test_kit_levels_balance_the_lanes_and_trim_the_kit(tmp_path):
     assert with_click["snare"]["set_db"] - with_click["kick"]["set_db"] == pytest.approx(
         kick_peak + sample_tools.PEAK_OVER_KICK_DB - click_peak, abs=0.1)
     assert with_click["kick"]["set_db"] >= -12.5
+    # A layer counts toward the kit's peak: a quiet kick with a full-scale punch layer under it.
+    quiet_kick = tmp_path / "quiet kick.wav"
+    sf.write(str(quiet_kick), _kick() * 0.1, FS44)
+    layered = sample_tools.kit_levels(
+        [{"note": 36, "path": str(quiet_kick)}, {"note": 36, "path": str(kick)}, {"note": 42, "path": str(hat)}],
+        [{"lane": "kick", "layer": False, "gain_db": 0.0}, {"lane": "kick", "layer": True, "gain_db": -3.0},
+         {"lane": "closed hat", "layer": False, "gain_db": 0.0}])
+    assert sample_tools.hit_level_db(str(kick))[1] - 3 + layered["kick"]["set_db"] == pytest.approx(sample_tools.KIT_PEAK_DB, abs=0.01)
+    # The sampler's Volume stops at +12 dB: a lane that would need more is capped and says so.
+    faint = tmp_path / "faint hat.wav"
+    sf.write(str(faint), _hat() * 0.002, FS44)
+    capped = sample_tools.kit_levels(
+        [{"note": 36, "path": str(kick)}, {"note": 42, "path": str(faint)}],
+        [{"lane": "kick", "layer": False, "gain_db": 0.0}, {"lane": "closed hat", "layer": False, "gain_db": 0.0}])
+    assert capped["closed hat"]["set_db"] == sample_tools.RS5K_VOLUME_MAX_DB and capped["closed hat"]["capped"]
+    # A silent file (or one whose first seconds are) is moved with the kit, not left at 0 dB.
+    silent = tmp_path / "silent.wav"
+    sf.write(str(silent), np.zeros(FS44), FS44)
+    moved = sample_tools.kit_levels(pads + [{"note": 60, "path": str(silent)}],
+                                    setup + [{"lane": "gong", "layer": False, "gain_db": 0.0}])
+    assert moved["gong"]["set_db"] == moved["kick"]["set_db"] and moved["gong"]["against_kick_db"] is None
     # No kick: the loudest lane is the reference; a lane the targets don't know sits 6 under.
     other = sample_tools.kit_levels(pads[1:] + [{"note": 60, "path": str(cowbell)}],
                                     setup[1:] + [{"lane": "gong", "layer": False, "gain_db": 0.0}])

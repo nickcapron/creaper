@@ -366,7 +366,9 @@ def _balance_rows(ctx: _Context) -> list[dict]:
     return rows
 
 
-HAND_MIX_FX = re.compile(r"eq|comp|limit|gate|saturat|clip", re.I)
+# Mix effects set by hand before auto_mix (not instruments: 'Equator', 'Compact Grand').
+HAND_MIX_FX = re.compile(r"rea(eq|comp|xcomp|limit|gate)|pro-[qcl]\b|fet-76|bus force|\beq\b|compressor|limiter", re.I)
+VOCAL_PROBE_S = 6.0     # how much of a vocal track is rendered to hear whether it has a take
 
 
 def mark_mixed(channels: list[str]) -> None:
@@ -386,15 +388,27 @@ def _mix_rows(ctx: _Context) -> list[dict]:
     a sung vocal that sounds (a Donny Benet session stopped the song to wait for one)."""
     from . import vocal_tools
 
-    rows = []
+    rows: list[dict] = []
+    if not ctx.plan:
+        return rows      # no song plan (unsaved, or no start_song): nothing holds the mix to a run
     tracks = ctx.overview.get("tracks", [])
-    if not ctx.plan.get("auto_mix"):
+    mixed_before = bool(((ctx.plan.get("stages") or {}).get("mix") or {}).get("done"))   # a plan from before v0.48
+    mark = ctx.plan.get("auto_mix") or {}
+    if not mark and not mixed_before:
         by_hand = [t["name"] for t in tracks if any(HAND_MIX_FX.search(f or "") for f in t.get("fx") or [])]
         rows.append(songmap.row(
             "auto_mix", "fail", None, None,
             "auto_mix(style, roles=) first: one pass balances, EQs and glues every track from what it measures"
             + (f"; the hand-set effects on {', '.join(by_hand[:6])} are what it does, from the measured mix" if by_hand else "")
             + "; then refine what measure_tracks still flags"))
+    elif mark.get("tracks"):
+        unmixed = [t["name"] for t in tracks if t["name"] not in mark["tracks"] and not t.get("mute")
+                   and not str(t.get("name", "")).lower().startswith(("reverb", "delay", "fx "))]
+        if unmixed:
+            rows.append(songmap.row(
+                "auto_mix", "warn", None, None,
+                "auto_mix again (or measure_tracks them and set their levels and EQ to match the rest)",
+                detail=f"added since the auto_mix run, so unbalanced: {', '.join(unmixed[:6])}"))
     for t in tracks:
         if not any("vocalvst" in (f or "").lower() for f in t.get("fx") or []) or t.get("mute"):
             continue
@@ -403,10 +417,14 @@ def _mix_rows(ctx: _Context) -> list[dict]:
             items = [i for i in details.get("items", []) if i.get("type") == "midi" and not i.get("muted")]
             if not items:
                 continue
+            # Only the opening seconds of the first item: a take sounds there, and a whole-song
+            # render per vocal on every check_song would cost more than the check is worth.
             start = min(i["start"]["seconds"] for i in items)
-            end = max(i["end"]["seconds"] for i in items) + 1.0
+            end = min(max(i["end"]["seconds"] for i in items) + 1.0, start + VOCAL_PROBE_S)
             sounding = vocal_tools._track_audio(t.get("guid") or t["name"], start, end)[0]
-        except Exception:  # noqa: BLE001 - a check that can't run isn't a fail
+        except Exception as e:  # noqa: BLE001 - say so rather than pass a vocal nobody heard
+            rows.append(songmap.row("vocal take", "warn", None, None, "analyze_audio the track to hear whether it has a take",
+                                    track=t["name"], detail=f"couldn't be checked: {e}"))
             continue
         if not sounding:
             rows.append(songmap.row(

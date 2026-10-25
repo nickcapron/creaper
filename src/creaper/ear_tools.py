@@ -76,16 +76,18 @@ def _sings_itself(details: dict) -> bool:
     return any("vocalvst" in (f.get("name") or "").lower() for f in details.get("fx", []))
 
 
-def _sung_lines_in(track: str | int, render: dict) -> list[dict]:
-    """A VocalVST track's lyric lines that the render covers, in seconds from its start."""
+def _sung_lines_in(track: str | int, render: dict) -> tuple[list[dict], int]:
+    """A VocalVST track's lyric lines that the render covers, in seconds from its start,
+    and how many lines the track has in all (0: its words and notes don't line up)."""
     t0 = render["start"]["seconds"]
     t1 = (render.get("end") or {}).get("seconds")
+    every = vocal_tools.vocalvst_lines(track)
     out = []
-    for ln in vocal_tools.vocalvst_lines(track):
+    for ln in every:
         if ln["start"] < t0 - 0.05 or (t1 is not None and ln["end"] > t1 + 0.05):
             continue
         out.append({**ln, "start": round(ln["start"] - t0, 3), "end": round(ln["end"] - t0, 3)})
-    return out
+    return out, len(every)
 
 
 def _clean_timeline(clips: list[dict], start: float, frames: int, fs: int) -> np.ndarray:
@@ -117,12 +119,14 @@ def measure_vocal_clarity(track: str | int, start_bar: float | None = None, end_
         # for how much the rest of the mix covers the voice.
         solo, fs, render = _render(measured, start_bar, end_bar)
         out["alone"] = {"score": None, "note": "a singing instrument has no clean words to compare with"}
-        lines = _sung_lines_in(measured, render) if asr.available() else []
+        lines, every = _sung_lines_in(measured, render) if asr.available() else ([], 0)
         if lines:
             words = asr.hear_lines(solo, fs, lines, next_step="render_vocalvst again")
             out["alone"] = {"words_heard": words["words_heard"], "heard": words["heard"], "heard_by": words["heard_by"]}
             if words.get("unclear_lines"):
                 out["alone"]["unclear_lines"] = words["unclear_lines"]
+        elif asr.available() and every:
+            out["alone"]["note"] += "; none of its lyric lines fall inside these bars, so nothing was transcribed"
         elif asr.available():
             out["alone"]["note"] += "; its lyrics and notes don't line up, so the lines couldn't be transcribed"
         else:
@@ -139,12 +143,14 @@ def measure_vocal_clarity(track: str | int, start_bar: float | None = None, end_
                                       "a change rather than against the robot-vocal thresholds"}
             if lines:
                 shift = render["start"]["seconds"] - render2["start"]["seconds"]
+                # Every occurrence heard (no folding of repeats), so each 'alone' entry gets the
+                # in-mix reading of the same sung moment, matched by where it starts.
                 mixed = asr.hear_lines(audio, fs2, [{**ln, "start": ln["start"] + shift, "end": ln["end"] + shift}
-                                                    for ln in lines], next_step="mix again")
+                                                    for ln in lines], next_step="mix again", fold_repeats=False)
                 out["in_mix"]["words_heard"] = mixed["words_heard"]
-                by_line = {h["line"]: h for h in mixed["heard"]}
+                by_line = {h.get("at_qn"): h for h in mixed["heard"]}
                 for h in out["alone"]["heard"]:
-                    m = by_line.get(h["line"])
+                    m = by_line.get(h.get("at_qn"))
                     if m:
                         h["in_mix"] = {k: m[k] for k in ("heard_as", "words_matched", "missed") if k in m}
                 alone_share, mix_share = words["words_heard"] or 0, mixed["words_heard"] or 0

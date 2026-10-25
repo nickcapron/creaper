@@ -202,6 +202,10 @@ def test_a_sung_take_is_heard_line_by_line_from_its_audio(monkeypatch):
     assert out["heard"][1]["words_matched"] == 1.0 and out["heard"][1]["unsure_of"] == ["Neon"]
     assert out["words_heard"] == pytest.approx((1 + 2 + 1) / 6, abs=0.01)             # every line counts, repeats too
     assert out["unclear_lines"] == ["Saturday night"] and "render again" in out["unclear_next"]
+    answers = iter([("Sat turd day night.", []), ("Neon light", []), ("Saturday night", [])])
+    monkeypatch.setattr(asr, "transcribe", lambda a: next(answers))
+    kept = asr.hear_lines(audio, fs, lines, fold_repeats=False)["heard"]
+    assert [(h["at_qn"], h["words_matched"]) for h in kept] == [(4.0, 0.5), (12.0, 1.0), (20.0, 1.0)]   # each occurrence
 
 
 def _sung_track(monkeypatch, alone_heard, mix_heard):

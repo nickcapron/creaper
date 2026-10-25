@@ -183,7 +183,8 @@ def check_lines(clips: list[dict], seconds: list[tuple[float, float]]) -> dict:
 LINE_TAIL_S = 0.25        # a sung line's last word rings on past its note
 
 
-def hear_lines(audio: np.ndarray, fs: int, lines: list[dict], next_step: str = "render again") -> dict:
+def hear_lines(audio: np.ndarray, fs: int, lines: list[dict], next_step: str = "render again",
+               fold_repeats: bool = True) -> dict:
     """What the recogniser hears in each lyric line of a sung take: `audio` (mono, or
     frames x channels) at `fs`, and the lines as {'line': the words, 'start', 'end'} in
     seconds from the audio's start (plus anything else to carry into the report, such
@@ -204,12 +205,12 @@ def hear_lines(audio: np.ndarray, fs: int, lines: list[dict], next_step: str = "
             clip = clip / peak * 0.9
         extra = {k: v for k, v in ln.items() if k not in ("line", "start", "end")}
         entries.append((ln["line"], extra, np.concatenate([pad, clip, pad])))
-    return report(entries, next_step)
+    return report(entries, next_step, fold_repeats)
 
 
-def report(entries: list[tuple[str, dict, np.ndarray]], next_step: str) -> dict:
+def report(entries: list[tuple[str, dict, np.ndarray]], next_step: str, fold_repeats: bool = True) -> dict:
     """The lines (lyric, extra fields, 16 kHz mono audio) transcribed and compared with
-    their words; repeated lines heard the same way are reported once."""
+    their words; repeated lines heard the same way are reported once (fold_repeats)."""
     heard, seen = [], set()
     total = matched_total = 0.0
     for lyric, extra, audio in entries:
@@ -218,7 +219,7 @@ def report(entries: list[tuple[str, dict, np.ndarray]], next_step: str) -> dict:
         key_words = [w for w in normalize(lyric) if w not in SMALL_WORDS] or normalize(lyric)
         total += len(key_words)
         matched_total += share * len(key_words)
-        if (lyric, tuple(normalize(text))) in seen:
+        if fold_repeats and (lyric, tuple(normalize(text))) in seen:
             continue  # a repeated line heard the same way
         seen.add((lyric, tuple(normalize(text))))
         limit = 2 * len(lyric.split()) + 4
