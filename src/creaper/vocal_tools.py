@@ -1036,6 +1036,36 @@ def _new_log_line(log_size: int) -> str | None:
     return None
 
 
+def _log_details(log_size: int) -> dict:
+    """What the plugin's newer log lines say about the take: its seed ('voice: seed N,
+    ...', so a take can be pinned) and the device it rendered on ('device: DirectML ...')."""
+    if not VOCALVST_LOG.exists():
+        return {}
+    with VOCALVST_LOG.open("rb") as f:
+        f.seek(log_size)
+        new = f.read().decode("utf-8", errors="replace")
+    out: dict = {}
+    seed = re.search(r"voice: seed (\d+)", new)
+    if seed:
+        out["seed_used"] = int(seed.group(1))
+    device = re.search(r"device: ([^(\r\n]+)", new)
+    if device:
+        out["device"] = device.group(1).strip()
+    return out
+
+
+def _set_knobs(track: str | int, fx: int, wanted: dict[str, float]) -> list[str]:
+    """Sets VocalVST's newer controls (Breaths, Formant, Seed, Phrase gap: added after
+    Render on 2026-10-24) by their displayed values; returns the names this build lacks."""
+    if not wanted:
+        return []
+    have = {p.get("name") for p in call("get_fx_parameters", track=track, fx=fx).get("parameters", [])}
+    for name, value in wanted.items():
+        if name in have:
+            call("set_fx_parameter", track=track, fx=fx, parameter=name, display_value=value)
+    return [name for name in wanted if name not in have]
+
+
 def _wait_for_render_switch(track: str | int, fx: int, seconds: float = 10.0) -> None:
     """The plugin's Render switch resets itself the moment its timer sees it; one that
     stays on isn't running, and waiting for its result would be a waste."""
@@ -1051,21 +1081,31 @@ def _wait_for_render_switch(track: str | int, fx: int, seconds: float = 10.0) ->
                      "Render there, or restart REAPER; its own host.log says whether a render happened")
 
 
+# The audio check is the fallback for a plugin that can't write its log; every check is
+# a render of the track through the plugin (6-8 s on a full song, and the plugin
+# captures the pass again), so it competed with the render it was waiting for: a 231 s
+# take on the GPU took 368 s with a check every 10 s.
+AUDIO_CHECK_FIRST_S, AUDIO_CHECK_EVERY_S = 60.0, 30.0
+
+
 def _wait_for_render(log_size: int, timeout: float, before: tuple[bool, bytes], audio) -> str:
     """The plugin's result line from its log; failing that, the track's audio changing
     (a plugin that can't write its log still plays what it rendered)."""
     deadline = time.monotonic() + timeout
-    next_render = time.monotonic() + 15
+    next_render = time.monotonic() + AUDIO_CHECK_FIRST_S
     while time.monotonic() < deadline:
         _sleep(1.0)
         line = _new_log_line(log_size)
         if line:
             return line
         if time.monotonic() >= next_render:
-            next_render = time.monotonic() + 10
+            next_render = time.monotonic() + AUDIO_CHECK_EVERY_S
             sounding, digest = audio()
             if (sounding and not before[0]) or (sounding and digest != before[1]):
-                return "Rendered (the track plays the new take; the plugin wrote nothing to its log)"
+                # The plugin may have finished (and logged) while that render ran: in the
+                # rig the log said "Rendered: 10 phrases ... 41 breaths" and the result
+                # still read "wrote nothing to its log".
+                return _new_log_line(log_size) or "Rendered (the track plays the new take; the plugin wrote nothing to its log)"
     raise ValueError(f"VocalVST reported nothing in {timeout:.0f} s and the track's audio didn't change. Open its "
                      "window (update_fx with show=True) to read its status: 'No voicebank' means its Voicebank "
                      "button needs the voicebank folder (under %LOCALAPPDATA%\\VocalVST\\voicebanks); "
@@ -1085,6 +1125,17 @@ def render_vocalvst(
         "The plugin's Expression: 0 sings the notes exactly as written, 1 lets the voice's own attacks, glides "
         "and vibrato through (its default). Lower it for a double that has to sit tight under the lead, or "
         "when a line wobbles; leave it out to keep the plugin's setting"))] = None,
+    breaths: Annotated[float | None, Field(ge=0, le=1, description=(
+        "Breaths before each phrase and in pauses of 0.3 s or more, 0 (none) to 1 (the plugin's default); "
+        "lower for a tight double or a rap"))] = None,
+    formant: Annotated[float | None, Field(ge=-1, le=1, description=(
+        "The voice's colour, -1 darker to 1 lighter (0: as recorded). Small moves: past about 0.5 either way the "
+        "voices break up. A double at 0.1 or -0.1 reads as another singer"))] = None,
+    seed: Annotated[int | None, Field(ge=0, le=9999, description=(
+        "The take's noise seed: the same seed with the same notes and settings gives the same take again; 0 picks "
+        "a new one (the result says which, so a take you like can be pinned)"))] = None,
+    phrase_gap_s: Annotated[float | None, Field(ge=0.2, le=4, description=(
+        "Pauses this long or longer split the take into phrases rendered one by one (the plugin's default is 0.8 s)"))] = None,
     timeout_seconds: Annotated[float, Field(ge=30, le=900, description="How long to wait for the render")] = 240,
 ) -> dict:
     """Makes VocalVST (the user's singing plugin) sing the MIDI on its track: sets the
@@ -1098,7 +1149,10 @@ def render_vocalvst(
     it. Call it again after the notes or lyrics change, and after reopening a saved
     project (the capture is saved, the rendered audio isn't). Needs a monophonic line:
     one note per syllable, no chords. Says where the line sits for the voice and
-    whether its syllables come too fast to understand."""
+    whether its syllables come too fast to understand. Each note's MIDI velocity sets its
+    level (about 6 dB either way around the take's middle), so stresses written into the
+    notes carry through; breaths, the voice's colour (formant), the take's seed and the
+    phrase gap are the plugin's newer controls."""
     fx, items = _vocalvst_fx(track)
     want = resolve_voice(voice) if voice else None
     line: list[dict] = []
@@ -1177,6 +1231,8 @@ def render_vocalvst(
     if expression is not None:
         # A 0-1 knob: the normalized value is the displayed one, so no display matching.
         call("set_fx_parameter", track=track, fx=fx["index"], parameter="Expression", value=float(expression))
+    knobs = {"Breaths": breaths, "Formant": formant, "Seed": seed, "Phrase gap": phrase_gap_s}
+    missing = _set_knobs(track, fx["index"], {k: v for k, v in knobs.items() if v is not None})
 
     # The pass: the plugin records only what the transport plays through it, by position,
     # so it has to run past the last note, not just the items' ends.
@@ -1205,6 +1261,8 @@ def render_vocalvst(
     report = _wait_for_render(log_size, timeout_seconds, before, lambda: _track_audio(track, *span))
     out = {"track": track, "mode": mode, "lyrics": text or None, "written_notes": len(line), "captured": captured,
            "expression": expression if expression is not None else "the plugin's own",
+           **{k.lower().replace(" ", "_"): v for k, v in knobs.items() if v is not None and k not in missing},
+           **_log_details(log_size),
            "pass": {"from_seconds": round(start, 3), "to_seconds": round(end, 3)},
            "voicebank": Path(bank).name, "voice": speaker or "the bank's default",
            "range": range_advice([n["pitch"] for n in line], bank, speaker), "result": report,
@@ -1214,6 +1272,9 @@ def render_vocalvst(
                    "to the notes or lyrics"}
     if not report.startswith("Rendered"):
         out["warning"] = "the plugin reports: " + report
+    if missing:
+        out["controls_missing"] = (f"this VocalVST build has no {', '.join(missing)} control, so those were left "
+                                   "out: rebuild and reinstall the plugin (2026-10-24 or later) to use them")
     if extended:
         out["extended_items"] = "lengthened to hold their notes, which ran past their ends: " + ", ".join(extended)
     if captured["notes"] > len(line):
@@ -1335,6 +1396,10 @@ def add_vocal_harmony(
     pan: Annotated[float, Field(ge=-1, le=1, description="Where it sits; a second harmony goes the other way")] = 0.3,
     volume_db: Annotated[float, Field(le=6, description="Its level against the lead (which stays at 0)")] = -6.0,
     expression: Annotated[float | None, Field(ge=0, le=1, description="render_vocalvst's Expression for this voice; 0.5 keeps a harmony tight")] = 0.6,
+    formant: Annotated[float | None, Field(ge=-1, le=1, description=(
+        "render_vocalvst's Formant: a double of the same voice at 0.1 or -0.1 reads as another singer"))] = None,
+    seed: Annotated[int | None, Field(ge=0, le=9999, description=(
+        "render_vocalvst's Seed; left out, every render picks a new one, so a double never copies the lead's take"))] = None,
     name: Annotated[str | None, Field(description="Track name; default: '<lead> Harmony' or '<lead> Double'")] = None,
     timeout_seconds: Annotated[float, Field(ge=30, le=900)] = 300,
 ) -> dict:
@@ -1393,7 +1458,7 @@ def add_vocal_harmony(
     if lyrics and lyrics.split()[0] in ("+", "_", "-"):
         lyrics = "la " + " ".join(lyrics.split()[1:])      # a slice can't start on a hold
     render = render_vocalvst(new_track, lyrics=lyrics, mode="sing", voice=voice, expression=expression,
-                             timeout_seconds=timeout_seconds)
+                             formant=formant, seed=seed, timeout_seconds=timeout_seconds)
     out = {"track": new_track, "interval": interval, "key": k.name, "items": copied, "voice": render.get("voice"),
            "pan": pan, "volume_db": volume_db, "render": render.get("result"), "range": render.get("range"),
            "next": "measure_tracks the two together; a second harmony (a sixth below, pan the other way) thickens a "

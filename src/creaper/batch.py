@@ -236,6 +236,55 @@ class DriveSearch:
         return new
 
 
+# Two renders of the same unchanged bars differing by more than this (p95 over 50 ms
+# windows) can't have a compressor's gain reduction read off them: it's the search's own
+# tolerance. Synths with free-running oscillators (Arturia's Prophet-VS, Jun-6) render
+# differently every time: measured in the rig on a 90s pop song, the master differed
+# from itself by 6 dB and the synth tracks by 3-8 dB, while sampler drums repeated
+# exactly. Every master glue calibration had been reading that noise (4 dB with the
+# threshold at 0, where it compresses nothing) and walking the threshold at random.
+NOISE_FLOOR_DB = 0.3
+
+
+def _read_noise_floor(jobs: list[dict], idx: list[int], searches: dict, lo_bar, hi_bar, fs: int) -> None:
+    """For compressors whose first reading was off: renders their tracks once more with the
+    compressors bypassed and reads the dry render against that. What it reads is noise, not
+    compression; over NOISE_FLOOR_DB the search can't work, and the model's prediction (or
+    the gentle starting setting) stands."""
+    from . import server
+
+    for i in idx:
+        server.call("update_fx", track=jobs[i]["track"], fx=jobs[i]["fx"], enabled=False)
+    try:
+        again = render_group([jobs[i]["track"] for i in idx], lo_bar, hi_bar)
+    finally:
+        for i in idx:
+            server.call("update_fx", track=jobs[i]["track"], fx=jobs[i]["fx"], enabled=True)
+    for i in idx:
+        s = searches[i]
+        floor = analysis.gain_reduction(s.dry, again[jobs[i]["track"]], fs, lag=0).get("gr_db_p95") or 0.0
+        s.noise = round(float(floor), 2)
+        if s.noise > NOISE_FLOOR_DB:
+            s.by_model, s.done = True, True
+            s.steps.append({"drive": round(s.drive, 2), "loud_part_reduction_db": s.reading, "unreadable": True})
+
+
+def _model_result(s: "DriveSearch") -> dict:
+    modelled = s.predicted is not None
+    out = {"control": s.profile.drive, "value": round(s.drive, 2),
+           "loud_part_reduction_db": s.target if modelled else None, "target_db": s.target,
+           "calibration": s.steps, **s.where, "repeat_noise_db": s.noise,
+           "method": ("the compressor model on the dry render" if modelled
+                      else "left at its starting setting: the renders can't be read"),
+           "note": (f"two renders of these bars differ from each other by {s.noise:g} dB (instruments that play "
+                    f"differently every time), more than a {s.target:g} dB target can be read through, so the "
+                    + ("threshold is the model's: it takes about the target off the dry render in simulation"
+                       if modelled else "compressor stays at its gentle starting setting"))}
+    if modelled:
+        out["predicted_start"] = s.predicted
+    return out
+
+
 def calibrate_many(jobs: list[dict], passes: int = 7) -> list[dict]:
     """Calibrates several compressors at once. Each job: {'track', 'fx', 'profile',
     'target' (dB), 'span': (start_bar, end_bar) or None for the given range,
@@ -310,22 +359,34 @@ def _calibrate_group(jobs: list[dict], idx: list[int], span: tuple, passes: int,
             server.call("set_fx_parameters", track=j["track"], fx=j["fx"],
                         changes=[{"parameter": profile.drive, "display_value": predicted}])
         searches[i] = s
-    for _ in range(passes):
+    for n_pass in range(passes):
         active = [i for i, s in searches.items() if not s.done]
         if not active:
             break
         wet = render_group([jobs[i]["track"] for i in active], lo_bar, hi_bar)
+        off = []
         for i in active:
             s = searches[i]
             gr = analysis.gain_reduction(s.dry, wet[jobs[i]["track"]], fs, lag=getattr(s, "lag", None))
             s.lag = gr.get("lag_samples", getattr(s, "lag", None))   # a plugin's latency doesn't change
-            reduction = float(gr.get("gr_db_p95") or 0.0)
-            new = s.observe(reduction)
+            s.reading = float(gr.get("gr_db_p95") or 0.0)
+            if n_pass == 0 and abs(s.reading - s.target) > s.tol:
+                off.append(i)
+        if off:
+            _read_noise_floor(jobs, off, searches, lo_bar, hi_bar, fs)
+        for i in active:
+            s = searches[i]
+            if s.done:
+                continue
+            new = s.observe(s.reading)
             if new is not None:
                 server.call("set_fx_parameters", track=jobs[i]["track"], fx=jobs[i]["fx"],
                             changes=[{"parameter": s.profile.drive, "display_value": new}])
     for i, s in searches.items():
         j = jobs[i]
+        if getattr(s, "by_model", False):
+            results[i] = _model_result(s)
+            continue
         if not s.done and s.steps and s.steps[-1]["drive"] != round(s.drive, 2):
             # Out of passes right after a move: the last measured setting is what we know.
             s.drive = s.steps[-1]["drive"]

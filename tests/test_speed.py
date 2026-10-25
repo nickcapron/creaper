@@ -276,3 +276,60 @@ def test_the_true_peak_fix_never_raises_the_ceiling_the_model_lowered(monkeypatc
     after_model = state["ceilings"][1] if len(state["ceilings"]) > 1 else state["ceilings"][0]
     assert all(b <= a + 1e-9 for a, b in zip(state["ceilings"][1:], state["ceilings"][2:]))   # only ever down
     assert state["ceiling"] <= after_model
+
+
+class NoisyBench(Bench):
+    """A bench where one track renders differently every time (a synth with free-running
+    oscillators): each render of 'Pad' gets a fresh random level wobble per 50 ms window."""
+
+    def __init__(self, tracks, noisy=("Pad",)):
+        super().__init__(tracks)
+        self.noisy, self.rng = noisy, np.random.default_rng(7)
+
+    def render_group(self, tracks, lo, hi):
+        out = super().render_group(tracks, lo, hi)
+        n = int(FS * 0.05)
+        for t in tracks:
+            if t in self.noisy:
+                x = out[t]
+                wobble = 10 ** (self.rng.normal(0, 2.0, x.shape[0] // n + 1) / 20)
+                out[t] = x * np.repeat(wobble, n)[: x.shape[0], None]
+        return out
+
+
+def test_a_track_that_renders_differently_each_time_is_set_by_the_model():
+    pad = np.stack([drums(8, 0.5, 4)] * 2, axis=1)
+    bench = NoisyBench({"Kick": np.stack([drums(8, 0.6, 1)] * 2, axis=1), "Pad": pad})
+    import pytest as _pt
+    mp = _pt.MonkeyPatch()
+    mp.setattr(server, "call", bench.call)
+    mp.setattr(batch, "render_group", bench.render_group)
+    try:
+        profile = plugin_profiles.find_profile("ReaComp")
+        out = batch.calibrate_many([{"track": "Kick", "fx": 1, "profile": profile, "target": 2.5, "span": (9.0, 17.0)},
+                                    {"track": "Pad", "fx": 1, "profile": profile, "target": 1.5, "span": (9.0, 17.0)}])
+    finally:
+        mp.undo()
+    kick, pad_result = out
+    assert abs(kick["loud_part_reduction_db"] - 2.5) <= 0.3 and "repeat_noise_db" not in kick
+    assert pad_result["repeat_noise_db"] > batch.NOISE_FLOOR_DB and pad_result["method"].startswith("the compressor model")
+    assert pad_result["value"] == pad_result["predicted_start"] == bench.threshold["Pad"]   # the model's threshold stands
+    assert pad_result["calibration"][-1]["unreadable"] and "differ from each other" in pad_result["note"]
+    # Three passes for the pad (dry, one wet, the noise check), not seven of walking the threshold at random.
+    assert sum("Pad" in p for p in bench.passes) == 3
+
+
+def test_a_readable_track_that_starts_off_target_still_searches():
+    bench = NoisyBench({"Snare": np.stack([drums(8, 0.3, 2)] * 2, axis=1)}, noisy=())
+    import pytest as _pt
+    mp = _pt.MonkeyPatch()
+    mp.setattr(server, "call", bench.call)
+    mp.setattr(batch, "render_group", bench.render_group)
+    mp.setattr(batch, "predict_threshold", lambda *a, **k: -40.0)       # a bad first guess
+    try:
+        profile = plugin_profiles.find_profile("ReaComp")
+        out = batch.calibrate_many([{"track": "Snare", "fx": 1, "profile": profile, "target": 2.0, "span": (9.0, 17.0)}])[0]
+    finally:
+        mp.undo()
+    assert abs(out["loud_part_reduction_db"] - 2.0) <= 0.3 and out["value"] != -40.0
+    assert "repeat_noise_db" not in out and len(bench.passes) >= 4          # dry, wet, the noise check, the search

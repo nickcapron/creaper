@@ -899,3 +899,39 @@ def test_write_vocal_melody_writes_the_line_and_returns_its_lyrics(monkeypatch):
     assert out["lyrics"].split()[:2] == ["Ba-by", "it's"] and out["range"]["voice"].startswith("male (D3-E4)")
     assert out["line_bars"] == 2.0 and len(out["lines"]) == 2 and out["key"] == "A minor"
     assert all(50 <= n["pitch"] <= 64 for n in added["notes"])
+
+
+def test_render_vocalvst_sets_the_newer_controls_and_reports_the_seed(tmp_path, monkeypatch):
+    from creaper import vocal_tools
+
+    calls, state = _vocalvst_bridge(tmp_path, monkeypatch)
+    inner = vocal_tools.call
+    log = vocal_tools.VOCALVST_LOG
+
+    def with_knobs(cmd, **kw):
+        if cmd == "get_fx_parameters" and "search" not in kw:
+            calls.append((cmd, kw))
+            return {"parameters": [{"name": n} for n in ("Mode", "Gain", "Expression", "Render", "Breaths", "Formant",
+                                                          "Seed", "Phrase gap")]}
+        if cmd == "set_fx_parameter" and kw["parameter"] == "Render":
+            with log.open("a") as f:
+                f.write("2026-10-24T19:00:00.000-07:00#ab12/Vocal voice: seed 4242, formant 0.10, breaths 0.50 (3 sung)\n"
+                        "2026-10-24T19:00:00.100-07:00#ab12/Vocal device: DirectML (ONNX Runtime 1.24.4)\n")
+        return inner(cmd, **kw)
+
+    monkeypatch.setattr(vocal_tools, "call", with_knobs)
+    out = vocal_tools.render_vocalvst(track="Vocal", lyrics="we ride at dawn to-night", breaths=0.5, formant=0.1,
+                                      seed=0, phrase_gap_s=1.2)
+    knobs = {kw["parameter"]: kw.get("display_value") for c, kw in calls if c == "set_fx_parameter" and "display_value" in kw}
+    assert knobs == {"Breaths": 0.5, "Formant": 0.1, "Seed": 0, "Phrase gap": 1.2}
+    assert out["seed_used"] == 4242 and out["device"] == "DirectML" and out["breaths"] == 0.5
+    assert "controls_missing" not in out
+
+
+def test_an_older_vocalvst_without_the_controls_is_said(tmp_path, monkeypatch):
+    from creaper import vocal_tools
+
+    calls, state = _vocalvst_bridge(tmp_path, monkeypatch)       # its fake knows only Render
+    out = vocal_tools.render_vocalvst(track="Vocal", lyrics="we ride at dawn to-night", seed=12)
+    assert not any(kw.get("parameter") == "Seed" for c, kw in calls if c == "set_fx_parameter")
+    assert "Seed" in out["controls_missing"] and "seed" not in out and "seed_used" not in out
