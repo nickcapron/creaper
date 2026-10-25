@@ -717,7 +717,8 @@ def _shape_dynamics(channels: list[dict], actions: list[dict], family: str | Non
             w["comp"] = None
             w["entry"].pop("compressor", None)
             continue
-        w["entry"]["compressor"].update(reduction_db=cal.get("loud_part_reduction_db"), threshold_db=cal.get("value"))
+        w["entry"]["compressor"].update(reduction_db=cal.get("loud_part_reduction_db"), threshold_db=cal.get("value"),
+                                        **_unread(cal))
     clip_tracks = [w for w in work if w.get("comp") and w["drum"]]
     peaks = _peaks_now([w["c"]["ref"] for w in clip_tracks], start_bar, end_bar) if len(clip_tracks) > 1 else {}
     for w in clip_tracks:
@@ -731,6 +732,14 @@ def _shape_dynamics(channels: list[dict], actions: list[dict], family: str | Non
             ADDED_COMPRESSORS.add(str(w["c"]["ref"]))
         done.append(w["entry"])
     return done
+
+
+def _unread(cal: dict) -> dict:
+    """What a calibration says when its renders couldn't be read (batch._model_result):
+    the model's reduction and the reason, so a report never shows a target as measured."""
+    if "repeat_noise_db" not in cal:
+        return {}
+    return {k: cal[k] for k in ("predicted_reduction_db", "repeat_noise_db", "note") if k in cal}
 
 
 def _peaks_now(tracks: list, start_bar: float | None, end_bar: float | None) -> dict:
@@ -1167,7 +1176,7 @@ def _calibrate_vocal_comps(comps: list[dict], start_bar: float | None, end_bar: 
             v["a"]["compressor_removed"] = cal["error"]
             continue
         v["a"]["compress"] = {"compressor": VOCAL_COMP, "reduction_db": cal.get("loud_part_reduction_db"),
-                              "input_gain_db": cal.get("value")}
+                              "input_gain_db": cal.get("value"), **_unread(cal)}
 
 
 def _reverb_return(bpm: float = 120.0, family: str | None = None) -> str:

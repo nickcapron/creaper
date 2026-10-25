@@ -1022,13 +1022,17 @@ def _track_audio(track: str | int, start: float, end: float) -> tuple[bool, byte
 RENDER_RESULTS = ("rendered", "render error", "render cancelled", "render refused", "voicebank error")
 
 
-def _new_log_line(log_size: int) -> str | None:
+def _log_since(log_size: int) -> str:
+    """What the plugin wrote to its log after it was log_size bytes long."""
     if not VOCALVST_LOG.exists():
-        return None
+        return ""
     with VOCALVST_LOG.open("rb") as f:
         f.seek(log_size)
-        new = f.read().decode("utf-8", errors="replace")
-    for line in new.splitlines():
+        return f.read().decode("utf-8", errors="replace")
+
+
+def _new_log_line(log_size: int) -> str | None:
+    for line in _log_since(log_size).splitlines():
         line = line.strip()
         message = line.split(" ", 1)[1] if " " in line else line
         if message.lower().startswith(RENDER_RESULTS):
@@ -1039,11 +1043,7 @@ def _new_log_line(log_size: int) -> str | None:
 def _log_details(log_size: int) -> dict:
     """What the plugin's newer log lines say about the take: its seed ('voice: seed N,
     ...', so a take can be pinned) and the device it rendered on ('device: DirectML ...')."""
-    if not VOCALVST_LOG.exists():
-        return {}
-    with VOCALVST_LOG.open("rb") as f:
-        f.seek(log_size)
-        new = f.read().decode("utf-8", errors="replace")
+    new = _log_since(log_size)
     out: dict = {}
     seed = re.search(r"voice: seed (\d+)", new)
     if seed:
@@ -1060,9 +1060,9 @@ def _set_knobs(track: str | int, fx: int, wanted: dict[str, float]) -> list[str]
     if not wanted:
         return []
     have = {p.get("name") for p in call("get_fx_parameters", track=track, fx=fx).get("parameters", [])}
-    for name, value in wanted.items():
-        if name in have:
-            call("set_fx_parameter", track=track, fx=fx, parameter=name, display_value=value)
+    changes = [{"parameter": name, "display_value": value} for name, value in wanted.items() if name in have]
+    if changes:   # one call, one undo point
+        call("set_fx_parameters", track=track, fx=fx, changes=changes)
     return [name for name in wanted if name not in have]
 
 

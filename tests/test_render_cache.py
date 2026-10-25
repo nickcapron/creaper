@@ -30,7 +30,7 @@ class FakeReaper:
         if cmd in ("set_track_properties", "set_fx_parameters", "add_fx"):
             self.count += 1
             return {}
-        if cmd in ("get_track_details", "time_to_positions"):
+        if cmd in ("get_track_details", "time_to_positions", "transport"):
             return {}
         self.renders += 1   # the bridge hides what its own render settings add to the count
         names = params.get("tracks") or [params.get("track", "master")]
@@ -165,3 +165,68 @@ def test_kept_renders_live_in_their_own_folder_and_make_room(monkeypatch, tmp_pa
     server.call("add_fx", track="Kick", name="ReaEQ")
     _use(server.call("render_audio", track="Hat"))
     assert len(list(folder.iterdir())) == 1                                  # the rest can't hit again
+
+
+def test_the_render_result_carries_its_state_so_nothing_is_asked_twice(monkeypatch, tmp_path):
+    fake = FakeReaper(tmp_path)
+    _fresh(monkeypatch, fake)
+    original = fake.call
+
+    def with_count(cmd, params=None, timeout=30.0):
+        r = original(cmd, params, timeout)
+        if cmd in server.RENDERS:
+            r["state_change_count"] = fake.count            # a 0.44.2 bridge says what state it rendered
+        return r
+
+    fake.call = with_count
+    _use(server.call("render_audio", track="master"))
+    assert fake.asked.count("project_state") == 1           # before the render only
+    _use(server.call("render_audio", track="master"))
+    assert fake.renders == 1                                 # and it was kept
+
+
+def test_a_render_the_project_moved_under_is_not_kept(monkeypatch, tmp_path):
+    fake = FakeReaper(tmp_path)
+    _fresh(monkeypatch, fake)
+    original = fake.call
+
+    def edit_during(cmd, params=None, timeout=30.0):
+        r = original(cmd, params, timeout)
+        if cmd in server.RENDERS:
+            fake.count += 1                                   # another client edited while it rendered
+        return r
+
+    fake.call = edit_during
+    _use(server.call("render_audio", track="master"))
+    fake.call = original
+    _use(server.call("render_audio", track="master"))
+    assert fake.renders == 2
+
+
+def test_a_render_made_right_after_media_came_back_online_is_kept(monkeypatch, tmp_path):
+    fake = FakeReaper(tmp_path)
+    _fresh(monkeypatch, fake)
+    original = fake.call
+    offline = [2]
+
+    def media(cmd, params=None, timeout=30.0):
+        if cmd == "media_online":
+            n, offline[0] = offline[0], 0
+            return {"offline": n, "tracks": ["Pad"] if n else [], "missing": [], "offline_when_inactive": True}
+        return original(cmd, params, timeout)
+
+    fake.call = media
+    _use(server.call("render_audio", track="master"))      # brought 2 items online, then rendered them
+    _use(server.call("render_audio", track="master"))
+    assert fake.renders == 1
+
+
+def test_entries_that_can_never_hit_again_are_dropped(monkeypatch, tmp_path):
+    fake = FakeReaper(tmp_path)
+    _fresh(monkeypatch, fake)
+    _use(server.call("render_audio", track="master"))
+    folder = server._render_cache.folder()
+    assert len(list(folder.iterdir())) == 1
+    server.call("transport", action="play")                 # a change REAPER doesn't count, but we do
+    _use(server.call("render_audio", track="master"))      # a miss: the old entry is dead and gone
+    assert fake.renders == 2 and len(list(folder.iterdir())) == 1

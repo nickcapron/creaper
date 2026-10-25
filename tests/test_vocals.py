@@ -486,6 +486,8 @@ def _vocalvst_bridge(tmp_path, monkeypatch, log_on_render=True, sounds_after=Non
                 with log.open("a") as f:
                     f.write("2026-10-20T19:00:00.000-07:00 Rendered: 1 phrase, 6 notes, 3.7 s\n")
             return {}
+        if cmd == "set_fx_parameters":                  # the plugin's newer knobs, in one call
+            return {}
         if cmd == "transport":
             if kw.get("action") == "play":           # the plugin logs its capture after the pass
                 with log.open("a") as f:
@@ -922,8 +924,10 @@ def test_render_vocalvst_sets_the_newer_controls_and_reports_the_seed(tmp_path, 
     monkeypatch.setattr(vocal_tools, "call", with_knobs)
     out = vocal_tools.render_vocalvst(track="Vocal", lyrics="we ride at dawn to-night", breaths=0.5, formant=0.1,
                                       seed=0, phrase_gap_s=1.2)
-    knobs = {kw["parameter"]: kw.get("display_value") for c, kw in calls if c == "set_fx_parameter" and "display_value" in kw}
-    assert knobs == {"Breaths": 0.5, "Formant": 0.1, "Seed": 0, "Phrase gap": 1.2}
+    batches = [kw["changes"] for c, kw in calls if c == "set_fx_parameters"]
+    assert len(batches) == 1                                            # one call, one undo point for all four
+    assert {ch["parameter"]: ch["display_value"] for ch in batches[0]} == {"Breaths": 0.5, "Formant": 0.1, "Seed": 0,
+                                                                          "Phrase gap": 1.2}
     assert out["seed_used"] == 4242 and out["device"] == "DirectML" and out["breaths"] == 0.5
     assert "controls_missing" not in out
 
@@ -933,5 +937,5 @@ def test_an_older_vocalvst_without_the_controls_is_said(tmp_path, monkeypatch):
 
     calls, state = _vocalvst_bridge(tmp_path, monkeypatch)       # its fake knows only Render
     out = vocal_tools.render_vocalvst(track="Vocal", lyrics="we ride at dawn to-night", seed=12)
-    assert not any(kw.get("parameter") == "Seed" for c, kw in calls if c == "set_fx_parameter")
+    assert not any(c == "set_fx_parameters" for c, kw in calls)
     assert "Seed" in out["controls_missing"] and "seed" not in out and "seed_used" not in out

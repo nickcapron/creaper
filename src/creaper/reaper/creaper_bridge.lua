@@ -1,6 +1,6 @@
 -- @description creaper bridge: lets Claude work in REAPER through the creaper MCP server
 -- @author nickcapron
--- @version 0.44.1
+-- @version 0.44.2
 -- @link https://github.com/nickcapron/creaper
 -- @provides
 --   [nomain] creaper_json.lua
@@ -13,7 +13,7 @@
 --   Every change it makes is a named undo point ("creaper: ..."), so Ctrl+Z
 --   reverts anything Claude did.
 
-local BRIDGE_VERSION = "0.44.1"
+local BRIDGE_VERSION = "0.44.2"
 local PROTOCOL = 2
 
 ----------------------------------------------------------------------- JSON
@@ -98,8 +98,13 @@ local DEVICE_IDLE_S = 20
 local device_closed_at = nil
 
 local function close_audio_for_renders()
-  if reaper.GetPlayState() == 0 and reaper.Audio_IsRunning() then reaper.Audio_Quit() end
-  if not reaper.Audio_IsRunning() then device_closed_at = reaper.time_precise() end
+  if reaper.GetPlayState() == 0 and reaper.Audio_IsRunning() then
+    reaper.Audio_Quit()
+    device_closed_at = reaper.time_precise()
+  elseif device_closed_at then
+    device_closed_at = reaper.time_precise() -- still ours to reopen; the idle clock restarts
+  end
+  -- A device the user closed (or that won't open) is left as it is.
 end
 
 local function ensure_audio()
@@ -1762,11 +1767,17 @@ local RENDER_NUMBER_KEYS = {
   "RENDER_CHANNELS", "RENDER_TAILFLAG", "RENDER_ADDTOPROJ", "RENDER_DITHER", "RENDER_NORMALIZE",
 }
 local WAV_32_FLOAT = "ZXZhdyAA" -- base64 of the WAV sink config: 'evaw', 32-bit float
--- What renders themselves have added to the project state change count (setting and
--- restoring the render settings and the selection count as changes): project_state
--- takes it off, so a render leaves the count where it found it and the server's render
--- cache sees an unchanged project as unchanged.
-local render_shift = 0
+-- What renders themselves have added to each project's state change count (setting and
+-- restoring the render settings and the selection count as changes), by project tab:
+-- project_state takes it off, so a render leaves the count where it found it and the
+-- server's render cache sees an unchanged project as unchanged. Per tab, or a render in
+-- one tab would shift another tab's count onto a value it had before some edits.
+local render_shift = {}
+
+local function shifted_count()
+  local proj = reaper.EnumProjects(-1)
+  return reaper.GetProjectStateChangeCount(0) - (render_shift[proj] or 0)
+end
 
 -- Renders [start_t, end_t] of a track (stem) or the master to a 32-bit float WAV in
 -- RENDER_DIR, restoring the user's render settings and track selection afterwards.
@@ -1820,7 +1831,8 @@ local function render_range(t, master, start_t, end_t)
   for k, v in pairs(saved_strings) do reaper.GetSetProjectInfo_String(0, k, v, true) end
   for k, v in pairs(saved_numbers) do reaper.GetSetProjectInfo(0, k, v, true) end
   for tr, was_selected in pairs(saved_selection) do reaper.SetTrackSelected(tr, was_selected) end
-  render_shift = render_shift + (reaper.GetProjectStateChangeCount(0) - count_before)
+  local proj = reaper.EnumProjects(-1)
+  render_shift[proj] = (render_shift[proj] or 0) + (reaper.GetProjectStateChangeCount(0) - count_before)
   if not ok then error(result, 0) end
 
   local files = {}
@@ -1862,6 +1874,7 @@ function commands.render_audio(p)
     track = track_ref(t),
     start = time_to_pos(start_t),
     ["end"] = time_to_pos(end_t),
+    state_change_count = shifted_count(), -- for the server's render cache: the state this render is of
     warning = #realtime > 0 and ("these plugins only produce sound in real time, so this offline render "
       .. "may be missing their audio: " .. table.concat(realtime, ", ")
       .. ". To measure them, record or render their output to an audio track first.") or nil,
@@ -1887,7 +1900,7 @@ function commands.render_stems(p)
     -- for several), so matching by number found nothing: stems came back empty and
     -- export_stems/measure_tracks on one track did nothing.
     return { stems = { { track = track_ref(tracks[1]), file = files[1] } }, files = files,
-             start = time_to_pos(start_t), ["end"] = time_to_pos(end_t) }
+             start = time_to_pos(start_t), ["end"] = time_to_pos(end_t), state_change_count = shifted_count() }
   end
   for _, tr in ipairs(tracks) do
     local number = int(reaper.GetMediaTrackInfo_Value(tr, "IP_TRACKNUMBER"))
@@ -1896,7 +1909,8 @@ function commands.render_stems(p)
       if tail and int(tonumber(tail)) == number then by_track[#by_track + 1] = { track = track_ref(tr), file = f } end
     end
   end
-  return { stems = by_track, files = files, start = time_to_pos(start_t), ["end"] = time_to_pos(end_t) }
+  return { stems = by_track, files = files, start = time_to_pos(start_t), ["end"] = time_to_pos(end_t),
+           state_change_count = shifted_count() }
 end
 
 -- The plugin settings creaper changed (touched_params), by track and plugin GUID.
@@ -3387,8 +3401,7 @@ local CLAIMED_PATH = REQUEST_PATH .. "." .. INSTANCE
 -- server keeps renders while all three hold.
 function commands.project_state()
   local _, path = reaper.EnumProjects(-1, "")
-  return { change_count = reaper.GetProjectStateChangeCount(0) - render_shift,
-           project = path ~= "" and path or nil, instance = INSTANCE }
+  return { change_count = shifted_count(), project = path ~= "" and path or nil, instance = INSTANCE }
 end
 
 -- Replaces a file atomically (write a temp file, rename it over). On Windows

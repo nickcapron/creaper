@@ -332,8 +332,8 @@ def call(cmd: str, timeout: float = 30.0, **params: Any) -> Any:
             hit = _render_cache.lookup(cmd, params, state)
             if hit is not None:
                 return hit
-            epoch = _render_cache.epoch
         _bring_media_online()
+        epoch = _render_cache.epoch   # after the media check: a render made with the items back online is good
     result = bridge.call(cmd, params, timeout=timeout)
     if cmd in RENDERS and time.time() - _media_tried[0] > MEDIA_RETRY_S and _all_silent(result):
         _media_tried[0] = time.time()
@@ -347,7 +347,7 @@ def call(cmd: str, timeout: float = 30.0, **params: Any) -> Any:
         epoch = _render_cache.epoch
     if cmd in RENDERS:
         if state is not None:
-            _render_cache.store(cmd, params, result, epoch)
+            _render_cache.store(cmd, params, result, state, epoch)
     elif cmd not in READ_ONLY_COMMANDS:
         _render_cache.changed()
     return result
@@ -463,9 +463,13 @@ class RenderCache:
         """The kept result for this render in this state, its files linked afresh, or None."""
         with self._lock:
             entry = self._entries.get(self.key(cmd, params))
-            if (entry is None or entry["state"] != state or entry["epoch"] != self.epoch
-                    or time.time() - entry["at"] > CACHE_TTL_S):
+            if entry is None:
                 self.misses += 1
+                return None
+            if entry["state"] != state or entry["epoch"] != self.epoch or time.time() - entry["at"] > CACHE_TTL_S:
+                self.misses += 1
+                dead = self._entries.pop(self.key(cmd, params))   # it can't hit again
+                self._drop(dead["files"])
                 return None
             files, result = list(entry["files"]), entry["result"]
         if not all(f.exists() for f in files):
@@ -486,14 +490,17 @@ class RenderCache:
             self.hits += 1
         return _remap(result, mapping)
 
-    def store(self, cmd: str, params: dict, result: Any, epoch: int | None) -> None:
-        """Keeps a render just made, unless something changed under it or it's silent (an
-        offline file renders as silence, and comes back)."""
+    def store(self, cmd: str, params: dict, result: Any, before: tuple, epoch: int | None) -> None:
+        """Keeps a render just made under the state it was looked up in, unless something
+        changed under it (the state or this process's commands moved) or it's silent (an
+        offline file renders as silence, and comes back). The bridge's render result
+        carries the count after the render, so no second round trip is needed for it."""
         files = _render_files(result)
         if epoch is None or self.epoch != epoch or not files or _all_silent(result):
             return
-        state = self.state()
-        if state is None:
+        count = result.get("state_change_count") if isinstance(result, dict) else None
+        state = (before[0], before[1], count) if count is not None else self.state()
+        if state != before:
             return
         folder = self.folder()
         stamp = uuid.uuid4().hex[:8]
@@ -512,7 +519,7 @@ class RenderCache:
         with self._lock:
             old = self._entries.pop(key, None)
             self._entries[key] = entry
-            gone = [k for k, e in self._entries.items() if e["state"] != state]   # the project moved on: no hit again
+            gone = [k for k, e in self._entries.items() if e["state"] != state or e["epoch"] != epoch]   # can't hit again
             live = sorted((k for k in self._entries if k not in gone), key=lambda k: self._entries[k]["at"])
             total = sum(self._entries[k]["bytes"] for k in live)
             for k in live:                                                        # the oldest first, until under the cap
@@ -1755,6 +1762,8 @@ def setup_sidechain(
                                         sidechain=True)
             result["threshold_db"] = cal.get("value", threshold)
             result["measured_ducking_db"] = cal.get("loud_part_reduction_db")
+            if "repeat_noise_db" in cal:   # the renders couldn't be read (batch._model_result): say why
+                result["ducking_note"] = cal["note"]
         except Exception as e:  # noqa: BLE001 - the table threshold still ducks about right
             result["note"] = f"ducking set from the table, not measured ({e})"
     else:
