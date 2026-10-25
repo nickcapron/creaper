@@ -774,7 +774,7 @@ def test_render_vocalvst_gives_up_when_the_switch_stays_on(tmp_path, monkeypatch
 
     _vocalvst_bridge(tmp_path, monkeypatch, log_on_render=False, takes_switch=False)
     monkeypatch.setattr(vocal_tools.time, "monotonic", _FakeClock())
-    with pytest.raises(ValueError, match="stays On"):
+    with pytest.raises(ValueError, match="stays On.*Don't wait for the user"):
         vocal_tools.render_vocalvst(track=1)
 
 

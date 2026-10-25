@@ -20,6 +20,26 @@ CLUB_FAMILIES = {"electronic dance", "electronic"}
 KIND_ENERGY = {"intro": 1, "verse": 2, "pre": 3, "chorus": 4, "post": 3, "bridge": 2, "breakdown": 1, "outro": 1}
 
 
+# The calmer way to play each comping rhythm, for the verses: a Donny Benet song had its
+# chords pulsing 16ths through every section until the model rewrote the verses as stabs
+# by hand. Rhythms that define their genre (bossa, montuno, tresillo, waltz) stay.
+CALMER_COMPING = {
+    "pulse_16": "stabs", "eighths": "stabs", "quarters": "half_notes", "half_notes": "sustain", "offbeat": "stabs",
+    "skank": "offbeat", "stabs": "half_notes", "charleston": "stabs", "strum": "half_notes", "arpeggio_up": "broken",
+    "arpeggio_updown": "arpeggio_up", "broken": "sustain", "alberti": "broken", "push": "stabs", "gospel": "sustain",
+}
+CALM_ENERGY = 2     # sections at this energy or below comp the calmer way
+
+
+def comp_rhythm(comping: str, energy: int, kind: str) -> str:
+    """How the chords are played in a section: the genre's own comping where the song
+    is up (chorus, drop, pre-chorus, any section at energy 3 or more), its calmer
+    partner (CALMER_COMPING) in verses and bridges, so the chorus has somewhere to go."""
+    if kind in ("chorus", "drop", "pre") or energy > CALM_ENERGY:
+        return comping
+    return CALMER_COMPING.get(comping, comping)
+
+
 def plan_song(genre, sections: list[tuple[str, int]], seed: int, energies: list[int] | None = None) -> list[dict]:
     """Which parts play in each section and how, so every section is its own version of
     the song rather than one loop copied: drums at the section's energy (busier hats in
@@ -45,7 +65,7 @@ def plan_song(genre, sections: list[tuple[str, int]], seed: int, energies: list[
         parts: dict[str, dict] = {}
         drums = {"energy": max(1, min(4, energy)), "seed": base + idx}
         bass = {"seed": base + idx, "style": genre.bass_style if has_bass else "root"}
-        chords = {"seed": base + idx, "rhythm": genre.comping if has_chords else "sustain"}
+        chords = {"seed": base + idx, "rhythm": comp_rhythm(genre.comping, energy, kind) if has_chords else "sustain"}
         verse_lead = {"shape": "verse", "seed": base + 10 + nth, "register_lift": 0}
         hook = {"shape": "hook", "seed": base + 50, "register_lift": 0}
         if kind == "intro":

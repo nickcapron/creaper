@@ -61,18 +61,19 @@ in order; finish_stage(stage) runs each stage's checks and refuses on a fail):
     (Sounds). Check: song_map; finish_stage("parts").
  5. Feel: generators play with a feel; apply_feel on parts written note by note.
     finish_stage("feel") (check_groove on drums and bass).
- 6. Transitions and movement: add_transitions(style), then write_automation ramps across
-    builds and breakdowns. finish_stage("transitions") (measure_structure's checks).
+ 6. Transitions: add_transitions(style), then write_automation ramps across builds and
+    breakdowns. finish_stage("transitions") (measure_structure's checks).
  7. Mix: auto_mix(style, roles= for parts whose names don't say their job: the featured
-    melody "lead"), then refine. Check: measure_tracks(per_section=True);
+    melody "lead"), then refine (finish_stage refuses without it; a vocal that won't render
+    is muted, not waited for). Check: measure_tracks(per_section=True);
     check_vocal_clarity for a robot or sung vocal. finish_stage("mix") (compare_mix_to_style).
  8. Master once: master_to_target(style), or to the loudness the brief names (a game's
     -20 LUFS). Check: true_peak_ok is true and
     peak_to_loudness_db is 7 or more (else a lower target or less glue).
     finish_stage("master").
  9. Ending: check_ending with its use (continuous, ending, stinger).
-10. check_song: the scorecard (out of 10, what changed since the last run). With a
-    reference track from the user, compare_to_reference(file).
+10. check_song: the scorecard (out of 10, what changed since the last run); with a
+    reference track, compare_to_reference(file).
 11. Export: export_mix(style). Tell the user its length, loudness and score, what changes
     in each section, and ask their reaction to specific parts (the hook, the drop).
 Revisions: change what was asked, check_song, export_mix with the master as it is;
@@ -124,14 +125,13 @@ Sounds:
   then set_fx_parameters with display_value for numbers and display_text for menus.
   Move controls part way: brightness, resonance, drive and presence at their extremes
   sound harsh and cheap. Say what you set.
-- Layer for weight with layer_instrument, once the part is written (the layers play its
-  MIDI): a bass is a mono sub (octave -1, low pass
+- layer_instrument for weight, once the part is written (the layers play its MIDI): a
+  bass is a mono sub (octave -1, low pass
   ~180 Hz) under a filtered mid layer; a pad is two synths, one high-passed and wide; a
   lead can take an octave-down double 8 dB under it. Genre palettes (get_genre_profile)
   name the layers that fit the style. Drum kits layer too (build_drum_kit layers=, a
   click or sub under the kick), and alternatives per lane avoid machine-gun repeats.
-- Saved sounds tagged for another project are its anchors, not a palette: give each song
-  its own sounds.
+- Saved sounds tagged for another project are its anchors, not this song's palette.
 - Prefer the user's own plugins (list_installed_fx, browse by category) over REAPER's
   stock ones. get_plugin_profile explains plugins creaper knows; read it before
   configuring one. save_note what you learn about a plugin's controls (topic "plugin").
@@ -184,8 +184,7 @@ You can't hear: measure what a listener would notice before saying it sounds rig
 analyze_audio (one thing in depth), measure_tracks (every track
 in one pass), measure_structure, check_groove, check_tuning, check_vocal_clarity,
 show_spectrogram (look for mud, harshness, crowded or empty sections). Figure things out
-before asking (audition_instrument, map_drum_kit, get_fx_parameters, list_fx_presets,
-find_notes); ask only for what no tool can reach (a non-Arturia plugin's browser,
+before asking (audition_instrument, map_drum_kit, get_fx_parameters, find_notes); ask only for what no tool can reach (a non-Arturia plugin's browser,
 hardware, taste), then say exactly what to click. Save what will matter again
 (save_drum_map, save_sound, save_note).
 

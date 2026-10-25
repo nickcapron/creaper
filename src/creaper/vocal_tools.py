@@ -946,6 +946,10 @@ def _vocalvst_fx(track: str | int) -> tuple[dict, list[dict]]:
 
 PASS_LEAD_SECONDS = 0.3
 PASS_TAIL_SECONDS = 0.5
+# Every failure past this point ends with it: a Donny Benet session stopped the whole
+# song (no mix, master, check or export) to wait for the user when the render failed.
+NO_WAIT = (" Meanwhile the song goes on without the vocal: mute this track if it's silent, finish the mix, master, "
+           "check_song and export, then come back to it. Don't wait for the user.")
 
 
 def _note_extent_qn(part: dict) -> tuple[float, float] | None:
@@ -1218,7 +1222,7 @@ def _wait_for_render_switch(track: str | int, fx: int, log_size: int, seconds: f
                      "timer isn't being serviced in this REAPER right now, so no render will come from the switch. "
                      "Its Render button renders directly: open its window (update_fx with show=True) and press "
                      "Render there; pressing play in REAPER once has also woken it. Its own host.log says whether "
-                     "a render happened")
+                     "a render happened." + NO_WAIT)
 
 
 # The audio check is the fallback for a plugin that can't write its log; every check is
@@ -1250,7 +1254,7 @@ def _wait_for_render(log_size: int, timeout: float, before: tuple[bool, bytes], 
                      "window (update_fx with show=True) to read its status: 'No voicebank' means its Voicebank "
                      "button needs the voicebank folder (under %LOCALAPPDATA%\\VocalVST\\voicebanks); "
                      "'Rendering...' or 'Loading voicebank...' means it needs longer (timeout_seconds, more on the "
-                     "first render). Calling again without changing anything only waits again")
+                     "first render). Calling again without changing anything only waits again." + NO_WAIT)
 
 
 @tool()
@@ -1353,7 +1357,7 @@ def render_vocalvst(
         if not candidates:
             raise ValueError(f"VocalVST has no voicebank, so it can't render: none found under {VOICEBANK_ROOT} "
                              "(the plugin's setup script installs Canary there), and its window's Voicebank "
-                             "button is the other way to choose one. Don't call again until one is in place")
+                             "button is the other way to choose one. Don't call again until one is in place." + NO_WAIT)
     for attempt, candidate in enumerate(candidates or [None]):
         if candidate:
             changes["bank"] = candidate
@@ -1404,17 +1408,17 @@ def render_vocalvst(
     captured = vocalvst_captured(call("capture_fx_state", track=track, fx=fx["index"])["chunk"])
     if not captured["notes"]:
         raise ValueError("VocalVST recorded no notes during the pass: check the track isn't muted, the item is "
-                         "on it and the plugin is enabled, then call again")
+                         "on it and the plugin is enabled, then call again." + NO_WAIT)
     if not stopped_itself and captured["notes"] < len(line):
         raise ValueError(f"REAPER didn't reach the end of the pass in time and was stopped with {captured['notes']} "
                          f"of {len(line)} notes captured. If REAPER was in the background with its audio device "
-                         "closed (Preferences > Audio), bring it to the front, then call again")
+                         "closed (Preferences > Audio), bring it to the front, then call again." + NO_WAIT)
     if captured["notes"] < len(line):
         missed = len(line) - captured["notes"]
         raise ValueError(f"VocalVST captured {captured['notes']} of the track's {len(line)} notes over the pass "
                          f"({start:.1f} s to {end:.1f} s): {missed} were missed, so the phrase wasn't rendered. "
                          "Check that every note sits inside an unmuted item on this track and nothing else "
-                         "silences the track partway (a muted item, an automation lane), then call again")
+                         "silences the track partway (a muted item, an automation lane), then call again." + NO_WAIT)
 
     log_size = VOCALVST_LOG.stat().st_size if VOCALVST_LOG.exists() else 0
     call("set_fx_parameter", track=track, fx=fx["index"], parameter="Render", display_text="On")

@@ -1425,8 +1425,14 @@ def auto_mix(
             except Exception as e:  # noqa: BLE001
                 report.setdefault("warnings", []).append(f"delay return: {e}")
     with batch.span_hints(hints):
-        return _mix_stages(report, plan, channels, profile, spans, room, verb, start_bar, end_bar, dynamics,
-                           sidechain, glue, colour, section_moves)
+        report = _mix_stages(report, plan, channels, profile, spans, room, verb, start_bar, end_bar, dynamics,
+                             sidechain, glue, colour, section_moves)
+    try:   # finish_stage("mix") asks for this run
+        from . import song_tools
+        song_tools.mark_mixed([a["name"] for a in plan["channels"] if not a.get("skipped")])
+    except Exception as e:  # noqa: BLE001 - the mix stands whether or not the plan could be marked
+        report.setdefault("warnings", []).append(f"song plan not marked: {e}")
+    return report
 
 
 def _mix_stages(report: dict, plan: dict, channels: list[dict], profile: dict | None, spans: dict, room, verb,

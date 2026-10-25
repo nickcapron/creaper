@@ -571,3 +571,51 @@ def test_mastering_moves_get_the_balance_checked_again(monkeypatch):
     assert "fader +3.0 dB; added VST: ReaLimit (Cockos)" in rows[0]["detail"] and "Lead is 4.8 LU over" in rows[0]["detail"]
     ctx.overview = {"tracks": [dict(t, volume_db=v) for t, v in zip(snap.values(), (-9, 0))]}
     assert song_tools._balance_rows(ctx) == [] and len(measured) == 1   # nothing moved: nothing rendered
+
+
+def test_verses_comp_calmer_than_choruses():
+    from creaper import genres, songmap
+    assert songmap.comp_rhythm("pulse_16", 2, "verse") == "stabs"
+    assert songmap.comp_rhythm("pulse_16", 4, "chorus") == "pulse_16"
+    assert songmap.comp_rhythm("pulse_16", 2, "pre") == "pulse_16"          # a pre-chorus builds
+    assert songmap.comp_rhythm("stabs", 3, "verse") == "stabs"               # a hot verse keeps the genre's comping
+    assert songmap.comp_rhythm("bossa", 1, "verse") == "bossa"               # genre-defining rhythms stay
+    g = next(g for g in (genres.GENRES.values() if isinstance(genres.GENRES, dict) else genres.GENRES)
+             if g.comping == "pulse_16")
+    plan = songmap.plan_song(g, [("intro", 4), ("verse", 8), ("chorus", 8), ("verse 2", 8), ("chorus 2", 8)], seed=1)
+    by_kind = {row["kind"]: row["parts"].get("chords", {}).get("rhythm") for row in plan}
+    assert by_kind["verse"] == "stabs" and by_kind["chorus"] == "pulse_16" and by_kind["intro"] == "sustain"
+
+
+def test_the_mix_stage_asks_for_auto_mix_and_a_sounding_vocal(monkeypatch, tmp_path):
+    import json
+
+    from creaper import song_tools, vocal_tools
+
+    overview = {"tracks": [
+        {"name": "Drums", "guid": "{D}", "fx": ["VST3: ReaEQ (Cockos)"]},
+        {"name": "Bass", "guid": "{B}", "fx": ["VST3: Analog Lab V"]},
+        {"name": "Vox", "guid": "{V}", "fx": ["VST3i: VocalVST (vocalvst)"]},
+        {"name": "Vox 2", "guid": "{V2}", "fx": ["VST3i: VocalVST (vocalvst)"], "mute": True},
+    ]}
+    monkeypatch.setattr(song_tools, "call", lambda cmd, **kw: {
+        "get_project_overview": overview,
+        "get_track_details": {"items": [{"type": "midi", "muted": False, "start": {"seconds": 2.0}, "end": {"seconds": 6.0}}]},
+    }[cmd])
+    sounding = {"{V}": False}
+    monkeypatch.setattr(vocal_tools, "_track_audio", lambda track, a, b: (sounding.get(track, True), b""))
+    ctx = song_tools._Context("disco", {})
+    rows = song_tools._mix_rows(ctx)
+    assert [(r["check"], r["status"]) for r in rows] == [("auto_mix", "fail"), ("vocal take", "warn")]
+    assert "hand-set effects on Drums" in rows[0]["fix"] and rows[1]["track"] == "Vox"
+    assert "mute the track and finish the song" in rows[1]["fix"]
+    sounding["{V}"] = True
+    assert song_tools._mix_rows(song_tools._Context("disco", {"auto_mix": {"at": "now"}})) == []
+    # auto_mix leaves its mark in the song plan.
+    plan = tmp_path / "song - creaper song.json"
+    plan.write_text("{}")
+    monkeypatch.setattr(song_tools, "_song_paths", lambda: (plan, tmp_path / "checks.json"))
+    song_tools.mark_mixed(["Drums", "Bass"])
+    assert json.loads(plan.read_text())["auto_mix"]["tracks"] == ["Drums", "Bass"]
+    monkeypatch.setattr(song_tools, "_song_paths", lambda: None)
+    song_tools.mark_mixed(["Drums"])          # no saved project: nothing to mark, no error

@@ -366,11 +366,62 @@ def _balance_rows(ctx: _Context) -> list[dict]:
     return rows
 
 
+HAND_MIX_FX = re.compile(r"eq|comp|limit|gate|saturat|clip", re.I)
+
+
+def mark_mixed(channels: list[str]) -> None:
+    """auto_mix records that it ran (and which tracks it mixed) in the song plan, when
+    there is one: finish_stage("mix") asks for it."""
+    paths = _song_paths()
+    if not paths or not paths[0].exists():
+        return
+    with jsonstore.updating(paths[0], dict, indent=2) as data:
+        data["auto_mix"] = {"at": time.strftime("%Y-%m-%d %H:%M"), "tracks": channels}
+
+
+def _mix_rows(ctx: _Context) -> list[dict]:
+    """What the mix stage needs before the style checks: an auto_mix run (one pass that
+    balances, EQs and glues every track from measurements; the model otherwise hand-EQs
+    track by track, 6-39 parameter edits a song, and the mix never gets its balance) and
+    a sung vocal that sounds (a Donny Benet session stopped the song to wait for one)."""
+    from . import vocal_tools
+
+    rows = []
+    tracks = ctx.overview.get("tracks", [])
+    if not ctx.plan.get("auto_mix"):
+        by_hand = [t["name"] for t in tracks if any(HAND_MIX_FX.search(f or "") for f in t.get("fx") or [])]
+        rows.append(songmap.row(
+            "auto_mix", "fail", None, None,
+            "auto_mix(style, roles=) first: one pass balances, EQs and glues every track from what it measures"
+            + (f"; the hand-set effects on {', '.join(by_hand[:6])} are what it does, from the measured mix" if by_hand else "")
+            + "; then refine what measure_tracks still flags"))
+    for t in tracks:
+        if not any("vocalvst" in (f or "").lower() for f in t.get("fx") or []) or t.get("mute"):
+            continue
+        try:
+            details = call("get_track_details", track=t.get("guid") or t["name"])
+            items = [i for i in details.get("items", []) if i.get("type") == "midi" and not i.get("muted")]
+            if not items:
+                continue
+            start = min(i["start"]["seconds"] for i in items)
+            end = max(i["end"]["seconds"] for i in items) + 1.0
+            sounding = vocal_tools._track_audio(t.get("guid") or t["name"], start, end)[0]
+        except Exception:  # noqa: BLE001 - a check that can't run isn't a fail
+            continue
+        if not sounding:
+            rows.append(songmap.row(
+                "vocal take", "warn", None, None,
+                "render_vocalvst it, or mute the track and finish the song without it; the mix doesn't wait for a "
+                "vocal, and the user isn't asked to", track=t["name"],
+                detail="VocalVST has no take on this track: it plays silence over its notes"))
+    return rows
+
+
 def _style_rows(ctx: _Context, master: bool) -> list[dict]:
     if (silent := _silent(ctx)) is not None:
         return silent
     measured, _ = ctx.render()
-    rows = []
+    rows = [] if master else _mix_rows(ctx)
     if master:
         problems = styles.gate_problems(measured, styles.find_style(ctx.genre) if ctx.genre else None)
         rows.append(songmap.row("release gates", "fail" if problems else "pass", None, None, "; ".join(problems)))
