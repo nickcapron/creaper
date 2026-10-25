@@ -26,6 +26,8 @@ class FakeBridge:
 
     def call(self, cmd, params=None, timeout=30.0):
         params = params or {}
+        if cmd == "project_state":
+            return {"change_count": self.renders, "project": None, "instance": "1"}   # every render is a new state here
         if cmd == "media_online":
             if not self.knows_media:
                 raise server.BridgeError("this bridge (v0.31.1) doesn't know 'media_online'; update creaper_bridge.lua")
@@ -54,6 +56,7 @@ class FakeBridge:
 
 def _fresh(monkeypatch, fake):
     monkeypatch.setattr(server, "bridge", fake)
+    monkeypatch.setattr(server, "_render_cache", server.RenderCache())
     monkeypatch.setattr(server, "_media_tried", [0.0])
     monkeypatch.setattr(server, "_media_explained", [False])
     monkeypatch.setattr(server, "_notices", [])

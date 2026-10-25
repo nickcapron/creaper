@@ -1,6 +1,6 @@
 -- @description creaper bridge: lets Claude work in REAPER through the creaper MCP server
 -- @author nickcapron
--- @version 0.42.0
+-- @version 0.43.0
 -- @link https://github.com/nickcapron/creaper
 -- @provides
 --   [nomain] creaper_json.lua
@@ -13,7 +13,7 @@
 --   Every change it makes is a named undo point ("creaper: ..."), so Ctrl+Z
 --   reverts anything Claude did.
 
-local BRIDGE_VERSION = "0.42.0"
+local BRIDGE_VERSION = "0.43.0"
 local PROTOCOL = 2
 
 ----------------------------------------------------------------------- JSON
@@ -1739,10 +1739,16 @@ local RENDER_NUMBER_KEYS = {
   "RENDER_CHANNELS", "RENDER_TAILFLAG", "RENDER_ADDTOPROJ", "RENDER_DITHER", "RENDER_NORMALIZE",
 }
 local WAV_32_FLOAT = "ZXZhdyAA" -- base64 of the WAV sink config: 'evaw', 32-bit float
+-- What renders themselves have added to the project state change count (setting and
+-- restoring the render settings and the selection count as changes): project_state
+-- takes it off, so a render leaves the count where it found it and the server's render
+-- cache sees an unchanged project as unchanged.
+local render_shift = 0
 
 -- Renders [start_t, end_t] of a track (stem) or the master to a 32-bit float WAV in
 -- RENDER_DIR, restoring the user's render settings and track selection afterwards.
 local function render_range(t, master, start_t, end_t)
+  local count_before = reaper.GetProjectStateChangeCount(0)
   busy = { what = "rendering", until_time = os.time() + math.ceil((end_t - start_t) * 1.5 + 30) }
   if announce then announce() end
   local wanted = {}
@@ -1790,6 +1796,7 @@ local function render_range(t, master, start_t, end_t)
   for k, v in pairs(saved_strings) do reaper.GetSetProjectInfo_String(0, k, v, true) end
   for k, v in pairs(saved_numbers) do reaper.GetSetProjectInfo(0, k, v, true) end
   for tr, was_selected in pairs(saved_selection) do reaper.SetTrackSelected(tr, was_selected) end
+  render_shift = render_shift + (reaper.GetProjectStateChangeCount(0) - count_before)
   if not ok then error(result, 0) end
 
   local files = {}
@@ -3347,6 +3354,17 @@ reaper.RecursiveCreateDirectory(BRIDGE_DIR, 0)
 math.randomseed(os.time())
 local INSTANCE = string.format("%d%04d", os.time(), math.random(0, 9999))
 local CLAIMED_PATH = REQUEST_PATH .. "." .. INSTANCE
+
+-- Whether the audio a render would produce has changed since the last one: REAPER's
+-- project state change count moves on every edit (the user's or the bridge's; what
+-- renders themselves add is taken off), the path says which project tab, and the
+-- instance which run of the bridge (the count starts over when REAPER restarts). The
+-- server keeps renders while all three hold.
+function commands.project_state()
+  local _, path = reaper.EnumProjects(-1, "")
+  return { change_count = reaper.GetProjectStateChangeCount(0) - render_shift,
+           project = path ~= "" and path or nil, instance = INSTANCE }
+end
 
 -- Replaces a file atomically (write a temp file, rename it over). On Windows
 -- the rename fails while another program has the file open for a moment (the

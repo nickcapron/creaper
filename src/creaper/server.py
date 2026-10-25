@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import atexit
+import copy
 import functools
 import json
 import math
 import os
 import re
+import shutil
 import threading
 import time
 import uuid
@@ -307,6 +310,7 @@ def _bring_media_online() -> None:
                f"silent in every render: {', '.join(status['missing'][:5])}. Relink or re-insert them.")
     if not status.get("offline"):
         return
+    _render_cache.changed()  # a render kept from while they were offline is missing them
     tracks = ", ".join(status.get("tracks") or [])
     if status.get("still_offline"):
         notice(f"{status['still_offline']} audio item(s) on {tracks} are offline and REAPER couldn't bring them "
@@ -321,7 +325,14 @@ def _bring_media_online() -> None:
 
 
 def call(cmd: str, timeout: float = 30.0, **params: Any) -> Any:
+    state = epoch = None
     if cmd in RENDERS:
+        state = _render_cache.state()
+        if state is not None:
+            hit = _render_cache.lookup(cmd, params, state)
+            if hit is not None:
+                return hit
+            epoch = _render_cache.epoch
         _bring_media_online()
     result = bridge.call(cmd, params, timeout=timeout)
     if cmd in RENDERS and time.time() - _media_tried[0] > MEDIA_RETRY_S and _all_silent(result):
@@ -330,8 +341,15 @@ def call(cmd: str, timeout: float = 30.0, **params: Any) -> Any:
         # it) renders as silence. Bring it back online and render once more, only then:
         # on a cloud-synced project the action can hold REAPER for minutes.
         bridge.call("run_action", {"command": MEDIA_ONLINE_ACTION}, timeout=600.0)
+        _render_cache.changed()
         _discard(result)
         result = bridge.call(cmd, params, timeout=timeout)
+        epoch = _render_cache.epoch
+    if cmd in RENDERS:
+        if state is not None:
+            _render_cache.store(cmd, params, result, epoch)
+    elif cmd not in READ_ONLY_COMMANDS:
+        _render_cache.changed()
     return result
 
 
@@ -364,6 +382,181 @@ def _discard(result: Any) -> None:
         p = Path(f)
         if renders in p.resolve().parents and not os.environ.get("CREAPER_KEEP_RENDERS"):
             p.unlink(missing_ok=True)
+
+
+# ------------------------------------------------------------- render cache
+# The master auto_mix rendered for its last look is rendered again, unchanged, by
+# finish_stage("mix"), by check_song and by the stages after mastering: a minute or
+# more each on a full song. A render of an unchanged project is the same file, so
+# renders are kept and handed out again while nothing has changed: REAPER's project
+# state change count (it moves on every edit, the user's or the bridge's), this
+# process's own count of changing commands (belt and braces, for a plugin setting
+# REAPER might not count), the project tab and the bridge's run, and the render's
+# exact parameters. A hit returns the same numbers the render did, from the same file.
+CACHE_TTL_S = 900.0        # older than this, render afresh: a knob the user turned by hand may not move the count
+CACHE_MAX_BYTES = 2 << 30  # the cache folder's cap; the oldest renders go first
+# Bridge commands that change nothing a render would hear. Anything else counts as a change.
+READ_ONLY_COMMANDS = frozenset({
+    "ping", "project_state", "project_paths", "get_project_overview", "get_track_details", "describe_track",
+    "get_fx_parameters", "list_installed_fx", "list_fx_presets", "capture_fx_state", "get_instrument_notes",
+    "get_midi_notes", "get_midi_cc", "get_tempo_map", "get_routing", "read_automation", "describe_action",
+    "time_to_positions", "bar_to_qn", "qn_to_times", "list_project_tabs", "list_inputs", "recording_status",
+    "list_takes", "list_track_templates", "save_project", "render_audio", "render_stems",
+})
+
+
+def _remap(obj: Any, mapping: dict[str, str]) -> Any:
+    """obj with every string found in mapping replaced (render file paths in a result)."""
+    if isinstance(obj, dict):
+        return {k: _remap(v, mapping) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_remap(v, mapping) for v in obj]
+    return mapping.get(obj, obj) if isinstance(obj, str) else obj
+
+
+class RenderCache:
+    """Renders kept while the project stays as it was (see above). The files live in
+    renders/cache/<pid>; a hit is handed out as a fresh hard link (a copy where the
+    disk can't link) in the renders folder, which the caller reads and deletes like any
+    render. Without a bridge that knows project_state, nothing is kept."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._entries: dict[tuple, dict] = {}
+        self.epoch = 0                 # changing commands this process has sent
+        self.hits = self.misses = 0
+        self._unknown = False          # the bridge predates project_state
+        self._folder: Path | None = None
+
+    def changed(self) -> None:
+        with self._lock:
+            self.epoch += 1
+
+    def state(self) -> tuple | None:
+        """(bridge run, project, change count) now, or None when the bridge can't say."""
+        if self._unknown:
+            return None
+        try:
+            s = bridge.call("project_state")
+        except BridgeError as e:
+            if "doesn't know" in str(e):
+                self._unknown = True
+            return None
+        if not isinstance(s, dict) or s.get("change_count") is None:
+            return None
+        return (s.get("instance"), s.get("project"), s["change_count"])
+
+    @staticmethod
+    def key(cmd: str, params: dict) -> tuple:
+        """The render's identity: its command and parameters, None values and a zero tail
+        left out (so track="master" with start_bar=None is track="master")."""
+        def freeze(v: Any) -> Any:
+            if isinstance(v, dict):
+                return tuple(sorted((k, freeze(x)) for k, x in v.items()))
+            if isinstance(v, (list, tuple)):
+                return tuple(freeze(x) for x in v)
+            return v
+        kept = {k: v for k, v in params.items() if v is not None and not (k == "tail_seconds" and not v)}
+        return (cmd, freeze(kept))
+
+    def lookup(self, cmd: str, params: dict, state: tuple) -> Any | None:
+        """The kept result for this render in this state, its files linked afresh, or None."""
+        with self._lock:
+            entry = self._entries.get(self.key(cmd, params))
+            if (entry is None or entry["state"] != state or entry["epoch"] != self.epoch
+                    or time.time() - entry["at"] > CACHE_TTL_S):
+                self.misses += 1
+                return None
+            files, result = list(entry["files"]), entry["result"]
+        if not all(f.exists() for f in files):
+            self._forget(self.key(cmd, params))
+            return None
+        renders = bridge.directory / "renders"
+        stamp = uuid.uuid4().hex[:8]
+        mapping: dict[str, str] = {}
+        for i, (orig, kept) in enumerate(zip(_render_files(result), files)):
+            dst = renders / f"render_kept_{stamp}_{i}{kept.suffix}"
+            try:
+                self._link(kept, dst)
+            except OSError:
+                self._forget(self.key(cmd, params))
+                return None
+            mapping[orig] = str(dst)
+        with self._lock:
+            self.hits += 1
+        return _remap(result, mapping)
+
+    def store(self, cmd: str, params: dict, result: Any, epoch: int | None) -> None:
+        """Keeps a render just made, unless something changed under it or it's silent (an
+        offline file renders as silence, and comes back)."""
+        files = _render_files(result)
+        if epoch is None or self.epoch != epoch or not files or _all_silent(result):
+            return
+        state = self.state()
+        if state is None:
+            return
+        folder = self.folder()
+        stamp = uuid.uuid4().hex[:8]
+        kept: list[Path] = []
+        try:
+            for i, f in enumerate(files):
+                dst = folder / f"{stamp}_{i}{Path(f).suffix}"
+                self._link(Path(f), dst)
+                kept.append(dst)
+        except OSError:
+            self._drop(kept)
+            return
+        entry = {"state": state, "epoch": epoch, "at": time.time(), "files": kept,
+                 "result": copy.deepcopy(result), "bytes": sum(p.stat().st_size for p in kept)}
+        key = self.key(cmd, params)
+        with self._lock:
+            old = self._entries.pop(key, None)
+            self._entries[key] = entry
+            gone = [k for k, e in self._entries.items() if e["state"] != state]   # the project moved on: no hit again
+            live = sorted((k for k in self._entries if k not in gone), key=lambda k: self._entries[k]["at"])
+            total = sum(self._entries[k]["bytes"] for k in live)
+            for k in live:                                                        # the oldest first, until under the cap
+                if total <= CACHE_MAX_BYTES:
+                    break
+                total -= self._entries[k]["bytes"]
+                gone.append(k)
+            dropped = [self._entries.pop(k) for k in gone]
+        for e in ([old] if old else []) + dropped:
+            self._drop(e["files"])
+
+    def folder(self) -> Path:
+        if self._folder is None:
+            self._folder = bridge.directory / "renders" / "cache" / str(os.getpid())
+            self._folder.mkdir(parents=True, exist_ok=True)
+            atexit.register(shutil.rmtree, self._folder, ignore_errors=True)
+            for other in self._folder.parent.iterdir():   # left by a process that's gone
+                if other != self._folder and other.is_dir() and time.time() - other.stat().st_mtime > 86400:
+                    shutil.rmtree(other, ignore_errors=True)
+        return self._folder
+
+    @staticmethod
+    def _link(src: Path, dst: Path) -> None:
+        try:
+            os.link(src, dst)
+        except OSError:
+            shutil.copyfile(src, dst)
+
+    def _forget(self, key: tuple) -> None:
+        with self._lock:
+            entry = self._entries.pop(key, None)
+        if entry:
+            self._drop(entry["files"])
+
+    @staticmethod
+    def _drop(files: list[Path]) -> None:
+        for f in files:
+            try:
+                f.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+_render_cache = RenderCache()
 
 
 # Set by the REAPER chat panel, which runs Claude without per-tool prompts.

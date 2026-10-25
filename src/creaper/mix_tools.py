@@ -498,13 +498,23 @@ def _clear_robot_vocals(actions: list[dict], start_bar: float | None, end_bar: f
     parts covering it most (found by muting each in turn) ducked under it. In a test,
     ducking the lead synth and chords took clarity in the mix from 0.588 to 0.650
     against 0.662 alone; dipping them at 2.5 kHz barely moved it."""
-    from .ear_tools import measure_vocal_clarity
+    from .ear_tools import _sings_itself, measure_vocal_clarity
     out = []
     candidates = [a for a in actions if a["role"] in COVERING_ROLES and not a.get("skipped")]
     for a in actions:
         if a["role"] != "vocal" or a.get("skipped"):
             continue
         vocal = a.get("ref", a["name"])
+        try:
+            sung = _sings_itself(call("get_track_details", track=vocal))
+        except Exception:  # noqa: BLE001 - measured below like any other
+            sung = False
+        if sung:
+            # A singing instrument has no clean words to score against: measuring it cost
+            # two full renders a song for a verdict of None. Its level is set by role.
+            out.append({"vocal": a["name"], "skipped": "a sung vocal (VocalVST) has no clean words to score against; "
+                                                      "check_vocal_clarity on it compares the mix before and after a change"})
+            continue
         try:
             now = measure_vocal_clarity(vocal, start_bar, end_bar)
         except ValueError:
@@ -1213,7 +1223,8 @@ def auto_mix(
         "compression on the drum bus) so the master doesn't have to crush them; off for genres that breathe"))] = True,
     colour: Annotated[bool, Field(description=(
         "Saturate the bass and the drum bus, by measurement (2-8 kHz up 2-4 dB, punch kept), so they're heard "
-        "on small speakers; off for genres that breathe"))] = True,
+        "on small speakers. Off by default: in every measured song it found no setting that added harmonics "
+        "without costing punch, at 6-8 renders a run; skipped anyway for genres that breathe"))] = False,
     section_moves: Annotated[bool, Field(description=(
         "Ride the mix up in sections that should lift but don't (a chorus or drop under 1 LU over the verse "
         "before it), with a gain plugin first on the master; needs the sections as regions"))] = True,
@@ -1235,12 +1246,13 @@ def auto_mix(
     The dynamics stage compresses peaky drums 2-3 dB (plus a soft clipper on their
     last peaks) and keys/pads 1-2 dB, calibrated by measuring gain reduction, so the
     master doesn't have to crush them. Then -6 dBFS of headroom, the drums glued on one
-    bus (plus parallel compression), saturation on the bass and the drum bus set by
-    measurement, gentle compression on the whole mix, and a level ride lifting
-    choruses and drops that don't come out over the section before. Robot vocals
-    covered by other parts are raised and cleared. Reports the mix's peak-to-loudness
-    and its peakiest parts. Genres that should breathe (classical, film, jazz...) skip
-    the dynamics stage and saturation. Saves a copy of the project first when it has a
+    bus (plus parallel compression), gentle compression on the whole mix, and a level
+    ride lifting choruses and drops that don't come out over the section before (with
+    colour=True, saturation on the bass and the drum bus set by measurement). Robot
+    vocals covered by other parts are raised and cleared; a sung vocal (VocalVST) has no
+    clean words to score, so its place is set by role alone. Reports the mix's
+    peak-to-loudness and its peakiest parts. Genres that should breathe (classical,
+    film, jazz...) skip the dynamics stage. Saves a copy of the project first when it has a
     file. Leaves tracks the user already set up (EQ, compression, panning) alone on
     those points. Then check it: show_spectrogram, check_vocal_clarity,
     compare_mix_to_style."""
@@ -1500,7 +1512,8 @@ def _mix_stages(report: dict, plan: dict, channels: list[dict], profile: dict | 
     vocal_fixes = _clear_robot_vocals(plan["channels"], start_bar, end_bar)
     if vocal_fixes:
         report["vocal_clarity"] = vocal_fixes
-        changed = True
+        if any("raised_db" in v or "ducked_under_vocal" in v for v in vocal_fixes):
+            changed = True
     if changed or "headroom_shift_db" in report or dynamics or sidechain:
         master = analyze_audio(track="master", start_bar=start_bar, end_bar=end_bar)   # the mix as it now stands
     peak = master.get("levels", {}).get("sample_peak_dbfs")

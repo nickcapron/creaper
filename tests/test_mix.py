@@ -605,3 +605,23 @@ def test_band_db_hears_added_harmonics():
     clean = 0.5 * np.sin(2 * np.pi * 110 * t)
     driven = np.tanh(3 * clean) / 3 * 1.5
     assert mix_tools.band_db(driven, fs) > mix_tools.band_db(clean, fs) + 20
+
+
+def test_a_sung_vocal_is_not_measured_for_clarity_in_auto_mix(monkeypatch):
+    # VocalVST has no clean words to score against: measuring it cost two full renders
+    # a song for a verdict of None. A robot vocal is still measured.
+    from creaper import ear_tools, mix_tools
+    measured = []
+
+    def fake_call(command, **args):
+        if command == "get_track_details":
+            return {"fx": [{"name": "VST3: VocalVST" if args["track"] == "Sung" else "ReaComp"}]}
+        return {}
+
+    monkeypatch.setattr(mix_tools, "call", fake_call)
+    monkeypatch.setattr(ear_tools, "measure_vocal_clarity", lambda vocal, *a, **k: measured.append(vocal) or {
+        "alone": {"score": 0.8}, "in_mix": {"score": 0.79, "verdict": "clear"}})
+    out = mix_tools._clear_robot_vocals([{"role": "vocal", "name": "Sung", "ref": "Sung"},
+                                         {"role": "vocal", "name": "Robot", "ref": "Robot"}], None, None)
+    assert measured == ["Robot"]
+    assert "no clean words" in out[0]["skipped"] and out[1]["verdict"] == "clear"
