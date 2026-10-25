@@ -1072,12 +1072,20 @@ def _set_knobs(track: str | int, fx: int, wanted: dict[str, float]) -> tuple[lis
     return [name for name in wanted if name not in have], failed
 
 
-def _wait_for_render_switch(track: str | int, fx: int, seconds: float = 10.0) -> None:
-    """The plugin's Render switch resets itself the moment its timer sees it; one that
-    stays on isn't running, and waiting for its result would be a waste."""
+RENDER_SWITCH_WAIT_S = 60.0   # the 2026-10-24 build loads its models (27 s on the GPU) before it takes the switch
+
+
+def _wait_for_render_switch(track: str | int, fx: int, log_size: int, seconds: float = RENDER_SWITCH_WAIT_S) -> None:
+    """The plugin's Render switch resets itself once its timer sees it; one that stays on
+    with nothing in the log isn't running, and waiting for its result would be a waste.
+    The newer build keeps the switch on while it renders and logs 'render started' first,
+    so that line counts as taken (a Donny Benet session was told the plugin wasn't
+    running while it rendered the whole vocal)."""
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
         _sleep(1.0)
+        if "render started" in _log_since(log_size).lower():
+            return
         params = call("get_fx_parameters", track=track, fx=fx, search="Render").get("parameters", [])
         render = next((p for p in params if p.get("name") == "Render"), None)
         if render is None or str(render.get("display", "")).lower() == "off" or float(render.get("value") or 0) < 0.5:
@@ -1263,7 +1271,7 @@ def render_vocalvst(
     span = (captured["from_seconds"], captured["to_seconds"] + 1.0)
     before = _track_audio(track, *span)
     call("set_fx_parameter", track=track, fx=fx["index"], parameter="Render", display_text="On")
-    _wait_for_render_switch(track, fx["index"])
+    _wait_for_render_switch(track, fx["index"], log_size)
     report = _wait_for_render(log_size, timeout_seconds, before, lambda: _track_audio(track, *span))
     out = {"track": track, "mode": mode, "lyrics": text or None, "written_notes": len(line), "captured": captured,
            "expression": expression if expression is not None else "the plugin's own",

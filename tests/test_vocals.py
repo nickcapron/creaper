@@ -960,3 +960,24 @@ def test_a_knob_the_plugin_refuses_is_reported_not_claimed(tmp_path, monkeypatch
     out = vocal_tools.render_vocalvst(track="Vocal", lyrics="we ride at dawn to-night", breaths=0.5, seed=4242)
     assert out["breaths"] == 0.5 and "seed" not in out
     assert "Seed: no value shows as 4242" in out["controls_failed"] and "controls_missing" not in out
+
+
+def test_render_vocalvst_trusts_the_log_when_the_switch_stays_on(tmp_path, monkeypatch):
+    """The 2026-10-24 build keeps Render on while it renders and logs 'render started'
+    first: a Donny Benet session was told the plugin wasn't running while it sang."""
+    from creaper import vocal_tools
+
+    calls, state = _vocalvst_bridge(tmp_path, monkeypatch, takes_switch=False)
+    inner = vocal_tools.call
+    log = vocal_tools.VOCALVST_LOG
+
+    def logging_start(cmd, **kw):
+        if cmd == "set_fx_parameter" and kw["parameter"] == "Render":
+            with log.open("a") as f:
+                f.write("2026-10-25T09:01:21.198-07:00#276b/Vocal render started: 6 notes, mode sing, lyrics 20 chars\n")
+        return inner(cmd, **kw)
+
+    monkeypatch.setattr(vocal_tools, "call", logging_start)
+    monkeypatch.setattr(vocal_tools.time, "monotonic", _FakeClock())
+    out = vocal_tools.render_vocalvst(track=1, lyrics="go _ go _ go _")
+    assert out["result"].startswith("Rendered")

@@ -247,6 +247,58 @@ def velocity_bands(n: int) -> list[tuple[int, int]]:
 KICK_PUNCH_MIN_DB = 0.0
 
 
+PUNCH_LAYER_MIN_DB, PUNCH_LAYER_MAX_DECAY_S, PUNCH_LAYER_GAIN_DB = 3.0, 0.35, -3.0   # a click, not a second boom
+CRASH_MIN_DECAY_S = 0.6
+
+
+def _best_in_library(role: str, key, where=None) -> dict | None:
+    """The library's best already-analysed one-shot for a role by key(analysis); stale
+    or unanalysed entries are skipped so a kit builds in seconds, not minutes."""
+    best, best_key = None, None
+    for f in library.search(role=role):
+        a = f.get("analysis") or {}
+        if a.get("v") != samplelib.ANALYSIS_VERSION or a.get("kind") != "one-shot" or (where and not where(a)):
+            continue
+        k = key(a)
+        if k is not None and (best is None or k > best_key):
+            best, best_key = f, k
+    return best
+
+
+def fill_kit_gaps(samples: dict, layers: dict[str, list[Layer]]) -> list[str]:
+    """Fills in what the grooves will need and the kit as given lacks, from the library:
+    a crash lane (genre grooves and add_transitions put crashes on GM 49, and a kit
+    without one plays nothing there), and a punch layer under a kick with no attack. Two
+    songs in a row shipped with both gaps after being warned about them. Changes samples
+    and layers in place; returns what it did."""
+    done = []
+    lanes = {k.strip().lower(): k for k in samples}
+    if "crash" not in lanes:
+        crash = _best_in_library("crash", key=lambda a: a.get("decay_s"), where=lambda a: (a.get("decay_s") or 0) >= CRASH_MIN_DECAY_S)
+        if crash:
+            samples["crash"] = crash["path"]
+            done.append(f"crash lane added from the library ({crash['name']}): grooves and add_transitions put crashes on "
+                        "GM 49, and the kit had nothing there (pass fill_gaps=False to keep it without)")
+    kick_lane = lanes.get("kick")
+    given = samples.get(kick_lane) if kick_lane else None
+    kick = (given[0] if isinstance(given, list) else given) if given else None
+    if kick and not any(k.strip().lower() == "kick" for k in layers):
+        try:
+            heard = samplelib.analyze(kick)
+        except Exception:  # noqa: BLE001
+            heard = {}
+        if heard.get("punch_db") is not None and heard["punch_db"] < KICK_PUNCH_MIN_DB:
+            punchy = _best_in_library("kick", key=lambda a: a.get("punch_db"),
+                                      where=lambda a: (a.get("punch_db") or -99) >= PUNCH_LAYER_MIN_DB
+                                      and (a.get("decay_s") or 9) <= PUNCH_LAYER_MAX_DECAY_S)
+            if punchy and Path(punchy["path"]).resolve() != Path(kick).resolve():
+                layers[kick_lane] = [Layer(path=punchy["path"], gain_db=PUNCH_LAYER_GAIN_DB)]
+                done.append(f"{punchy['name']} layered under the kick at {PUNCH_LAYER_GAIN_DB:g} dB for its attack: "
+                            f"{Path(kick).stem} has none (its first 10 ms sit {-heard['punch_db']:g} dB under its body), "
+                            "weight the master's limiter chokes on (pass fill_gaps=False or layers={'kick': []} to keep it bare)")
+    return done
+
+
 def kit_warnings(samples: dict[str, str | list[str]], layers: dict[str, list[Layer]] | None) -> list[str]:
     """What a kit as given will do wrong when the grooves play it. From the 90s pop kit:
     no crash lane (the groove's and add_transitions' crashes on GM 49 played nothing), the
@@ -267,7 +319,7 @@ def kit_warnings(samples: dict[str, str | list[str]], layers: dict[str, list[Lay
                            f"on the same step (pop's 2 and 4) plays it twice, louder and smeared. Drop the layer or "
                            f"the {other} lane")
     kick = lanes.get("kick")
-    if kick:
+    if kick and not any(k.strip().lower() == "kick" for k in (layers or {})):   # a layer gives it the hit
         try:
             heard = samplelib.analyze(kick[0])
         except Exception:  # noqa: BLE001 - a warning isn't worth failing the build
@@ -294,6 +346,9 @@ def build_drum_kit(
     trim_silence: Annotated[bool, Field(description="Report samples that start late (silence at the start)")] = True,
     velocity_db: Annotated[float, Field(ge=-40, le=0, description="Level at the softest velocity: -18 lets ghost notes and accents work, 0 ignores velocity")] = -18.0,
     release_s: Annotated[float | None, Field(gt=0, le=10, description="Cut each hit this long after its note ends (for samples with long tails, e.g. 0.2 kicks, 0.45 taiko); default: play the whole sample")] = None,
+    fill_gaps: Annotated[bool, Field(description=(
+        "Fill what the grooves need and the kit lacks, from the library: a crash lane when none is given, and a "
+        "punch layer under a kick that has no attack. The result says what was added"))] = True,
 ) -> dict:
     """Builds a drum kit from sample files in REAPER's own sampler (ReaSamplOmatic5000
     on the General MIDI keys), so drum patterns and genre grooves land on the right
@@ -301,8 +356,12 @@ def build_drum_kit(
     split by velocity (no machine-gun repeats, real dynamics) and layers that play with
     each hit (weight and snap a single sample lacks). Works with any samples, including
     the ones other instruments ship with; find_samples(role=..., style=...) picks ones
-    that fit the genre. Building again on the same track adds samplers to it; to swap a
-    lane's sample later, change its sampler (get_track_details lists them by lane)."""
+    that fit the genre. A missing crash lane and a kick with no attack are filled from
+    the library (fill_gaps). Building again on the same track adds samplers to it; to
+    swap a lane's sample later, change its sampler (get_track_details lists them by lane)."""
+    samples = dict(samples)
+    layers = {k: list(v) for k, v in (layers or {}).items()}
+    added = fill_kit_gaps(samples, layers) if fill_gaps else []
     pads, used = [], set()
     extra = 60
     setup: list[dict] = []  # per pad: velocity band and level, set once the samplers exist
@@ -367,6 +426,8 @@ def build_drum_kit(
     if any(len(v["samples"]) > 1 for v in kit.values()):
         out["tip"] = ("lanes with alternatives switch sample by velocity: give the part a feel (apply_feel) or "
                       "varied velocities so they alternate")
+    if added:
+        out["added"] = added
     warnings = kit_warnings(samples, layers)
     if warnings:
         out["warnings"] = warnings

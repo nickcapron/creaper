@@ -445,3 +445,48 @@ def test_vocal_phrases_carry_their_tempo_and_key():
     assert samplelib.bpm_from_name("acapella 98 F#m") == 98
     assert samplelib.bpm_from_name("Vocal Chop 03") is None          # a take number, not a tempo
     assert samplelib.bpm_from_name("Female Vox C4 sustain") is None
+
+
+def test_a_kit_without_a_crash_or_a_kick_attack_is_filled_from_the_library(tmp_path, monkeypatch):
+    """Two songs in a row kept SILA's sub-only LinnDrum kick and no crash lane after being
+    warned: now the library fills both, and says so, unless asked not to."""
+    import soundfile as sf
+    from creaper import server  # noqa: F401
+    from creaper import sample_tools
+    t = np.arange(int(0.4 * FS44)) / FS44
+    soft_kick = tmp_path / "BD_sub.wav"
+    sf.write(str(soft_kick), 0.8 * np.sin(2 * np.pi * 50 * t) * (1 - np.exp(-t * 60)) * np.exp(-t * 6), FS44)
+    punchy, crash, dull = tmp_path / "909 kick.wav", tmp_path / "crash.wav", tmp_path / "boom.wav"
+    for p in (punchy, crash, dull):
+        sf.write(str(p), _kick(), FS44)
+    v = samplelib.ANALYSIS_VERSION
+    shelf = {"kick": [{"path": str(dull), "name": "boom", "analysis": {"v": v, "kind": "one-shot", "punch_db": 1.0, "decay_s": 0.2}},
+                      {"path": str(punchy), "name": "909 kick", "analysis": {"v": v, "kind": "one-shot", "punch_db": 7.5, "decay_s": 0.2}},
+                      {"path": str(soft_kick), "name": "BD_sub", "analysis": {"v": v, "kind": "one-shot", "punch_db": 9.0, "decay_s": 0.9}}],
+             "crash": [{"path": str(crash), "name": "crash", "analysis": {"v": v, "kind": "one-shot", "decay_s": 1.8}},
+                       {"path": str(dull), "name": "stale", "analysis": {"v": "old", "kind": "one-shot", "decay_s": 3.0}}]}
+    monkeypatch.setattr(sample_tools, "library", type("L", (), {"search": lambda self, text=None, role=None, **k: shelf.get(role, [])})())
+    calls = []
+
+    def fake_call(cmd, **kw):
+        calls.append((cmd, kw))
+        if cmd == "get_project_overview":
+            return {"tracks": [{"name": "Drums"}]}
+        if cmd == "build_sampler_kit":
+            return {"track": {"name": "Drums"}, "pads": [{"fx": i + 1, "note": p["note"]} for i, p in enumerate(kw["pads"])]}
+        return {}
+    monkeypatch.setattr(sample_tools, "call", fake_call)
+    out = sample_tools.build_drum_kit(track="Drums", samples={"kick": str(soft_kick), "snare": str(dull)}, trim_silence=False)
+    pads = next(kw for cmd, kw in calls if cmd == "build_sampler_kit")["pads"]
+    assert [p["note"] for p in pads] == [36, 36, 38, 49]                  # the kick, its punch layer, snare, crash
+    assert pads[1]["name"] == "kick layer - 909 kick"                      # the punchiest short kick, not the sub itself
+    assert "crash" in out["kit"] and "warnings" not in out
+    assert len(out["added"]) == 2 and "crash lane added" in out["added"][0] and "909 kick layered under the kick" in out["added"][1]
+    calls.clear()
+    bare = sample_tools.build_drum_kit(track="Drums", samples={"kick": str(soft_kick), "snare": str(dull)}, trim_silence=False,
+                                       fill_gaps=False)
+    assert "added" not in bare and len(bare["warnings"]) == 2
+    calls.clear()
+    kept = sample_tools.build_drum_kit(track="Drums", samples={"kick": str(soft_kick), "snare": str(dull)}, layers={"kick": []},
+                                       trim_silence=False)
+    assert len(kept["added"]) == 1 and "crash" in kept["added"][0]         # layers={'kick': []} keeps the kick bare
