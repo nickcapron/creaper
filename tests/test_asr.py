@@ -170,3 +170,74 @@ def test_the_real_recogniser_hears_a_clear_talk_box_line_and_not_a_garbled_one(t
         x, fs = sf.read(c["path"])
         sf.write(c["path"], x[::-1], fs)
     assert asr.check_lines(clips, seconds)["unclear_lines"] == ["all night long"]
+
+
+# ------------------------------------------------------------- sung takes (VocalVST)
+
+
+def test_the_words_missed_are_named_in_order():
+    assert asr.match_words("cold rain on the glass", "Coating on the glass") == (pytest.approx(1 / 3, abs=0.01), ["cold", "rain"])
+    assert asr.match_words("Sa-tur-day night and the ci-ty is warm", "Sat turd day night and the synth tire is born") == \
+        (0.25, ["saturday", "city", "warm"])
+    assert asr.match_words("all night long", "All night long") == (1.0, [])
+
+
+def test_a_sung_take_is_heard_line_by_line_from_its_audio(monkeypatch):
+    fs = 48000
+    audio = np.zeros((int(fs * 8.0), 2), dtype=np.float32)
+    audio[int(fs * 0.3):int(fs * 3.0), :] = 0.2     # the first line sounds, the second is silence
+    lines = [{"line": "Saturday night", "start": 0.3, "end": 2.8, "at_qn": 4.0},
+             {"line": "ne-on light", "start": 4.0, "end": 6.5, "at_qn": 12.0},
+             {"line": "Saturday night", "start": 7.0, "end": 7.9, "at_qn": 20.0}]
+    clips = []
+    answers = iter([("Sat turd day night.", []), ("Neon light", ["Neon"]), ("Sat turd day night", [])])
+    monkeypatch.setattr(asr, "transcribe", lambda a: clips.append(a) or next(answers))
+    out = asr.hear_lines(audio, fs, lines, next_step="render again")
+    # Each line alone, at 16 kHz, with its tail and air either side, scaled to a steady level.
+    assert len(clips) == 3
+    assert len(clips[0]) == pytest.approx((2.5 + asr.LINE_TAIL_S + 2 * asr.PAD_S) * asr.RATE, rel=0.02)
+    assert float(np.abs(clips[0]).max()) == pytest.approx(0.9, abs=0.01) and float(np.abs(clips[1]).max()) == 0.0
+    assert [h["line"] for h in out["heard"]] == ["Saturday night", "ne-on light"]      # the repeat heard alike
+    assert out["heard"][0]["missed"] == ["saturday"] and out["heard"][0]["at_qn"] == 4.0
+    assert out["heard"][1]["words_matched"] == 1.0 and out["heard"][1]["unsure_of"] == ["Neon"]
+    assert out["words_heard"] == pytest.approx((1 + 2 + 1) / 6, abs=0.01)             # every line counts, repeats too
+    assert out["unclear_lines"] == ["Saturday night"] and "render again" in out["unclear_next"]
+
+
+def _sung_track(monkeypatch, alone_heard, mix_heard):
+    import creaper.ear_tools as ear
+    from creaper import vocal_tools
+
+    fs = 48000
+    audio = np.random.default_rng(1).normal(0, 0.05, (fs * 6, 2)).astype(np.float32)
+    renders = {"Vox": (audio, fs, {"start": {"seconds": 2.0}, "end": {"seconds": 8.0}}),
+               "master": (audio * 2, fs, {"start": {"seconds": 2.0}, "end": {"seconds": 8.0}})}
+    monkeypatch.setattr(ear, "_render", lambda track, *a: renders[track])
+    monkeypatch.setattr(ear, "call", lambda cmd, **kw: {
+        "get_track_details": {"name": "Vox", "fx": [{"name": "VST3i: VocalVST (vocalvst)"}],
+                              "items": [{"type": "midi", "muted": False, "start": {"seconds": 2.5}, "length_seconds": 4.0}]},
+        "time_to_positions": [{"bar": 2}, {"bar": 4}], "get_project_overview": {"tracks": [{"name": "Vox"}]}}[cmd])
+    monkeypatch.setattr(vocal_tools, "vocalvst_lines", lambda track: [
+        {"line": "cold rain on the glass", "start": 2.5, "end": 4.4, "at_qn": 5.0},
+        {"line": "all night long", "start": 5.0, "end": 6.4, "at_qn": 10.0}])
+    monkeypatch.setattr(asr, "available", lambda: True)
+    answers = iter([(t, []) for t in alone_heard + mix_heard])
+    monkeypatch.setattr(asr, "transcribe", lambda a: next(answers))
+    return ear.measure_vocal_clarity("Vox")
+
+
+def test_check_vocal_clarity_hears_a_sung_take_alone_and_in_the_mix(monkeypatch):
+    out = _sung_track(monkeypatch, ["Cold rain on the glass", "All night long"], ["Coating on the glass", "All night long"])
+    assert out["alone"]["words_heard"] == 1.0 and "unclear_lines" not in out["alone"]
+    assert out["in_mix"]["words_heard"] == pytest.approx(4 / 6, abs=0.01)
+    assert out["alone"]["heard"][0]["in_mix"] == {"heard_as": "Coating on the glass", "words_matched": pytest.approx(1 / 3, abs=0.01),
+                                                  "missed": ["cold", "rain"]}
+    assert out["verdict"].startswith("clear alone (100%) but not in the mix (67%)")
+    assert "score" in out["in_mix"]                 # the STOI covering measure stays
+
+    out = _sung_track(monkeypatch, ["Coating on the glass", "All night long"], ["Coating on the glass", "All night long"])
+    assert out["alone"]["unclear_lines"] == ["cold rain on the glass"]
+    assert out["verdict"].startswith("the take itself is unclear")
+
+    out = _sung_track(monkeypatch, ["Cold rain on the glass", "All night long"], ["Cold rain on the glass", "All night long"])
+    assert out["verdict"] == "the words come through alone (100%) and in the mix (100%)"

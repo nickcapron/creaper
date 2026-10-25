@@ -542,3 +542,94 @@ def _join_tokens(lines: list[VocalLine]) -> str:
         if current:
             words.append("-".join(current))
     return " ".join(words)
+
+
+# ------------------------------------------------------------------------ lint
+
+# A listener loses words at consonant pile-ups, at words the singer has to sound out
+# letter by letter, and when a syllable's closing consonant is really the next
+# syllable's opening one: the singer puts each syllable's onset consonant at the end of
+# the note before, so 'Sa-tur-day' held long came back as "Sat turd day".
+STOPS = set("tdkgpbq")
+ONE_SOUND = ("th", "sh", "ch", "ph", "wh", "ng", "ck", "qu", "gh")
+LONG_NOTE_S = 0.45        # a syllable held this long before a stop sounds closed by it
+CLUSTER_AT_ONSET = 3      # consonant sounds in a row at a word's start that blur it ('strength')
+CLUSTER_ANYWHERE = 4      # ... anywhere in a word or across two ('world's turning')
+VOCALISE = {"la", "ooh", "oh", "ah", "na", "da", "mm", "hey", "whoa", "yeah", "woah", "uh", "hmm", "doo", "ba"}
+
+
+def _consonant_runs(word: str) -> list[int]:
+    """The lengths of the consonant-sound runs in a word, start to end (a word that
+    starts or ends on a vowel gets a 0 there), digraphs as one sound, 'gh' silent."""
+    text = re.sub(r"[^a-z]", "", word.lower())
+    for pair in ONE_SOUND:
+        text = text.replace(pair, "" if pair == "gh" else pair[0])
+    text = re.sub(r"([^aeiouy])\1", r"\1", text)      # a doubled letter is one sound
+    runs, current = [], 0
+    for c in text:
+        if c in "aeiouy":
+            runs.append(current)
+            current = 0
+        else:
+            current += 1
+    runs.append(current)
+    return runs
+
+
+def lint(lyrics: str, note_seconds: list[float] | None = None) -> dict:
+    """What in a render_vocalvst lyric string (hyphenated syllables, '_' holds) a listener
+    will struggle to hear, found without a render: words VocalVST's dictionary lacks
+    (when it's installed), consonant pile-ups, and a syllable held long before the
+    next one's stop consonant (with `note_seconds`, one per token). Empty when clean."""
+    tokens = lyrics.split()
+    words: list[tuple[str, list[str], list[float | None]]] = []      # (word, syllables, seconds per syllable)
+    at = 0
+    for tk in tokens:
+        if tk in ("_", "-", "+"):
+            if words and note_seconds is not None and at < len(note_seconds) and words[-1][2][-1] is not None:
+                words[-1][2][-1] += note_seconds[at]
+            at += 1
+            continue
+        pieces = [p for p in tk.split("-") if p] or [tk]
+        secs = [note_seconds[at + i] if note_seconds is not None and at + i < len(note_seconds) else None
+                for i in range(len(pieces))]
+        words.append((tk, pieces, secs))
+        at += len(pieces)
+    flags: list[str] = []
+    known = dictionary()
+    if known:
+        unknown = []
+        for word, pieces, _ in words:
+            key = _dictionary_key(word)
+            if key and key not in known and key not in VOCALISE and key not in unknown and \
+                    not all(_dictionary_key(p) in known for p in pieces):
+                unknown.append(key)
+        if unknown:
+            flags.append("the singer's dictionary has no " + ", ".join(f"'{w}'" for w in unknown[:8])
+                         + (" ..." if len(unknown) > 8 else "") + ": it sounds them out letter by letter, often "
+                         "wrong. Use words it knows (plain English spelling; no slang spellings or made-up names)")
+    piled = []
+    for i, (word, _, _) in enumerate(words):
+        runs = _consonant_runs(word)
+        if runs[0] >= CLUSTER_AT_ONSET or max(runs) >= CLUSTER_ANYWHERE:
+            piled.append(word)
+        elif i + 1 < len(words) and runs[-1] + _consonant_runs(words[i + 1][0])[0] >= CLUSTER_ANYWHERE:
+            piled.append(f"{word} {words[i + 1][0]}")
+    if piled:
+        flags.append("consonants pile up in " + ", ".join(f"'{w}'" for w in dict.fromkeys(piled[:8]))
+                     + ": sung, those run together. Prefer words that open on a vowel or one consonant")
+    held = []
+    for word, pieces, secs in words:
+        for a, b, s in zip(pieces, pieces[1:], secs):
+            first = re.sub(r"[^a-z]", "", b.lower())[:1]
+            hard_c = first == "c" and not re.match(r"c[eiy]", re.sub(r"[^a-z]", "", b.lower()))
+            if s is not None and s >= LONG_NOTE_S and (first in STOPS or hard_c):
+                held.append(f"'{word}' ({re.sub(r'[^A-Za-z]', '', a)} held {s:.1f} s before the {first.upper()})")
+    if held:
+        flags.append(", ".join(held[:6]) + (" ..." if len(held) > 6 else "") + ": the singer sings a syllable's "
+                     "opening consonant at the end of the note before it, so a long note before a T, D, K, P or B "
+                     "ends on that consonant ('Sa-tur-day' came back 'Sat turd day'). Give those words shorter, "
+                     "moving notes, or words whose later syllables open on a vowel, L, M, N, S or W")
+    if not flags:
+        return {}
+    return {"flags": flags, "next": "Fix the words before rendering: a render takes minutes, this took none"}

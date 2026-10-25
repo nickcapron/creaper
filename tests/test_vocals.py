@@ -488,6 +488,10 @@ def _vocalvst_bridge(tmp_path, monkeypatch, log_on_render=True, sounds_after=Non
             return {}
         if cmd == "set_fx_parameters":                  # the plugin's newer knobs, in one call
             return {}
+        if cmd == "update_fx":                          # the window opened to wake a stalled timer
+            return {}
+        if cmd == "qn_to_times":                        # 120 BPM: a quarter note is 0.5 s
+            return [q * 0.5 for q in kw["qns"]]
         if cmd == "transport":
             if kw.get("action") == "play":           # the plugin logs its capture after the pass
                 with log.open("a") as f:
@@ -539,7 +543,7 @@ def test_render_vocalvst_sets_lyrics_plays_the_pass_then_renders(tmp_path, monke
     out = vocal_tools.render_vocalvst(track="Vocal", lyrics="we ride at dawn to-night", mode="rap")
     cmds = [c for c, _ in calls]
     assert cmds.index("apply_fx_state") < cmds.index("transport") < cmds.index("recording_status")
-    assert vocal_tools.vocalvst_lyrics(state["chunk"]) == "we ride at dawn to night"
+    assert vocal_tools.vocalvst_lyrics(state["chunk"]) == "we ride at dawn to-night"   # hyphens kept: one word, two notes
     assert vocal_tools.vocalvst_bank(state["chunk"]).endswith("Canary_DS") and out["voicebank"] == "Canary_DS"
     params = [(kw["parameter"], kw["display_text"]) for c, kw in calls if c == "set_fx_parameter"]
     assert params == [("Mode", "Rap"), ("Render", "On")]
@@ -550,7 +554,7 @@ def test_render_vocalvst_sets_lyrics_plays_the_pass_then_renders(tmp_path, monke
     assert cmds.index("render_audio") < cmds.index("transport")
     assert "render_audio" not in cmds[cmds.index("transport"):cmds.index("set_fx_parameter", cmds.index("set_fx_parameter") + 1)]
     assert out["result"].startswith("Rendered: 1 phrase") and out["captured"]["notes"] == 6
-    assert out["lyrics"] == "we ride at dawn to night" and "warning" not in out
+    assert out["lyrics"] == "we ride at dawn to-night" and "warning" not in out
 
 
 TIGER_CONFIG = """# v106
@@ -869,7 +873,7 @@ def test_add_vocal_harmony_stacks_a_third_above_with_the_lead_words(tmp_path, mo
     assert [n["pitch"] for n in added["notes"]] == [64, 65, 67, 67, 65, 64] and added["replace"]   # C D E E D C, a third up
     props = next(kw for c, kw in calls if c == "set_track_properties" and "pan" in kw)
     assert props == {"track": "Vocal Harmony", "pan": -0.4, "volume_db": -6.0}
-    assert vocal_tools.vocalvst_lyrics(state["chunk"]) == "we ride at dawn to night"   # the same words
+    assert vocal_tools.vocalvst_lyrics(state["chunk"]) == "we ride at dawn to-night"   # the same words, still hyphenated
     expr = next(kw for c, kw in calls if c == "set_fx_parameter" and kw["parameter"] == "Expression")
     assert expr["value"] == 0.6 and expr["track"] == "Vocal Harmony"
     assert out["items"] == 1 and out["key"] == "C major" and out["render"].startswith("Rendered") and "warning" not in out
@@ -984,3 +988,79 @@ def test_render_vocalvst_trusts_the_log_when_the_switch_stays_on(tmp_path, monke
     monkeypatch.setattr(vocal_tools.time, "monotonic", _FakeClock())
     out = vocal_tools.render_vocalvst(track=1, lyrics="go _ go _ go _")
     assert out["result"].startswith("Rendered")
+
+
+def test_render_vocalvst_reports_what_a_listener_hears_and_what_trips_the_singer(tmp_path, monkeypatch):
+    from creaper import asr, lyric_melody, vocal_tools
+
+    calls, state = _vocalvst_bridge(tmp_path, monkeypatch, sounds_after=0)
+    monkeypatch.setattr(lyric_melody, "_dictionary_cache", {"we": "1", "ride": "1", "at": "1", "dawn": "1", "tonight": "01"})
+    monkeypatch.setattr(asr, "available", lambda: True)
+    heard = []
+    monkeypatch.setattr(asr, "transcribe", lambda audio: heard.append(len(audio)) or ("Weird at dawn tonight", []))
+    out = vocal_tools.render_vocalvst(track="Vocal", lyrics="we ride at dawn to-night")
+    # The take is rendered alone once more, after the plugin's result, and heard as one line.
+    cmds = [c for c, _ in calls]
+    assert cmds.count("render_audio") == 2 and cmds.index("render_audio", cmds.index("render_audio") + 1) > cmds.index("transport")
+    assert len(heard) == 1
+    assert out["heard"]["heard"] == [{"line": "we ride at dawn tonight", "heard_as": "Weird at dawn tonight",
+                                      "words_matched": 0.67, "at_qn": 4.0, "missed": ["ride"]}]
+    assert out["heard"]["unclear_lines"] == ["we ride at dawn tonight"]
+    assert out["next"].startswith("rewrite the lines in heard.unclear_lines") and "lyric_check" not in out
+
+    # A word the singer's dictionary lacks is named before the render; hear_words=False skips the hearing.
+    heard.clear()
+    out = vocal_tools.render_vocalvst(track="Vocal", lyrics="we ride at dawn to-nite", hear_words=False)
+    assert "no 'tonite'" in out["lyric_check"]["flags"][0] and "heard" not in out and not heard
+
+    monkeypatch.setattr(asr, "available", lambda: False)
+    out = vocal_tools.render_vocalvst(track="Vocal", lyrics="we ride at dawn to-night")
+    assert out["heard"].startswith("not checked: pip install")
+
+
+def test_sung_lines_split_at_rests_and_follow_the_words(monkeypatch):
+    from creaper import vocal_tools
+
+    monkeypatch.setattr(vocal_tools, "call", lambda cmd, **kw: [q * 0.5 for q in kw["qns"]])
+    notes = [{"pitch": 60, "start": s, "length": ln, "velocity": 100}
+             for s, ln in ((0.0, 0.9), (1.0, 0.9), (2.0, 1.5), (5.0, 0.9), (6.0, 0.9), (7.0, 0.9), (8.0, 2.0))]
+    parts = [{"start": {"qn": 8.0}, "notes": notes}]
+    lines = vocal_tools.sung_lines(parts, "Sa-tur-day night _ ba-by")     # the rest of 1.5 QN splits the lines
+    assert lines == [{"line": "Saturday", "start": 4.0, "end": 5.75, "at_qn": 8.0},
+                     {"line": "night baby", "start": 6.5, "end": 9.0, "at_qn": 13.0}]
+    assert vocal_tools.sung_lines(parts, "too few words") == []
+
+
+def test_render_vocalvst_wakes_a_plugin_that_ignores_its_switch(tmp_path, monkeypatch):
+    from creaper import vocal_tools
+
+    calls, state = _vocalvst_bridge(tmp_path, monkeypatch, log_on_render=False, takes_switch=False, sounds_after=1)
+    inner = vocal_tools.call
+    state["woken"] = False
+
+    def wakes_on_window(cmd, **kw):
+        if cmd == "update_fx" and kw.get("show"):
+            state["woken"] = True
+        if cmd == "get_fx_parameters" and state["woken"]:
+            return {"parameters": [{"name": "Render", "display": "Off", "value": 0}]}
+        return inner(cmd, **kw)
+
+    monkeypatch.setattr(vocal_tools, "call", wakes_on_window)
+    monkeypatch.setattr(vocal_tools.time, "monotonic", _FakeClock())
+    out = vocal_tools.render_vocalvst(track=1)
+    shows = [kw.get("show") for c, kw in calls if c == "update_fx"]
+    assert shows == [True, False] and "opened and closed to wake it" in out["woken"]
+    assert out["result"].startswith("Rendered")
+
+
+def test_the_plugin_gets_whole_hyphenated_words_and_a_slice_gets_them_back():
+    from creaper import vocal_tools
+
+    line = [{"pitch": 60, "start": float(i), "length": 0.9} for i in range(7)]
+    assert vocal_tools.vocalvst_lyric_string("Sa-tur-day night, _ ba-by", line) == "Sa-tur-day night, + ba-by"
+    with pytest.raises(ValueError, match="7 notes"):
+        vocal_tools.vocalvst_lyric_string("Sa-tur-day night", line)
+    per_note = vocal_tools.vocalvst_per_note("Sa-tur-day night, + ba-by")
+    assert per_note == [(0, "Sa"), (0, "tur"), (0, "day"), (1, "night,"), (-1, "+"), (3, "ba"), (3, "by")]
+    assert vocal_tools.vocalvst_join(per_note) == "Sa-tur-day night, _ ba-by"
+    assert vocal_tools.vocalvst_join(per_note[3:]) == "night, _ ba-by"       # a chorus slice keeps its words whole

@@ -17,7 +17,7 @@ from typing import Annotated, Callable, Literal
 import numpy as np
 from pydantic import Field
 
-from . import analysis, asr, composer, harmony, samplelib, singing, speech, talkbox, theory
+from . import analysis, asr, composer, harmony, lyric_melody, samplelib, singing, speech, talkbox, theory
 from . import sample_tools  # the module, not its names: it may still be loading (circular import)
 from .server import READ_ONLY, ItemId, TrackRef, bridge, call, tool
 
@@ -573,6 +573,42 @@ def singer_syllables(lyrics: str, line: list[dict], hold: str = "-") -> list[str
     return out
 
 
+def vocalvst_lyric_string(lyrics: str, line: list[dict]) -> str:
+    """The lyrics as VocalVST takes them: the words as typed, hyphens kept ('Sa-tur-day'
+    is one word on three notes: the plugin looks the whole word up and sings its real
+    syllables, s-ae | dx-er | dx-ey; typed apart, 'Sa tur day' is three words sounded
+    out by letter, which is where "Sat turd day" came from), and '+' for a held note.
+    One syllable or hold per note, checked against the line."""
+    singer_syllables(lyrics, line, hold="+")
+    return " ".join("+" if tk in ("_", "-", "+") else tk for tk in lyrics.split())
+
+
+def vocalvst_per_note(lyrics: str) -> list[tuple[int, str]]:
+    """A VocalVST lyric string as one entry per note: (word number, piece), holds as
+    (-1, '+'), so a slice of notes can be given its words back (vocalvst_join)."""
+    out: list[tuple[int, str]] = []
+    for w, tk in enumerate(lyrics.split()):
+        if tk in ("_", "-", "+"):
+            out.append((-1, "+"))
+        else:
+            out += [(w, p) for p in tk.split("-") if p] or [(w, tk)]
+    return out
+
+
+def vocalvst_join(per_note: list[tuple[int, str]]) -> str:
+    """vocalvst_per_note's entries back into a lyric string: pieces of one word joined
+    with hyphens, holds as '_'."""
+    words: list[str] = []
+    last = None
+    for w, piece in per_note:
+        if w >= 0 and w == last:
+            words[-1] += "-" + piece
+        else:
+            words.append("_" if w < 0 else piece)
+        last = w
+    return " ".join(words)
+
+
 def _vlq(n: int) -> bytes:
     out = [n & 0x7F]
     n >>= 7
@@ -990,30 +1026,102 @@ def _wait_for_stop(expected_seconds: float) -> bool:
     return False
 
 
-def _track_audio(track: str | int, start: float, end: float) -> tuple[bool, bytes]:
-    """Whether the track sounds over a span (rendered offline), and a digest of that audio."""
-    import hashlib
-
+def _render_track(track: str | int, start: float, end: float) -> tuple[np.ndarray, int]:
+    """The track's audio over a span, rendered offline (frames x channels, and its rate).
+    Straight to the bridge: server.call treats an all-silent render as offline media and
+    re-renders after a slow action, but silence is expected here before the first take."""
     import soundfile as sf
 
-    # Straight to the bridge: server.call treats an all-silent render as offline media and
-    # re-renders after a slow action, but silence is expected here before the first take.
     render = bridge.call("render_audio", {"track": track, "start_seconds": start, "end_seconds": end}, timeout=300.0)
     files = list(render.get("files") or [])
     renders = (bridge.directory / "renders").resolve()
-    sounding, digest = False, hashlib.sha1()
+    audio, fs = np.zeros((0, 2), dtype="float32"), 48000
     try:
         for f in files:
             if renders not in Path(f).resolve().parents:
                 raise ValueError(f"refusing to read a render outside {renders}: {f}")
-            audio, _ = sf.read(f, dtype="float32", always_2d=True)
-            sounding = sounding or bool(np.abs(audio).max() > 10 ** (-60 / 20))
-            digest.update(np.round(audio, 4).tobytes())
+            audio, fs = sf.read(f, dtype="float32", always_2d=True)
     finally:
         if not os.environ.get("CREAPER_KEEP_RENDERS"):
             for f in files:
                 Path(f).unlink(missing_ok=True)
-    return sounding, digest.digest()
+    return audio, int(fs)
+
+
+def _track_audio(track: str | int, start: float, end: float) -> tuple[bool, bytes]:
+    """Whether the track sounds over a span (rendered offline), and a digest of that audio."""
+    import hashlib
+
+    audio, _ = _render_track(track, start, end)
+    sounding = bool(len(audio) and np.abs(audio).max() > 10 ** (-60 / 20))
+    return sounding, hashlib.sha1(np.round(audio, 4).tobytes()).digest()
+
+
+def sung_lines(parts: list[dict], lyrics: str, rest_qn: float = asr.LINE_REST_QN) -> list[dict]:
+    """The lyric lines of a VocalVST track, in project seconds: the lyric string's words
+    (hyphenated syllables, '_' holds) laid over the items' notes in order, split into
+    lines at rests of `rest_qn` or more (and before a line would outlast what the
+    recogniser hears at once). Each is {'line', 'start', 'end', 'at_qn'}; empty when the
+    words and notes don't line up one to one."""
+    spans: list[tuple[float, float]] = []            # each note's (start, end) in project QN
+    for part in parts:
+        base = float((part.get("start") or {}).get("qn") or 0.0)
+        spans += [(base + n["start"], base + n["start"] + n["length"]) for n in melody_line(part.get("notes", []))]
+    words: list[tuple[str, int, int]] = []           # (word, first note, last note)
+    at = 0
+    for tk in lyrics.split():
+        if tk in ("_", "-", "+"):
+            if words:
+                words[-1] = (words[-1][0], words[-1][1], at)
+            at += 1
+            continue
+        n = len([p for p in tk.split("-") if p]) or 1
+        words.append((re.sub(r"[^A-Za-z0-9']", "", tk.replace("-", "")) or tk, at, at + n - 1))
+        at += n
+    if at != len(spans) or not words:
+        return []
+    qns = [q for s in spans for q in s]
+    times = call("qn_to_times", qns=qns)
+    seconds = [(times[2 * i], times[2 * i + 1]) for i in range(len(spans))]
+    lines: list[dict] = []
+    group: list[tuple[str, int, int]] = []
+    for w in words:
+        if group:
+            prev = group[-1]
+            long = seconds[w[2]][1] - seconds[group[0][1]][0] > asr.MAX_LINE_S
+            if spans[w[1]][0] - spans[prev[2]][1] >= rest_qn - 1e-6 or long:
+                lines.append(group)
+                group = []
+        group.append(w)
+    if group:
+        lines.append(group)
+    return [{"line": " ".join(w[0] for w in g), "start": round(seconds[g[0][1]][0], 3),
+             "end": round(seconds[g[-1][2]][1], 3), "at_qn": round(spans[g[0][1]][0], 3)} for g in lines]
+
+
+def vocalvst_lines(track: str | int) -> list[dict]:
+    """sung_lines for a track as it stands: its VocalVST's lyrics over its items' notes."""
+    fx, items = _vocalvst_fx(track)
+    lyrics = vocalvst_lyrics(call("capture_fx_state", track=track, fx=fx["index"]).get("chunk") or "")
+    if not lyrics.strip():
+        return []
+    parts = [call("get_midi_notes", item_id=item["id"], limit=20000) for item in items]
+    return sung_lines(parts, lyrics)
+
+
+HEAR_NEXT = ("render_vocalvst again with the new lyrics (write_vocal_melody first when the words change their "
+             "syllable count)")
+
+
+def _hear_take(track: str | int, parts: list[dict], lyrics: str, span: tuple[float, float]) -> dict:
+    """What a speech recogniser hears in the rendered take, line by line: the track
+    rendered alone over the pass and transcribed against the lyrics (asr.hear_lines)."""
+    lines = sung_lines(parts, lyrics)
+    if not lines:
+        return {"error": "the lyrics and notes don't line up one to one, so the lines couldn't be placed"}
+    audio, fs = _render_track(track, *span)
+    rel = [{**ln, "start": ln["start"] - span[0], "end": ln["end"] - span[0]} for ln in lines]
+    return asr.hear_lines(audio, fs, rel, next_step=HEAR_NEXT)
 
 
 # The plugin's log lines that end a render. The others (the pass's "run ... captured",
@@ -1051,6 +1159,9 @@ def _log_details(log_size: int) -> dict:
     device = re.search(r"device: ([^(\r\n]+)", new)
     if device:
         out["device"] = device.group(1).strip()
+    timing = re.search(r"timing: (model|rule[^\r\n]*)", new)
+    if timing:
+        out["timing"] = timing.group(1).strip()      # 'rule (<why>)': the bank's duration model didn't run
     return out
 
 
@@ -1072,24 +1183,37 @@ def _set_knobs(track: str | int, fx: int, wanted: dict[str, float]) -> tuple[lis
     return [name for name in wanted if name not in have], failed
 
 
-RENDER_SWITCH_WAIT_S = 60.0   # the 2026-10-24 build loads its models (27 s on the GPU) before it takes the switch
+RENDER_SWITCH_WAIT_S = 60.0   # generous: the plugin resets the switch and logs 'render started' before any model loads
+WAKE_AFTER_S = 15.0           # a switch still untaken by then gets the plugin's window opened and closed
 
 
-def _wait_for_render_switch(track: str | int, fx: int, log_size: int, seconds: float = RENDER_SWITCH_WAIT_S) -> None:
+def _wait_for_render_switch(track: str | int, fx: int, log_size: int, seconds: float = RENDER_SWITCH_WAIT_S) -> str | None:
     """The plugin's Render switch resets itself once its timer sees it; one that stays on
     with nothing in the log isn't running, and waiting for its result would be a waste.
     The newer build keeps the switch on while it renders and logs 'render started' first,
     so that line counts as taken (a Donny Benet session was told the plugin wasn't
-    running while it rendered the whole vocal)."""
+    running while it rendered the whole vocal). A switch still untaken after WAKE_AFTER_S
+    gets the plugin's window opened and closed once, which woke a stalled plugin in that
+    session (the cause was JUCE's VST3 wrapper dropping a host parameter change after an
+    offline render; VocalVST builds from 2026-10-25 fix it, and this is the fallback for
+    older ones). Returns a note when that was needed."""
     deadline = time.monotonic() + seconds
+    wake_at: float | None = time.monotonic() + WAKE_AFTER_S
+    woke = None
     while time.monotonic() < deadline:
         _sleep(1.0)
         if "render started" in _log_since(log_size).lower():
-            return
+            return woke
         params = call("get_fx_parameters", track=track, fx=fx, search="Render").get("parameters", [])
         render = next((p for p in params if p.get("name") == "Render"), None)
         if render is None or str(render.get("display", "")).lower() == "off" or float(render.get("value") or 0) < 0.5:
-            return
+            return woke
+        if wake_at is not None and time.monotonic() >= wake_at:
+            wake_at = None
+            call("update_fx", track=track, fx=fx, show=True)
+            _sleep(1.0)
+            call("update_fx", track=track, fx=fx, show=False)
+            woke = f"the plugin hadn't taken its Render switch after {WAKE_AFTER_S:.0f} s; its window was opened and closed to wake it"
     raise ValueError(f"VocalVST never took its Render switch (it stays On after {seconds:.0f} s): the plugin's "
                      "timer isn't being serviced in this REAPER right now, so no render will come from the switch. "
                      "Its Render button renders directly: open its window (update_fx with show=True) and press "
@@ -1133,8 +1257,10 @@ def _wait_for_render(log_size: int, timeout: float, before: tuple[bool, bytes], 
 def render_vocalvst(
     track: TrackRef,
     lyrics: Annotated[str | None, Field(description=(
-        "The words, one syllable per note: 'dan-cing in the dark _' (hyphens split syllables, '_' holds the note "
-        "before). Leave it out for a wordless line: scat syllables in scat mode, 'la' otherwise"))] = None,
+        "The words, one syllable per note: 'dan-cing in the dark _' (hyphens split a word over its notes, '_' "
+        "holds the note before). Always hyphenate, never type a word's syllables apart ('dan cing'): the singer "
+        "looks a hyphenated word up whole and sings its real sounds, while 'dan' and 'cing' alone are sounded "
+        "out by letter. Leave it out for a wordless line: scat syllables in scat mode, 'la' otherwise"))] = None,
     mode: Annotated[Literal["sing", "rap", "scat"], Field(description="sing: pitched, vibrato on held notes; rap: spoken contour, syllables cut to about 220 ms; scat: nonsense syllables when there are no lyrics")] = "sing",
     voice: Annotated[str | None, Field(description=VOICE_HELP)] = None,
     expression: Annotated[float | None, Field(ge=0, le=1, description=(
@@ -1153,6 +1279,10 @@ def render_vocalvst(
     phrase_gap_s: Annotated[float | None, Field(ge=0.2, le=4, description=(
         "Pauses this long or longer split the take into phrases rendered one by one (the plugin's default is 0.8 s)"))] = None,
     timeout_seconds: Annotated[float, Field(ge=30, le=900, description="How long to wait for the render")] = 240,
+    hear_words: Annotated[bool, Field(description=(
+        "Afterwards, transcribe the take with a speech recogniser and report each line as heard, the words it "
+        "missed and the lines to rewrite (needs the creaper[asr] extra; about a minute on a whole song). Off to "
+        "skip it, e.g. for a double of a line already checked"))] = True,
 ) -> dict:
     """Makes VocalVST (the user's singing plugin) sing the MIDI on its track: sets the
     lyrics and mode, plays the transport over every note on the track, silently (the
@@ -1168,13 +1298,18 @@ def render_vocalvst(
     whether its syllables come too fast to understand. Each note's MIDI velocity sets its
     level (about 6 dB either way around the take's middle), so stresses written into the
     notes carry through; breaths, the voice's colour (formant), the take's seed and the
-    phrase gap are the plugin's newer controls."""
+    phrase gap are the plugin's newer controls. Before the render, `lyric_check` names
+    words the singer will stumble on; after it, `heard` is what a speech recogniser
+    made of each line ("Sat turd day night" for "Saturday night"): rewrite the lines in
+    unclear_lines before anyone listens, and don't call the vocal done while there are
+    any."""
     fx, items = _vocalvst_fx(track)
     want = resolve_voice(voice) if voice else None
     line: list[dict] = []
     parts: list[dict] = []
     extended: list[str] = []
     gaps: list[float] = []
+    secs: list[float] | None = []
     for item in items:
         part = call("get_midi_notes", item_id=item["id"], limit=20000)
         parts.append(part)
@@ -1184,11 +1319,16 @@ def render_vocalvst(
             per_qn = part["length_seconds"] / part["length_qn"]
             gaps += [(b["start"] - a["start"]) * per_qn for a, b in zip(notes, notes[1:])
                      if (b["start"] - a["start"]) * per_qn < 1.0]     # not across a rest between lines
+            if secs is not None:
+                secs += [n["length"] * per_qn for n in notes]
+        else:
+            secs = None
         if _cover_notes(item, part) is not None:
             extended.append(f"{item['id']} to {item['end'].get('seconds', '?')} s")
     if not line:
         raise ValueError("the track's MIDI items have no notes to sing")
-    text = " ".join(singer_syllables(lyrics, line, hold="+")) if lyrics else ""
+    text = vocalvst_lyric_string(lyrics, line) if lyrics else ""
+    lyric_check = lyric_melody.lint(lyrics, secs) if lyrics and mode != "scat" else {}
 
     state = call("capture_fx_state", track=track, fx=fx["index"])
     if not state.get("chunk"):
@@ -1278,7 +1418,7 @@ def render_vocalvst(
 
     log_size = VOCALVST_LOG.stat().st_size if VOCALVST_LOG.exists() else 0
     call("set_fx_parameter", track=track, fx=fx["index"], parameter="Render", display_text="On")
-    _wait_for_render_switch(track, fx["index"], log_size)
+    woken = _wait_for_render_switch(track, fx["index"], log_size)
     report = _wait_for_render(log_size, timeout_seconds, before, lambda: _track_audio(track, *span))
     out = {"track": track, "mode": mode, "lyrics": text or None, "written_notes": len(line), "captured": captured,
            "expression": expression if expression is not None else "the plugin's own",
@@ -1290,8 +1430,23 @@ def render_vocalvst(
            "range": range_advice([n["pitch"] for n in line], bank, speaker), "result": report,
            "plays": "in sync with the transport over the captured region, and in offline renders (analyze_audio, "
                     "measure_tracks, export_mix); not in audition_instrument",
-           "next": "check it with analyze_audio(track) or check_vocal_clarity; render again after any change "
+           "next": "check it in the mix with check_vocal_clarity after auto_mix; render again after any change "
                    "to the notes or lyrics"}
+    if lyric_check:
+        out["lyric_check"] = lyric_check
+    if woken:
+        out["woken"] = woken
+    if report.startswith("Rendered") and lyrics and mode != "scat" and hear_words and asr.available():
+        try:
+            out["heard"] = _hear_take(track, parts, lyrics, span)
+        except Exception as e:  # noqa: BLE001  (a failed hearing mustn't undo the take)
+            out["heard"] = {"error": f"couldn't transcribe the take: {e}"}
+        if out["heard"].get("unclear_lines"):
+            out["next"] = ("rewrite the lines in heard.unclear_lines (their missed words first; lyric_check says "
+                           "what trips the singer), then " + HEAR_NEXT + "; the vocal isn't done while any remain")
+    elif report.startswith("Rendered") and lyrics and mode != "scat" and hear_words and not asr.available():
+        out["heard"] = ("not checked: pip install \"creaper[asr]\" (faster-whisper, MIT) lets render_vocalvst "
+                        "report what a listener makes of each line")
     if not report.startswith("Rendered"):
         out["warning"] = "the plugin reports: " + report
     if missing:
@@ -1375,7 +1530,7 @@ def write_vocal_melody(
     written and the `lyrics` string to give render_vocalvst, one token per note; use
     it instead of write_melody for anything VocalVST sings. Put the item's start a bar
     before the first downbeat when the line should begin with a pickup."""
-    from . import lyric_melody, music_tools
+    from . import music_tools
 
     lines = [ln.strip() for ln in re.split(r"[/\n]+", lyrics) if ln.strip()]
     k = music_tools._key(key)
@@ -1404,6 +1559,13 @@ def write_vocal_melody(
     if out["syllables_per_beat_max"] > SUNG_MAX_PER_BEAT:
         result["warning"] = (f"{out['syllables_per_beat_max']:g} syllables a beat at the busiest: words this fast "
                              "blur; give the lines more bars (line_bars) or fewer words")
+    try:
+        bpm = float(call("get_project_overview").get("tempo_bpm") or 120)
+    except Exception:  # noqa: BLE001 - a busy REAPER: lint at a typical tempo
+        bpm = 120.0
+    check = lyric_melody.lint(out["lyrics"], [n["length"] * 60.0 / bpm for n in out["notes"]])
+    if check:
+        result["lyric_check"] = check
     return result
 
 
@@ -1434,8 +1596,6 @@ def add_vocal_harmony(
     rendered. Call it after the lead is rendered and sits right; choruses stacked this
     way (a double hard left, a third above hard right) are what separates a demo
     vocal from a record. Takes as long as the lead's render did."""
-    from . import lyric_melody
-
     fx, items = _vocalvst_fx(track)
     details = call("get_track_details", track=track)
     lead_name = details.get("name") or str(track)
@@ -1443,7 +1603,7 @@ def add_vocal_harmony(
     lead_voice = vocalvst_attr(chunk, "speaker")
     if voice is None and interval != "unison":
         voice = lead_voice or None
-    tokens = vocalvst_lyrics(chunk).split()
+    per_note = vocalvst_per_note(vocalvst_lyrics(chunk))
     parts = [(item, melody_line(call("get_midi_notes", item_id=item["id"], limit=20000).get("notes", []))) for item in items]
     all_notes = [n for _, notes in parts for n in notes]
     if not all_notes:
@@ -1473,13 +1633,13 @@ def add_vocal_harmony(
                       "velocity": n.get("velocity", 96), "channel": n.get("channel", 1)} for n in notes]
             call("add_midi_notes", item_id=new_item["id"], notes=moved, replace=True)
             copied += 1
-            if len(tokens) == len(all_notes):
-                sung += tokens[at:at + count]
+            if len(per_note) == len(all_notes):
+                sung += per_note[at:at + count]
         at += count
     if not copied:
         raise ValueError("none of the lead's items start in that range: check start_bar/end_bar against get_track_details")
     call("set_track_properties", track=new_track, pan=pan, volume_db=volume_db)
-    lyrics = " ".join(sung) if sung else None
+    lyrics = vocalvst_join(sung) if sung else None
     if lyrics and lyrics.split()[0] in ("+", "_", "-"):
         lyrics = "la " + " ".join(lyrics.split()[1:])      # a slice can't start on a hold
     render = render_vocalvst(new_track, lyrics=lyrics, mode="sing", voice=voice, expression=expression,

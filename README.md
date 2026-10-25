@@ -228,9 +228,11 @@ individual steps are below if you'd rather do them yourself.
   sounds-alike score to `compare_to_reference`. About 1 GB with the model, which
   downloads the first time it's used.
 - `creaper[asr]`: a speech recogniser (faster-whisper with Whisper's base.en model, MIT)
-  that transcribes each line of a robot vocal after `add_robot_vocal` and names the
-  lines a listener would mishear, so Claude can rewrite them before you listen. About
-  300 MB with the model, which downloads the first time it's used.
+  that transcribes each line of a vocal, a robot vocal after `add_robot_vocal` or a
+  VocalVST take after `render_vocalvst` (and in the mix, with `check_vocal_clarity`),
+  and names the lines a listener would mishear and the words it missed, so Claude can
+  rewrite them before you listen. About 300 MB with the model, which downloads the first
+  time it's used.
 - `creaper[analysis]`: librosa's beat tracker, for finding the bars of reference tracks.
 
 ```bash

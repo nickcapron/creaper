@@ -148,3 +148,33 @@ def test_diatonic_shift_moves_by_scale_steps():
     assert [lm.diatonic_shift(p, c, 2) for p in (60, 62, 64, 65, 67)] == [64, 65, 67, 69, 71]
     assert lm.diatonic_shift(60, c, -7) == 48 and lm.diatonic_shift(60, c, 0) == 60
     assert lm.diatonic_shift(61, c, 2) in (64, 65)                           # a note off the scale moves from its neighbour
+
+
+# ------------------------------------------------------------------------ lint
+
+
+def test_lint_names_what_the_singer_trips_on(monkeypatch):
+    _dictionary(monkeypatch, **{"saturday": "100", "night": "1", "and": "1", "the": "0", "city": "10", "is": "1",
+                                "warm": "1", "strength": "1", "turning": "10", "neon": "10", "light": "1", "we": "1",
+                                "ride": "1", "at": "1", "dawn": "1", "tonight": "01", "love": "1"})
+    long = [0.9, 0.9, 0.9, 0.3, 0.3, 0.3, 0.3, 0.3, 0.3, 0.6]
+    out = lm.lint("Sa-tur-day night and the ci-ty is warm", long)
+    assert len(out["flags"]) == 1 and "'Sa-tur-day' (Sa held 0.9 s before the T)" in out["flags"][0]
+    assert "tur held 0.9 s before the D" in out["flags"][0] and "render" in out["next"]
+    # On moving notes the same word passes; 'ci-ty' never trips (the T sits inside a short note).
+    assert lm.lint("Sa-tur-day night and the ci-ty is warm", [0.3] * 10) == {}
+    # Holds lengthen the syllable before them, a word's last one here, which no stop follows.
+    assert lm.lint("Sa-tur-day _ _ night", [0.3, 0.3, 0.3, 0.3, 0.3, 0.3]) == {}
+    out = lm.lint("strength world's tur-ning ne-on lite", [0.3] * 6)
+    unknown, piled = out["flags"]
+    assert "no 'world's', 'lite'" in unknown and "letter by letter" in unknown
+    assert "'strength', 'world's'" in piled
+    assert lm.lint("we ride at dawn to-night", None) == {}
+    assert lm.lint("we ride at dawn to-night _ +", [0.3] * 7) == {}
+
+
+def test_lint_without_the_dictionary_checks_only_the_sounds():
+    out = lm.lint("strength lite", [0.3, 0.3])
+    assert len(out["flags"]) == 1 and "'strength'" in out["flags"][0]
+    assert lm._consonant_runs("night") == [1, 1] and lm._consonant_runs("strength") == [3, 2]
+    assert lm._consonant_runs("world's") == [1, 4] and lm._consonant_runs("city") == [1, 1, 0]

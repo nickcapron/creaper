@@ -1,10 +1,12 @@
-"""Optional (pip install "creaper[asr]"): what a listener would hear in a robot vocal,
-from a speech recogniser, faster-whisper (MIT) running OpenAI's Whisper English model
+"""Optional (pip install "creaper[asr]"): what a listener would hear in a vocal, from a
+speech recogniser, faster-whisper (MIT) running OpenAI's Whisper English model
 converted for CTranslate2 (Systran/faster-whisper-base.en, MIT). Each lyric line of a
-take is transcribed from the processed vocal and compared word by word with the
-lyrics: lines the recogniser gets mostly wrong are the ones listeners mishear, so they
-can be rewritten before anyone listens. Nothing loads or downloads (about 150 MB,
-once) until it's used, and only when the extra is installed."""
+take (a robot vocal's word clips, or a sung VocalVST take's rendered audio) is
+transcribed and compared word by word with the lyrics: lines the recogniser gets mostly
+wrong are the ones listeners mishear ("Saturday night and the city is warm" came back
+as "Sat turd day night and the synth tire is born" from a listener and a sung take
+alike), so they can be rewritten before anyone listens. Nothing loads or downloads
+(about 150 MB, once) until it's used, and only when the extra is installed."""
 
 from __future__ import annotations
 
@@ -97,21 +99,39 @@ def words_matched(lyric: str, heard: str) -> float:
     """The share (0-1) of the lyric's key words the recogniser heard, in order (the
     longest common subsequence of the two word lists); a line of only small words
     counts them all."""
+    return match_words(lyric, heard)[0]
+
+
+def match_words(lyric: str, heard: str) -> tuple[float, list[str]]:
+    """words_matched, and the lyric's key words that weren't heard ('rain' when 'cold
+    rain on the glass' came back as 'coating on the glass'), in the lyric's order."""
     a, b = normalize(lyric), normalize(heard)
     a = [w for w in a if w not in SMALL_WORDS] or a
     if not a:
-        return 1.0
+        return 1.0, []
     lyric_tokens = _join_compounds(a, set(b))
     heard_tokens = [t for t, _ in _join_compounds(b, set(a))]
-    # best[j]: the most lyric words matched using the first j heard tokens.
-    best = [0] * (len(heard_tokens) + 1)
+    # best[i][j]: the most lyric words matched using the first i lyric tokens and j heard tokens.
+    rows = [[0] * (len(heard_tokens) + 1)]
     for word, count in lyric_tokens:
-        diagonal = 0
+        prev, row = rows[-1], [0] * (len(heard_tokens) + 1)
         for j, h in enumerate(heard_tokens, 1):
-            above = best[j]
-            best[j] = max(above, best[j - 1], diagonal + count if word == h else 0)
-            diagonal = above
-    return round(best[-1] / len(a), 2)
+            row[j] = max(prev[j], row[j - 1], prev[j - 1] + count if word == h else 0)
+        rows.append(row)
+    # Walk back for the words that took part in the match; the rest were missed.
+    matched: set[int] = set()
+    i, j = len(lyric_tokens), len(heard_tokens)
+    while i > 0 and j > 0:
+        word, count = lyric_tokens[i - 1]
+        if word == heard_tokens[j - 1] and rows[i][j] == rows[i - 1][j - 1] + count:
+            matched.add(i - 1)
+            i, j = i - 1, j - 1
+        elif rows[i - 1][j] >= rows[i][j - 1]:
+            i -= 1
+        else:
+            j -= 1
+    missed = [word for k, (word, _) in enumerate(lyric_tokens) if k not in matched]
+    return round(rows[-1][-1] / len(a), 2), missed
 
 
 def group_lines(clips: list[dict], seconds: list[tuple[float, float]], rest_qn: float = LINE_REST_QN,
@@ -149,32 +169,75 @@ def line_audio(paths: list[Path], offsets: list[float], pad: float = PAD_S) -> n
 
 
 def check_lines(clips: list[dict], seconds: list[tuple[float, float]]) -> dict:
-    """What the recogniser heard in each lyric line of a take (clips as placed: 'path',
-    'start_qn', 'end_qn', 'word'), and the lines to rewrite."""
-    heard, seen = [], set()
+    """What the recogniser heard in each lyric line of a robot vocal (clips as placed:
+    'path', 'start_qn', 'end_qn', 'word'), and the lines to rewrite."""
+    entries = []
     for idx in group_lines(clips, seconds):
         lyric = " ".join(clips[i]["word"] for i in idx if clips[i]["word"] not in ("_", "-"))
         t0 = seconds[idx[0]][0]
-        text, unsure = transcribe(line_audio([Path(clips[i]["path"]) for i in idx],
-                                             [seconds[i][0] - t0 for i in idx]))
+        audio = line_audio([Path(clips[i]["path"]) for i in idx], [seconds[i][0] - t0 for i in idx])
+        entries.append((lyric, {"at_qn": round(clips[idx[0]]["start_qn"], 3)}, audio))
+    return report(entries, "sing again with replace=True")
+
+
+LINE_TAIL_S = 0.25        # a sung line's last word rings on past its note
+
+
+def hear_lines(audio: np.ndarray, fs: int, lines: list[dict], next_step: str = "render again") -> dict:
+    """What the recogniser hears in each lyric line of a sung take: `audio` (mono, or
+    frames x channels) at `fs`, and the lines as {'line': the words, 'start', 'end'} in
+    seconds from the audio's start (plus anything else to carry into the report, such
+    as 'at_bar'). Same report as check_lines."""
+    from .perception import _resample
+
+    mono = np.asarray(audio, dtype=np.float32)
+    if mono.ndim > 1:
+        mono = mono.mean(axis=1)
+    pad = np.zeros(int(PAD_S * RATE), dtype=np.float32)
+    entries = []
+    for ln in lines:
+        a = max(0, int(round(ln["start"] * fs)))
+        b = min(len(mono), int(round((ln["end"] + LINE_TAIL_S) * fs)))
+        clip = _resample(mono[a:b], fs, RATE).astype(np.float32) if b > a else np.zeros(0, dtype=np.float32)
+        peak = float(np.abs(clip).max()) if len(clip) else 0.0
+        if peak > 0:
+            clip = clip / peak * 0.9
+        extra = {k: v for k, v in ln.items() if k not in ("line", "start", "end")}
+        entries.append((ln["line"], extra, np.concatenate([pad, clip, pad])))
+    return report(entries, next_step)
+
+
+def report(entries: list[tuple[str, dict, np.ndarray]], next_step: str) -> dict:
+    """The lines (lyric, extra fields, 16 kHz mono audio) transcribed and compared with
+    their words; repeated lines heard the same way are reported once."""
+    heard, seen = [], set()
+    total = matched_total = 0.0
+    for lyric, extra, audio in entries:
+        text, unsure = transcribe(audio)
+        share, missed = match_words(lyric, text)
+        key_words = [w for w in normalize(lyric) if w not in SMALL_WORDS] or normalize(lyric)
+        total += len(key_words)
+        matched_total += share * len(key_words)
         if (lyric, tuple(normalize(text))) in seen:
             continue  # a repeated line heard the same way
         seen.add((lyric, tuple(normalize(text))))
         limit = 2 * len(lyric.split()) + 4
         if len(text.split()) > limit:  # a recogniser stuck repeating itself ('ah, ah, ah, ...')
             text = " ".join(text.split()[:limit]) + " ..."
-        heard.append({"line": lyric, "heard_as": text, "words_matched": words_matched(lyric, text),
-                      "at_qn": round(clips[idx[0]]["start_qn"], 3)})
+        heard.append({"line": lyric, "heard_as": text, "words_matched": share, **extra})
+        if missed and share < 1.0:
+            heard[-1]["missed"] = missed[:8]
         if unsure:
             heard[-1]["unsure_of"] = unsure[:8]
     unclear = sorted({h["line"] for h in heard if h["words_matched"] < UNCLEAR}, key=[h["line"] for h in heard].index)
-    out = {"heard": heard, "heard_by": f"{MODEL} (speech recogniser, {LICENSE}); words_matched: the share of "
-                                      "each line's key words (not 'the', 'on', 'into') it heard"}
+    out = {"heard": heard, "words_heard": round(matched_total / total, 2) if total else None,
+           "heard_by": f"{MODEL} (speech recogniser, {LICENSE}); words_matched: the share of each line's key "
+                       "words (not 'the', 'on', 'into') it heard; missed: the ones it didn't"}
     if unclear:
         out["unclear_lines"] = unclear
         out["unclear_next"] = ("A speech recogniser misheard these lines, so listeners will too: rewrite them "
-                               "(common words, open vowels, fewer consonant clusters) and sing again with "
-                               "replace=True.")
+                               "(common words, open vowels, fewer consonant clusters, the missed words first) "
+                               f"and {next_step}.")
     if any("unsure_of" in h for h in heard):
         out["unsure_note"] = ("unsure_of: words heard right but barely; listeners often miss those too, so "
                               "consider rewriting those lines as well.")

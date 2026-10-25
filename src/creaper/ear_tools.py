@@ -12,7 +12,7 @@ import numpy as np
 import soundfile as sf
 from pydantic import Field
 
-from . import analysis, genres, harmony, perception, structure
+from . import analysis, asr, genres, harmony, perception, structure
 from .server import READ_ONLY, Bar, BridgeError, bridge, call, tool
 from . import vocal_tools  # the module, not its names: it may still be loading (circular import)
 
@@ -76,6 +76,18 @@ def _sings_itself(details: dict) -> bool:
     return any("vocalvst" in (f.get("name") or "").lower() for f in details.get("fx", []))
 
 
+def _sung_lines_in(track: str | int, render: dict) -> list[dict]:
+    """A VocalVST track's lyric lines that the render covers, in seconds from its start."""
+    t0 = render["start"]["seconds"]
+    t1 = (render.get("end") or {}).get("seconds")
+    out = []
+    for ln in vocal_tools.vocalvst_lines(track):
+        if ln["start"] < t0 - 0.05 or (t1 is not None and ln["end"] > t1 + 0.05):
+            continue
+        out.append({**ln, "start": round(ln["start"] - t0, 3), "end": round(ln["end"] - t0, 3)})
+    return out
+
+
 def _clean_timeline(clips: list[dict], start: float, frames: int, fs: int) -> np.ndarray:
     clean = np.zeros(frames)
     for c in clips:
@@ -100,10 +112,21 @@ def measure_vocal_clarity(track: str | int, start_bar: float | None = None, end_
     out: dict = {"track": measured}
     sung = any(c["file"] is None for c in clips)
     if sung:
-        # No clean words: the solo render is the reference, so "alone" can't be scored
-        # and in_mix says how much the rest of the mix covers the voice.
+        # No clean words: a speech recogniser (when installed) hears the lines in the
+        # solo render and in the mix instead; the solo render is also the STOI reference
+        # for how much the rest of the mix covers the voice.
         solo, fs, render = _render(measured, start_bar, end_bar)
         out["alone"] = {"score": None, "note": "a singing instrument has no clean words to compare with"}
+        lines = _sung_lines_in(measured, render) if asr.available() else []
+        if lines:
+            words = asr.hear_lines(solo, fs, lines, next_step="render_vocalvst again")
+            out["alone"] = {"words_heard": words["words_heard"], "heard": words["heard"], "heard_by": words["heard_by"]}
+            if words.get("unclear_lines"):
+                out["alone"]["unclear_lines"] = words["unclear_lines"]
+        elif asr.available():
+            out["alone"]["note"] += "; its lyrics and notes don't line up, so the lines couldn't be transcribed"
+        else:
+            out["alone"]["note"] += '; pip install "creaper[asr]" lets a speech recogniser report what it hears'
         if in_mix:
             audio, fs2, render2 = _render("master", start_bar, end_bar)
             heard = audio.mean(axis=1)
@@ -114,6 +137,28 @@ def measure_vocal_clarity(track: str | int, start_bar: float | None = None, end_
                              "scale": "STOI of the mix against the vocal's own solo render: 1 would be the voice "
                                       "alone; lower means the other parts cover it more. Compare before and after "
                                       "a change rather than against the robot-vocal thresholds"}
+            if lines:
+                shift = render["start"]["seconds"] - render2["start"]["seconds"]
+                mixed = asr.hear_lines(audio, fs2, [{**ln, "start": ln["start"] + shift, "end": ln["end"] + shift}
+                                                    for ln in lines], next_step="mix again")
+                out["in_mix"]["words_heard"] = mixed["words_heard"]
+                by_line = {h["line"]: h for h in mixed["heard"]}
+                for h in out["alone"]["heard"]:
+                    m = by_line.get(h["line"])
+                    if m:
+                        h["in_mix"] = {k: m[k] for k in ("heard_as", "words_matched", "missed") if k in m}
+                alone_share, mix_share = words["words_heard"] or 0, mixed["words_heard"] or 0
+                if alone_share < asr.UNCLEAR:
+                    verdict = ("the take itself is unclear (alone, the recogniser got {:.0%} of the key words): rewrite "
+                               "the unclear lines, missed words first, and render_vocalvst again before touching the "
+                               "mix").format(alone_share)
+                elif alone_share - mix_share > 0.15:
+                    verdict = ("clear alone ({:.0%}) but not in the mix ({:.0%}): the other parts cover the words. Turn "
+                               "the vocal up, or cut 1-4 kHz on what plays with it (keys, leads, hats), or duck them "
+                               "under it (setup_sidechain)").format(alone_share, mix_share)
+                else:
+                    verdict = "the words come through alone ({:.0%}) and in the mix ({:.0%})".format(alone_share, mix_share)
+                out["verdict"] = verdict
         return out
     for label, source in (("alone", measured), ("in_mix", "master")):
         if label == "in_mix" and not in_mix:
@@ -146,15 +191,18 @@ def measure_vocal_clarity(track: str | int, start_bar: float | None = None, end_
 
 @tool(annotations=READ_ONLY)
 def check_vocal_clarity(
-    track: Annotated[str | int, Field(description="A robot vocal track (from add_robot_vocal)")],
+    track: Annotated[str | int, Field(description="A robot vocal track (from add_robot_vocal) or a sung VocalVST track")],
     start_bar: Bar = None,
     end_bar: Annotated[float | None, Field(description="Default: where its words are")] = None,
     in_mix: Annotated[bool, Field(description="Also measure it in the full mix (renders the master)")] = True,
 ) -> dict:
-    """How understandable a robot vocal's words are, alone and in the full mix, using
-    STOI (the standard intelligibility measure) against the clean spoken words. Use it
-    instead of guessing: if it's clear alone but not in the mix, the mix is burying it;
-    if it's unclear alone, change the words, notes, voice or style."""
+    """How understandable a vocal's words are, alone and in the full mix. A robot vocal
+    is scored with STOI (the standard intelligibility measure) against its clean spoken
+    words. A sung VocalVST take is transcribed line by line by a speech recogniser,
+    alone and in the mix, and compared with its lyrics (words_heard, each line as
+    heard, the words missed). Use it instead of guessing, and after auto_mix: if it's
+    clear alone but not in the mix, the mix is burying it; if it's unclear alone,
+    change the words, notes or voice and render again."""
     return measure_vocal_clarity(track, start_bar, end_bar, in_mix)
 
 
