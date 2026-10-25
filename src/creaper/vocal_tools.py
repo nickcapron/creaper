@@ -1431,7 +1431,11 @@ def render_vocalvst(
            "plays": "in sync with the transport over the captured region, and in offline renders (analyze_audio, "
                     "measure_tracks, export_mix); not in audition_instrument",
            "next": "check it in the mix with check_vocal_clarity after auto_mix; render again after any change "
-                   "to the notes or lyrics"}
+                   "to the notes or lyrics (builds from 2026-10-25 sing again only the phrases that changed, so a "
+                   "rewritten line costs seconds, not the whole take)"}
+    kept = re.search(r"(\d+) phrases? kept from the last take", report)
+    if kept:
+        out["phrases_kept"] = int(kept.group(1))
     if lyric_check:
         out["lyric_check"] = lyric_check
     if woken:

@@ -1064,3 +1064,23 @@ def test_the_plugin_gets_whole_hyphenated_words_and_a_slice_gets_them_back():
     assert per_note == [(0, "Sa"), (0, "tur"), (0, "day"), (1, "night,"), (-1, "+"), (3, "ba"), (3, "by")]
     assert vocal_tools.vocalvst_join(per_note) == "Sa-tur-day night, _ ba-by"
     assert vocal_tools.vocalvst_join(per_note[3:]) == "night, _ ba-by"       # a chorus slice keeps its words whole
+
+
+def test_render_vocalvst_reports_the_phrases_a_partial_render_kept(tmp_path, monkeypatch):
+    from creaper import vocal_tools
+
+    calls, state = _vocalvst_bridge(tmp_path, monkeypatch, log_on_render=False)
+    inner = vocal_tools.call
+    log = vocal_tools.VOCALVST_LOG
+
+    def partial(cmd, **kw):
+        if cmd == "set_fx_parameter" and kw["parameter"] == "Render":
+            with log.open("a") as f:
+                f.write("2026-10-25T19:00:00.000-07:00#ab12/Vocal Rendered: 4 phrases, 39 notes, 33.5 s, 4 breaths, "
+                        "3 phrases kept from the last take\n")
+        return inner(cmd, **kw)
+
+    monkeypatch.setattr(vocal_tools, "call", partial)
+    out = vocal_tools.render_vocalvst(track=1, lyrics="one two three four five six", hear_words=False)
+    assert out["phrases_kept"] == 3 and out["result"].startswith("Rendered: 4 phrases")
+    assert "only the phrases that changed" in out["next"]
