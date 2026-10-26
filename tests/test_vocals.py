@@ -648,6 +648,21 @@ def test_a_track_with_no_voice_yet_sings_with_the_users_pick_doubled(tmp_path, m
     assert out["voice"] == "tiger_electric" and "credit" not in out          # an asked-for voice stands
     assert vocal_tools.default_voice() == (hanami, "Nectar")
 
+    # A new instance as the plugin makes it: its first bank (Canary), no speaker, never sung.
+    canary = tmp_path / "Canary_DS_v106"
+    canary.mkdir(exist_ok=True)
+    (canary / "dsconfig.yaml").write_text("speakers: []")
+    (tmp_path / "fresh").mkdir()
+    _, state = _vocalvst_bridge(tmp_path / "fresh", monkeypatch)
+    _hanami(tmp_path / "fresh")
+    state["chunk"] = vocal_tools.vocalvst_state_with(state["chunk"], bank=str(canary), speaker="", lyrics="")
+    captured, seen = vocal_tools.vocalvst_captured, []
+    # Nothing captured before the pass (the fake's state always holds the pass's notes).
+    monkeypatch.setattr(vocal_tools, "vocalvst_captured",
+                        lambda chunk: seen.append(1) or ({"notes": 0} if len(seen) == 1 else captured(chunk)))
+    out = vocal_tools.render_vocalvst(track=1, lyrics="one two three four five six")
+    assert out["voice"] == "Nectar" and out["voicebank"] == "Hanami_DS_v10"
+
 
 def test_bank_speakers_reads_the_dsconfig_list():
     from creaper.vocal_tools import bank_speakers

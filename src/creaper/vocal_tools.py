@@ -1496,8 +1496,12 @@ def render_vocalvst(
         changes["lyrics"] = text
     bank = vocalvst_bank(state["chunk"])
     speaker = vocalvst_attr(state["chunk"], "speaker")
-    if want is None and not (bank and (Path(bank) / "dsconfig.yaml").is_file()):
-        want = default_voice()            # a track with no voice yet sings with the user's pick
+    # A track with no voice yet sings with the user's pick. A new VocalVST has one, though:
+    # the plugin loads its first bank (Canary) with no speaker, no lyrics and nothing
+    # captured, so that counts as none (in the rig, Canary sang a line written for Nectar).
+    never_sung = not speaker and not vocalvst_lyrics(state["chunk"]) and not vocalvst_captured(state["chunk"])["notes"]
+    if want is None and (never_sung or not (bank and (Path(bank) / "dsconfig.yaml").is_file())):
+        want = default_voice()
     candidates: list[str] = []
     if want:
         # The bank and speaker go in together: the plugin drops a speaker its bank lacks.
