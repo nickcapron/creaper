@@ -545,14 +545,15 @@ def test_render_vocalvst_sets_lyrics_plays_the_pass_then_renders(tmp_path, monke
     assert cmds.index("apply_fx_state") < cmds.index("transport") < cmds.index("recording_status")
     assert vocal_tools.vocalvst_lyrics(state["chunk"]) == "we ride at dawn to-night"   # hyphens kept: one word, two notes
     assert vocal_tools.vocalvst_bank(state["chunk"]).endswith("Canary_DS") and out["voicebank"] == "Canary_DS"
-    params = [(kw["parameter"], kw["display_text"]) for c, kw in calls if c == "set_fx_parameter"]
-    assert params == [("Mode", "Rap"), ("Render", "On")]
+    params = [(kw["parameter"], kw.get("display_text", kw.get("value"))) for c, kw in calls if c == "set_fx_parameter"]
+    assert params == [("Mode", "Rap"), ("Expression", 0.8), ("Render", "On")]
     play = next(kw for c, kw in calls if c == "transport")
     assert play["action"] == "play" and play["start_seconds"] == 1.7 and play["end_seconds"] == 5.5
-    assert cmds.index("render_audio") < cmds.index("set_fx_parameter", cmds.index("set_fx_parameter") + 1)
+    render_on = next(i for i, (c, kw) in enumerate(calls) if c == "set_fx_parameter" and kw["parameter"] == "Render")
+    assert cmds.index("render_audio") < render_on
     # The snapshot renders before the pass: a render between the pass and the switch stalled the plugin.
     assert cmds.index("render_audio") < cmds.index("transport")
-    assert "render_audio" not in cmds[cmds.index("transport"):cmds.index("set_fx_parameter", cmds.index("set_fx_parameter") + 1)]
+    assert "render_audio" not in cmds[cmds.index("transport"):render_on]
     assert out["result"].startswith("Rendered: 1 phrase") and out["captured"]["notes"] == 6
     assert out["lyrics"] == "we ride at dawn to-night" and "warning" not in out
 
@@ -844,7 +845,7 @@ def test_vocalvst_counts_as_an_installed_singer(monkeypatch):
     assert "render_vocalvst" in vocal_tools.SINGERS["VocalVST"][1]
 
 
-def test_render_vocalvst_sets_expression_only_when_asked(tmp_path, monkeypatch):
+def test_render_vocalvst_sings_a_lead_at_expression_0_8_unless_asked(tmp_path, monkeypatch):
     from creaper import vocal_tools
 
     calls, _ = _vocalvst_bridge(tmp_path, monkeypatch)
@@ -852,9 +853,15 @@ def test_render_vocalvst_sets_expression_only_when_asked(tmp_path, monkeypatch):
     expr = [kw for c, kw in calls if c == "set_fx_parameter" and kw["parameter"] == "Expression"]
     assert expr == [{"track": "Vocal", "fx": 1, "parameter": "Expression", "value": 0.4}] and out["expression"] == 0.4
     calls.clear()
-    out = vocal_tools.render_vocalvst(track="Vocal", lyrics="we ride at dawn to-night")
+    out = vocal_tools.render_vocalvst(track="Vocal", lyrics="we ride at dawn to-night")   # the lead's defaults
+    expr = [kw for c, kw in calls if c == "set_fx_parameter" and kw["parameter"] == "Expression"]
+    assert expr == [{"track": "Vocal", "fx": 1, "parameter": "Expression", "value": 0.8}] and out["expression"] == 0.8
+    assert vocal_tools.LEAD_EXPRESSION == 0.8 and vocal_tools.LEAD_BREATHS == 0.65 and vocal_tools.HARMONY_EXPRESSION < 0.8
+    assert "Breaths" in out["controls_missing"]        # this fake's build has no Breaths knob: said, not claimed
+    calls.clear()
+    out = vocal_tools.render_vocalvst(track="Vocal", lyrics="we ride at dawn to-night", expression=None, breaths=None)
     assert not [kw for c, kw in calls if c == "set_fx_parameter" and kw["parameter"] == "Expression"]
-    assert out["expression"] == "the plugin's own"
+    assert out["expression"] == "the plugin's own" and "controls_missing" not in out
 
 
 def test_add_vocal_harmony_stacks_a_third_above_with_the_lead_words(tmp_path, monkeypatch):

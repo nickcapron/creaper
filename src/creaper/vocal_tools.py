@@ -1188,6 +1188,13 @@ def _set_knobs(track: str | int, fx: int, wanted: dict[str, float]) -> tuple[lis
     return [name for name in wanted if name not in have], failed
 
 
+# The lead's Expression and Breaths. The user A/B'd two takes of the same lyrics and seed:
+# at 0.5 (what the panel model chose, twice) the voice was "slightly autotuned, some
+# glitching" (95% of pitch frames within 25 cents, about 5 cents of vibrato); at 0.8 it
+# "sounds more human" (22 cents of vibrato at 5.5 Hz, scoops into held notes). Breaths at
+# the plugin's 1.0 came out as loud as the singing a few times.
+LEAD_EXPRESSION, HARMONY_EXPRESSION, LEAD_BREATHS = 0.8, 0.6, 0.65
+
 RENDER_SWITCH_WAIT_S = 60.0   # generous: the plugin resets the switch and logs 'render started' before any model loads
 WAKE_AFTER_S = 15.0           # a switch still untaken by then gets the plugin's window opened and closed
 
@@ -1270,11 +1277,12 @@ def render_vocalvst(
     voice: Annotated[str | None, Field(description=VOICE_HELP)] = None,
     expression: Annotated[float | None, Field(ge=0, le=1, description=(
         "The plugin's Expression: 0 sings the notes exactly as written, 1 lets the voice's own attacks, glides "
-        "and vibrato through (its default). Lower it for a double that has to sit tight under the lead, or "
-        "when a line wobbles; leave it out to keep the plugin's setting"))] = None,
+        "and vibrato through. Keep 0.8 for a lead: the user heard 0.5 as autotuned and glitchy, 0.8 as human "
+        "(vibrato, scoops into held notes). 0.5-0.6 only for a double or harmony that sits under the lead; a "
+        "wobbly line is a lyric or range problem, not an Expression one. null keeps the plugin's setting"))] = LEAD_EXPRESSION,
     breaths: Annotated[float | None, Field(ge=0, le=1, description=(
-        "Breaths before each phrase and in pauses of 0.3 s or more, 0 (none) to 1 (the plugin's default); "
-        "lower for a tight double or a rap"))] = None,
+        "Breaths before each phrase and in pauses of 0.3 s or more, 0 (none) to 1; at 1 (the plugin's default) "
+        "some come out as loud as the singing. Lower for a tight double or a rap; null keeps the plugin's setting"))] = LEAD_BREATHS,
     formant: Annotated[float | None, Field(ge=-1, le=1, description=(
         "The voice's colour, -1 darker to 1 lighter (0: as recorded). Small moves: past about 0.5 either way the "
         "voices break up. A double at 0.1 or -0.1 reads as another singer"))] = None,
@@ -1592,7 +1600,8 @@ def add_vocal_harmony(
     end_bar: Annotated[float | None, Field(ge=1, description="... and before this bar")] = None,
     pan: Annotated[float, Field(ge=-1, le=1, description="Where it sits; a second harmony goes the other way")] = 0.3,
     volume_db: Annotated[float, Field(le=6, description="Its level against the lead (which stays at 0)")] = -6.0,
-    expression: Annotated[float | None, Field(ge=0, le=1, description="render_vocalvst's Expression for this voice; 0.5 keeps a harmony tight")] = 0.6,
+    expression: Annotated[float | None, Field(ge=0, le=1, description=(
+        "render_vocalvst's Expression for this voice: 0.5-0.6 keeps a harmony tight under a lead sung at 0.8"))] = HARMONY_EXPRESSION,
     formant: Annotated[float | None, Field(ge=-1, le=1, description=(
         "render_vocalvst's Formant: a double of the same voice at 0.1 or -0.1 reads as another singer"))] = None,
     seed: Annotated[int | None, Field(ge=0, le=9999, description=(
