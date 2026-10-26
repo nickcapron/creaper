@@ -68,6 +68,84 @@ VELOCITY = {"stressed": 100, "unstressed": 76, "final": 90}
 # that dictionary is on this machine its syllable count and stresses decide, and the
 # spelling rules only shape the pieces (and stand in for words it lacks, and in CI).
 _dictionary_cache: dict[str, str] | None = None
+_phones_cache: dict[str, str] = {}      # word -> its CMU phones, lower case, no stress digits
+
+# Pronunciation overrides (VocalVST builds from 2026-10-25 evening): 'Sa-tur-day[s ae dx er d ey]'
+# replaces the dictionary's sounds for that word; the phonemes are split over the hyphenated
+# pieces at the vowels, so the override needs as many vowels as the word has pieces. Symbols are
+# lower-case ARPAbet without stress digits plus dx (the American flap) and ax (schwa); one the
+# voicebank lacks is substituted or dropped and named on the plugin's Rendered line.
+OVERRIDE_RE = re.compile(r"\[([^\]]*)\]")
+TOKEN_RE = re.compile(r"[^\s\[\]]*\[[^\]]*\][^\s\[\]]*|\S+")
+ARPABET = set("aa ae ah ao aw ay b ch d dh eh er ey f g hh ih iy jh k l m n ng ow oy p r s sh t th uh uw v w y z zh "
+              "dx ax".split())
+ARPABET_VOWELS = {p for p in ARPABET if p[0] in "aeiou"}
+# Overrides picked by ear (the user A/B'd three Saturdays on TIGER disco): the bank's own
+# 'saturday' flaps the d of 'day' too, so it sang "Sat-er-ray".
+PRONOUNCE = {"saturday": "s ae dx er d ey"}
+OVERRIDES_SINCE = 1792976400.0    # 2026-10-26 01:00 UTC (18:00 Pacific): plugin builds older than this read '[s ae]' as words
+
+
+def tokens(lyrics: str) -> list[str]:
+    """A lyric string's tokens: whitespace-separated, except that a pronunciation
+    override's brackets hold together ('Sa-tur-day[s ae dx er d ey]' is one token)."""
+    return TOKEN_RE.findall(lyrics)
+
+
+def split_override(token: str) -> tuple[str, list[str] | None]:
+    """The token without its override, and the override's phonemes (None when it has
+    none): 'Sa-tur-day[S AE1 dx er d ey],' -> ('Sa-tur-day,', ['s', 'ae', 'dx', 'er', 'd', 'ey'])."""
+    m = OVERRIDE_RE.search(token)
+    if not m:
+        return token, None
+    phones = [re.sub(r"[0-9]", "", p.lower()) for p in m.group(1).split()]
+    return token[:m.start()] + token[m.end():], phones
+
+
+def has_overrides(lyrics: str) -> bool:
+    return bool(OVERRIDE_RE.search(lyrics))
+
+
+def strip_overrides(lyrics: str) -> str:
+    """The lyrics without their overrides (a bracket on its own becomes 'm')."""
+    out = []
+    for tk in tokens(lyrics):
+        plain, phones = split_override(tk)
+        out.append(plain or (phones and "".join(p for p in phones if p.isalpha())[:3]) or "m")
+    return " ".join(out)
+
+
+def overrides_supported() -> bool:
+    """Whether the installed VocalVST reads pronunciation overrides: its binary is newer
+    than OVERRIDES_SINCE. True when no plugin is found (nothing to lose)."""
+    for path in _cmudict_paths():
+        binary = path.parent / "VocalVST.vst3"
+        try:
+            if binary.is_file():
+                return binary.stat().st_mtime >= OVERRIDES_SINCE
+        except OSError:
+            continue
+    return True
+
+
+def phones(word: str) -> list[str] | None:
+    """A word's CMU phonemes (lower case, no stress) when the dictionary is installed."""
+    dictionary()
+    found = _phones_cache.get(_dictionary_key(word))
+    return found.split() if found else None
+
+
+def suggest_override(token: str) -> str | None:
+    """How to spell a word's sounds for the singer, hyphenated as typed: the override
+    picked by ear when there is one (PRONOUNCE), else the dictionary's own phonemes
+    (which the bank's dictionary may differ from; a listener decides); None for a word
+    nobody has sounds for."""
+    plain, _ = split_override(token)
+    key = _dictionary_key(plain)
+    sounds = PRONOUNCE.get(key) or " ".join(phones(plain) or [])
+    if not sounds:
+        return None
+    return re.sub(r"[^A-Za-z'-]", "", plain) + "[" + sounds + "]"
 
 
 def _cmudict_paths() -> list[Path]:
@@ -88,12 +166,13 @@ def _read_cmudict(path: Path) -> dict[str, str]:
         for line in f:
             if not line.strip() or line[0] in ";#":
                 continue
-            word, _, phones = line.partition(" ")
+            word, _, sounds = line.partition(" ")
             if "(" in word:
                 continue
-            digits = "".join(c for c in phones if c in "012")
+            digits = "".join(c for c in sounds if c in "012")
             if digits:
                 out[word] = digits
+                _phones_cache[word] = re.sub(r"[0-9]", "", sounds.strip().lower())
     return out
 
 
@@ -142,6 +221,14 @@ def syllabify(word: str) -> list[str]:
     'burned' and 'lines' stay whole. The spelling rules cut the word; the dictionary,
     when installed, says how many pieces there are ('ne-on', 'fi-re', 'eve-ning'). A
     hyphenated word is split as written."""
+    word, override = split_override(word)
+    pieces = _syllabify_plain(word)
+    if override is not None:
+        pieces[-1] += "[" + " ".join(override) + "]"
+    return pieces
+
+
+def _syllabify_plain(word: str) -> list[str]:
     if "-" in word.strip("-"):
         return [p for p in word.split("-") if p]
     if not any(c.isalpha() for c in word):
@@ -256,13 +343,16 @@ class Syllable:
 
 def line_syllables(line: str) -> list[Syllable]:
     out: list[Syllable] = []
-    for word in line.split():
-        if not re.search(r"[A-Za-z]", word):
+    for word in tokens(line):
+        plain, override = split_override(word)
+        if not re.search(r"[A-Za-z]", plain):
             continue
-        pieces = syllabify(word)
-        marks = stresses(word, pieces)
+        pieces = _syllabify_plain(plain)
+        marks = stresses(plain, pieces)
         for i, (p, s) in enumerate(zip(pieces, marks)):
             text = re.sub(r"[^A-Za-z']", "", p)      # the singer gets letters, not the comma after them
+            if text and override is not None and i == len(pieces) - 1:
+                text += "[" + " ".join(override) + "]"      # the override rides on the word's last piece
             if text:
                 out.append(Syllable(text, s, i == 0, i == len(pieces) - 1))
     if out:
@@ -581,33 +671,64 @@ def lint(lyrics: str, note_seconds: list[float] | None = None) -> dict:
     will struggle to hear, found without a render: words VocalVST's dictionary lacks
     (when it's installed), consonant pile-ups, and a syllable held long before the
     next one's stop consonant (with `note_seconds`, one per token). Empty when clean."""
-    tokens = lyrics.split()
     words: list[tuple[str, list[str], list[float | None]]] = []      # (word, syllables, seconds per syllable)
+    overrides: dict[str, list[str]] = {}                                 # word (as typed, no override) -> phonemes
     at = 0
-    for tk in tokens:
-        if tk in ("_", "-", "+"):
+    for raw in tokens(lyrics):
+        if raw in ("_", "-", "+"):
             if words and note_seconds is not None and at < len(note_seconds) and words[-1][2][-1] is not None:
                 words[-1][2][-1] += note_seconds[at]
             at += 1
             continue
+        tk, override = split_override(raw)
+        if override is not None:
+            overrides[tk or "[]"] = override
         pieces = [p for p in tk.split("-") if p] or [tk]
         secs = [note_seconds[at + i] if note_seconds is not None and at + i < len(note_seconds) else None
                 for i in range(len(pieces))]
-        words.append((tk, pieces, secs))
+        words.append((tk or "[]", pieces, secs))
         at += len(pieces)
     flags: list[str] = []
+    bad_symbols, off_count = [], []
+    for word, sounds in overrides.items():
+        unknown_symbols = [p for p in sounds if p not in ARPABET]
+        if unknown_symbols:
+            bad_symbols.append(f"'{word}' ({', '.join(unknown_symbols)})")
+        vowels = sum(p in ARPABET_VOWELS for p in sounds)
+        pieces = len([p for p in word.split("-") if p]) or 1
+        if word != "[]" and vowels != pieces:
+            off_count.append(f"'{word}' ({vowels} vowel sounds over {pieces} notes)")
+    if bad_symbols:
+        flags.append("not ARPAbet in the pronunciation of " + ", ".join(bad_symbols) + ": use lower-case ARPAbet "
+                     "symbols without stress digits (aa ae ah ao aw ay eh er ey ih iy ow oy uh uw, b ch d dh f g hh jh "
+                     "k l m n ng p r s sh t th v w y z zh), dx for a flapped t/d, ax for a schwa")
+    if off_count:
+        flags.append("the pronunciation of " + ", ".join(off_count) + " doesn't fit its notes: the sounds are split "
+                     "over the hyphenated pieces at their vowels, so write one vowel sound per piece")
+    if overrides and not overrides_supported():
+        flags.append("this VocalVST build predates pronunciation overrides, so the [brackets] would be sung as words; "
+                     "creaper drops them for this build. Reinstall the plugin to use them")
     known = dictionary()
     if known:
         unknown = []
         for word, pieces, _ in words:
             key = _dictionary_key(word)
-            if key and key not in known and key not in VOCALISE and key not in unknown and \
+            if key and key not in known and key not in VOCALISE and key not in unknown and word not in overrides and \
                     not all(_dictionary_key(p) in known for p in pieces):
                 unknown.append(key)
         if unknown:
             flags.append("the singer's dictionary has no " + ", ".join(f"'{w}'" for w in unknown[:8])
                          + (" ..." if len(unknown) > 8 else "") + ": it sounds them out letter by letter, often "
-                         "wrong. Use words it knows (plain English spelling; no slang spellings or made-up names)")
+                         "wrong. Use words it knows (plain English spelling; no slang spellings or made-up names)"
+                         + (", or spell the sounds after the word, 'Sa-tur-day[s ae dx er d ey]'"
+                            if overrides_supported() else ""))
+    if overrides_supported():
+        by_ear = [suggest_override(word) for word, _, _ in words
+                  if _dictionary_key(word) in PRONOUNCE and word not in overrides]
+        if by_ear:
+            flags.append("the voicebank mangles " + ", ".join(f"'{w.split('[')[0]}'" for w in dict.fromkeys(by_ear))
+                         + " ('Saturday' comes out \"Sat-er-ray\"): write " + ", ".join(dict.fromkeys(by_ear))
+                         + ", the pronunciation the user chose by ear")
     piled = []
     for i, (word, _, _) in enumerate(words):
         runs = _consonant_runs(word)

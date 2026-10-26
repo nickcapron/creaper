@@ -28,6 +28,7 @@ def test_the_model_is_pinned():
 
 def test_lyrics_and_what_was_heard_are_compared_word_by_word():
     assert asr.normalize("In-to the NIGHT, don't _ -") == ["into", "the", "night", "dont"]
+    assert asr.normalize("Sa-tur-day[s ae dx er d ey] night [m]") == ["saturday", "night"]     # a pronunciation isn't a word
     assert asr.words_matched("in-to the night _", "Into the night.") == 1.0
     assert asr.words_matched("street lights fly-ing past", "Streetlights flying past") == 1.0
     assert asr.words_matched("streetlights flying past", "street lights flying past") == 1.0

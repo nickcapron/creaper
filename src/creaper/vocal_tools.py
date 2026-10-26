@@ -62,7 +62,7 @@ def assign_lyrics(lyrics: str, line: list[dict], max_per_beat: float | None = MA
     with the text to speak and its span in QN from the item start. Refuses lyrics
     denser than max_per_beat syllables per beat over any DENSITY_WINDOW_QN (None: no
     limit), because a robot voice turns fast words to mush."""
-    tokens = lyrics.split()
+    tokens = lyric_melody.tokens(lyric_melody.strip_overrides(lyrics))     # a robot voice has no phoneme input
     if not tokens:
         raise ValueError("give the lyrics to sing")
     words: list[dict] = []
@@ -560,13 +560,14 @@ def singer_syllables(lyrics: str, line: list[dict], hold: str = "-") -> list[str
     """One lyric per note for a singing synth: each syllable of 'to-night' on its own
     note, and `hold` (the singer's melisma mark) where '_' holds the previous word."""
     out: list[str] = []
-    for token in lyrics.split():
+    for token in lyric_melody.tokens(lyrics):
         if token in ("_", "-"):
             if not out:
                 raise ValueError("the lyrics can't start with a hold ('_')")
             out.append(hold)
         else:
-            out += [p for p in token.split("-") if p] or [token]
+            token, _ = lyric_melody.split_override(token)      # the sounds stay with the word for VocalVST
+            out += [p for p in token.split("-") if p] or [token or "m"]
     if len(out) != len(line):
         raise ValueError(f"the lyrics have {len(out)} syllables and holds but the melody has {len(line)} notes. "
                          "One syllable per note: hyphenate words ('to-night'), '_' holds the previous one.")
@@ -578,20 +579,28 @@ def vocalvst_lyric_string(lyrics: str, line: list[dict]) -> str:
     is one word on three notes: the plugin looks the whole word up and sings its real
     syllables, s-ae | dx-er | dx-ey; typed apart, 'Sa tur day' is three words sounded
     out by letter, which is where "Sat turd day" came from), and '+' for a held note.
-    One syllable or hold per note, checked against the line."""
+    A pronunciation override ('Sa-tur-day[s ae dx er d ey]') stays on its word, unless
+    the installed plugin predates them (lyric_melody.overrides_supported), when it is
+    dropped. One syllable or hold per note, checked against the line."""
     singer_syllables(lyrics, line, hold="+")
-    return " ".join("+" if tk in ("_", "-", "+") else tk for tk in lyrics.split())
+    if lyric_melody.has_overrides(lyrics) and not lyric_melody.overrides_supported():
+        lyrics = lyric_melody.strip_overrides(lyrics)
+    return " ".join("+" if tk in ("_", "-", "+") else tk for tk in lyric_melody.tokens(lyrics))
 
 
 def vocalvst_per_note(lyrics: str) -> list[tuple[int, str]]:
     """A VocalVST lyric string as one entry per note: (word number, piece), holds as
     (-1, '+'), so a slice of notes can be given its words back (vocalvst_join)."""
     out: list[tuple[int, str]] = []
-    for w, tk in enumerate(lyrics.split()):
+    for w, tk in enumerate(lyric_melody.tokens(lyrics)):
         if tk in ("_", "-", "+"):
             out.append((-1, "+"))
         else:
-            out += [(w, p) for p in tk.split("-") if p] or [(w, tk)]
+            plain, override = lyric_melody.split_override(tk)
+            pieces = [p for p in plain.split("-") if p] or [plain or ""]
+            if override is not None:          # the sounds ride on the word's last piece
+                pieces[-1] += "[" + " ".join(override) + "]"
+            out += [(w, p) for p in pieces]
     return out
 
 
@@ -1074,12 +1083,14 @@ def sung_lines(parts: list[dict], lyrics: str, rest_qn: float = asr.LINE_REST_QN
         spans += [(base + n["start"], base + n["start"] + n["length"]) for n in melody_line(part.get("notes", []))]
     words: list[tuple[str, int, int]] = []           # (word, first note, last note)
     at = 0
-    for tk in lyrics.split():
+    for tk in lyric_melody.tokens(lyrics):
         if tk in ("_", "-", "+"):
             if words:
                 words[-1] = (words[-1][0], words[-1][1], at)
             at += 1
             continue
+        tk, _ = lyric_melody.split_override(tk)         # the recogniser is held to the word, not its sounds
+        tk = tk or "m"
         n = len([p for p in tk.split("-") if p]) or 1
         words.append((re.sub(r"[^A-Za-z0-9']", "", tk.replace("-", "")) or tk, at, at + n - 1))
         at += n
@@ -1116,6 +1127,23 @@ def vocalvst_lines(track: str | int) -> list[dict]:
 
 HEAR_NEXT = ("render_vocalvst again with the new lyrics (write_vocal_melody first when the words change their "
              "syllable count)")
+
+
+def say_it_as(lyrics: str, missed: list[str]) -> dict[str, str]:
+    """For the lyric words a recogniser missed, how to spell their sounds for the singer
+    ({'saturday': 'Sa-tur-day[s ae dx er d ey]'}): the pronunciation picked by ear when
+    there is one, else the dictionary's. Words already spelled out, and words nobody has
+    sounds for, are left out."""
+    out: dict[str, str] = {}
+    wanted = set(missed)
+    for tk in lyric_melody.tokens(lyrics):
+        plain, override = lyric_melody.split_override(tk)
+        key = re.sub(r"[^a-z0-9]", "", plain.lower().replace("-", ""))
+        if key in wanted and override is None and key not in out:
+            suggestion = lyric_melody.suggest_override(plain)
+            if suggestion:
+                out[key] = suggestion
+    return out
 
 
 def _hear_take(track: str | int, parts: list[dict], lyrics: str, span: tuple[float, float]) -> dict:
@@ -1272,7 +1300,9 @@ def render_vocalvst(
         "The words, one syllable per note: 'dan-cing in the dark _' (hyphens split a word over its notes, '_' "
         "holds the note before). Always hyphenate, never type a word's syllables apart ('dan cing'): the singer "
         "looks a hyphenated word up whole and sings its real sounds, while 'dan' and 'cing' alone are sounded "
-        "out by letter. Leave it out for a wordless line: scat syllables in scat mode, 'la' otherwise"))] = None,
+        "out by letter. A word the singer mangles can be spelled in ARPAbet after it, one vowel sound per piece: "
+        "'Sa-tur-day[s ae dx er d ey]' (the result's heard.say_it_as offers these for missed words). Leave it out "
+        "for a wordless line: scat syllables in scat mode, 'la' otherwise"))] = None,
     mode: Annotated[Literal["sing", "rap", "scat"], Field(description="sing: pitched, vibrato on held notes; rap: spoken contour, syllables cut to about 220 ms; scat: nonsense syllables when there are no lyrics")] = "sing",
     voice: Annotated[str | None, Field(description=VOICE_HELP)] = None,
     expression: Annotated[float | None, Field(ge=0, le=1, description=(
@@ -1449,6 +1479,14 @@ def render_vocalvst(
     kept = re.search(r"(\d+) phrases? kept from the last take", report)
     if kept:
         out["phrases_kept"] = int(kept.group(1))
+    unknown_phones = re.search(r"typed phonemes not in this voicebank: (.+?)\s*$", report)
+    if unknown_phones:
+        out["phonemes_unknown"] = (f"this voicebank has no {unknown_phones.group(1).strip()}, so it substituted or "
+                                   "dropped them: respell those pronunciations with lower-case ARPAbet (dx for a "
+                                   "flapped t/d, ax for a schwa)")
+    if lyrics and lyric_melody.has_overrides(lyrics) and not lyric_melody.overrides_supported():
+        out["pronunciation"] = ("the [pronunciations] were dropped: this VocalVST build predates them (it would sing "
+                                "the symbols as words). Reinstall the plugin to use them")
     if lyric_check:
         out["lyric_check"] = lyric_check
     if woken:
@@ -1465,6 +1503,12 @@ def render_vocalvst(
             if out["heard"].get("unclear_lines"):
                 out["next"] = ("rewrite the lines in heard.unclear_lines (their missed words first; lyric_check "
                                "says what trips the singer), then " + HEAR_NEXT + "; the vocal isn't done while any remain")
+                missed = [w for h in out["heard"].get("heard") or [] for w in h.get("missed") or []]
+                spelled = say_it_as(lyrics, missed) if missed and lyric_melody.overrides_supported() else {}
+                if spelled:
+                    out["heard"]["say_it_as"] = spelled
+                    out["next"] = ("for a missed word the line needs, spell its sounds as heard.say_it_as shows "
+                                   "(a word with [sounds] re-sings only its phrase); otherwise " + out["next"])
     if not report.startswith("Rendered"):
         out["warning"] = "the plugin reports: " + report
     if missing:

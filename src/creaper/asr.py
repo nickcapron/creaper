@@ -74,7 +74,7 @@ def normalize(text: str) -> list[str]:
     """Lowercase words without punctuation; hyphenated syllables joined ('to-night'
     is 'tonight'), lone holds ('_', '-') dropped, apostrophes dropped ("don't" is 'dont')."""
     words = []
-    for token in text.lower().split():
+    for token in re.sub(r"\[[^\]]*\]", "", text).lower().split():      # a [pronunciation] isn't a word
         w = re.sub(r"[^a-z0-9]", "", token.replace("-", ""))
         if w:
             words.append(w)

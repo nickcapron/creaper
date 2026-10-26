@@ -1014,6 +1014,15 @@ def test_render_vocalvst_reports_what_a_listener_hears_and_what_trips_the_singer
                                       "words_matched": 0.67, "at_qn": 4.0, "missed": ["ride"]}]
     assert out["heard"]["unclear_lines"] == ["we ride at dawn tonight"]
     assert out["next"].startswith("rewrite the lines in heard.unclear_lines") and "lyric_check" not in out
+    assert "say_it_as" not in out["heard"]            # this machine's plugin predates pronunciations: none offered
+
+    # With a plugin that reads them, a missed word comes back with its sounds spelled for the singer.
+    monkeypatch.setattr(lyric_melody, "overrides_supported", lambda: True)
+    monkeypatch.setattr(lyric_melody, "_phones_cache", {"ride": "r ay d"})
+    out = vocal_tools.render_vocalvst(track="Vocal", lyrics="we ride at dawn to-night")
+    assert out["heard"]["say_it_as"] == {"ride": "ride[r ay d]"}
+    assert out["next"].startswith("for a missed word the line needs, spell its sounds as heard.say_it_as shows")
+    monkeypatch.setattr(lyric_melody, "overrides_supported", lambda: False)
 
     # A word the singer's dictionary lacks is named before the render; hear_words=False skips the hearing.
     heard.clear()
@@ -1073,6 +1082,31 @@ def test_the_plugin_gets_whole_hyphenated_words_and_a_slice_gets_them_back():
     assert vocal_tools.vocalvst_join(per_note[3:]) == "night, _ ba-by"       # a chorus slice keeps its words whole
 
 
+def test_a_pronunciation_stays_on_its_word_for_a_plugin_that_reads_it(monkeypatch):
+    from creaper import lyric_melody, vocal_tools
+
+    line = [{"pitch": 60, "start": float(i), "length": 0.9} for i in range(7)]
+    spelled = "Sa-tur-day[s ae dx er d ey] night, _ ba-by [m]"
+    with pytest.raises(ValueError, match="8 syllables"):
+        vocal_tools.singer_syllables(spelled, line)
+    monkeypatch.setattr(lyric_melody, "overrides_supported", lambda: True)
+    assert vocal_tools.vocalvst_lyric_string(spelled, line + [line[0]]) == "Sa-tur-day[s ae dx er d ey] night, + ba-by [m]"
+    per_note = vocal_tools.vocalvst_per_note("Sa-tur-day[s ae dx er d ey] night, + ba-by")
+    assert per_note[:3] == [(0, "Sa"), (0, "tur"), (0, "day[s ae dx er d ey]")]
+    assert vocal_tools.vocalvst_join(per_note) == "Sa-tur-day[s ae dx er d ey] night, _ ba-by"
+    # The recogniser is held to the word, not its sounds.
+    monkeypatch.setattr(vocal_tools, "call", lambda cmd, **kw: [q * 0.5 for q in kw["qns"]])
+    notes = [{"pitch": 60, "start": float(i), "length": 0.9, "velocity": 100} for i in range(4)]
+    lines = vocal_tools.sung_lines([{"start": {"qn": 0.0}, "notes": notes}], "Sa-tur-day[s ae dx er d ey] night")
+    assert [ln["line"] for ln in lines] == ["Saturday night"]
+    # An older plugin would sing the symbols as words, so creaper drops them for it.
+    monkeypatch.setattr(lyric_melody, "overrides_supported", lambda: False)
+    assert vocal_tools.vocalvst_lyric_string(spelled, line + [line[0]]) == "Sa-tur-day night, + ba-by m"
+    monkeypatch.setattr(lyric_melody, "_phones_cache", {"ride": "r ay d"})
+    assert vocal_tools.say_it_as("we ride at dawn to-night Sa-tur-day", ["ride", "saturday", "dawn"]) == \
+        {"ride": "ride[r ay d]", "saturday": "Sa-tur-day[s ae dx er d ey]"}
+
+
 def test_render_vocalvst_reports_the_phrases_a_partial_render_kept(tmp_path, monkeypatch):
     from creaper import vocal_tools
 
@@ -1084,13 +1118,17 @@ def test_render_vocalvst_reports_the_phrases_a_partial_render_kept(tmp_path, mon
         if cmd == "set_fx_parameter" and kw["parameter"] == "Render":
             with log.open("a") as f:
                 f.write("2026-10-25T19:00:00.000-07:00#ab12/Vocal Rendered: 4 phrases, 39 notes, 33.5 s, 4 breaths, "
-                        "3 phrases kept from the last take\n")
+                        "3 phrases kept from the last take" + state.get("tail", "") + "\n")
         return inner(cmd, **kw)
 
     monkeypatch.setattr(vocal_tools, "call", partial)
     out = vocal_tools.render_vocalvst(track=1, lyrics="one two three four five six", hear_words=False)
     assert out["phrases_kept"] == 3 and out["result"].startswith("Rendered: 4 phrases")
-    assert "only the phrases that changed" in out["next"]
+    assert "only the phrases that changed" in out["next"] and "phonemes_unknown" not in out
+    # A pronunciation with symbols the voicebank lacks is named on the Rendered line, after the kept clause.
+    state["tail"] = ", typed phonemes not in this voicebank: zz, qx"
+    out = vocal_tools.render_vocalvst(track=1, lyrics="one two three four five six", hear_words=False)
+    assert out["phrases_kept"] == 3 and out["phonemes_unknown"].startswith("this voicebank has no zz, qx, so it")
 
 
 def test_the_plugins_log_details_are_read_with_or_without_the_space(tmp_path, monkeypatch):

@@ -231,8 +231,8 @@ individual steps are below if you'd rather do them yourself.
   that transcribes each line of a vocal, a robot vocal after `add_robot_vocal` or a
   VocalVST take after `render_vocalvst` (and in the mix, with `check_vocal_clarity`),
   and names the lines a listener would mishear and the words it missed, so Claude can
-  rewrite them before you listen. About 300 MB with the model, which downloads the first
-  time it's used.
+  rewrite them, or spell a word's sounds for VocalVST (`Sa-tur-day[s ae dx er d ey]`),
+  before you listen. About 300 MB with the model, which downloads the first time it's used.
 - `creaper[analysis]`: librosa's beat tracker, for finding the bars of reference tracks.
 
 ```bash

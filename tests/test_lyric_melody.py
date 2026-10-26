@@ -178,3 +178,41 @@ def test_lint_without_the_dictionary_checks_only_the_sounds():
     assert len(out["flags"]) == 1 and "'strength'" in out["flags"][0]
     assert lm._consonant_runs("night") == [1, 1] and lm._consonant_runs("strength") == [3, 2]
     assert lm._consonant_runs("world's") == [1, 4] and lm._consonant_runs("city") == [1, 1, 0]
+
+
+# ------------------------------------------------------------- pronunciation
+
+
+def test_a_pronunciation_override_is_one_token_that_rides_on_the_words_last_piece():
+    assert lm.tokens("Sa-tur-day[s ae dx er d ey], night [m] _ ba-by") == \
+        ["Sa-tur-day[s ae dx er d ey],", "night", "[m]", "_", "ba-by"]
+    assert lm.split_override("Sa-tur-day[S AE1 dx er d ey],") == ("Sa-tur-day,", ["s", "ae", "dx", "er", "d", "ey"])
+    assert lm.split_override("night") == ("night", None)
+    assert lm.strip_overrides("Sa-tur-day[s ae dx er d ey], [m] night") == "Sa-tur-day, m night"
+    assert lm.has_overrides("ne-on[n iy aa n]") and not lm.has_overrides("ne-on")
+    assert lm.syllabify("Sa-tur-day[s ae dx er d ey]") == ["Sa", "tur", "day[s ae dx er d ey]"]
+    assert [s.text for s in lm.line_syllables("Sa-tur-day[s ae dx er d ey] night")] == \
+        ["Sa", "tur", "day[s ae dx er d ey]", "night"]
+
+
+def test_lint_checks_a_pronunciation_and_offers_the_ones_picked_by_ear(monkeypatch):
+    _dictionary(monkeypatch, **{"saturday": "100", "night": "1", "neon": "10"})
+    monkeypatch.setattr(lm, "_phones_cache", {"neon": "n iy aa n", "night": "n ay t"})
+    monkeypatch.setattr(lm, "overrides_supported", lambda: True)
+    out = lm.lint("Sa-tur-day[s ae zz d ey] ne-on[n iy aa n] nite", None)
+    symbols, fit, unknown = out["flags"]
+    assert "not ARPAbet in the pronunciation of 'Sa-tur-day' (zz)" in symbols and "dx for a flapped" in symbols
+    assert "'Sa-tur-day' (2 vowel sounds over 3 notes)" in fit
+    assert "no 'nite'" in unknown and "spell the sounds after the word" in unknown     # 'ne-on' is spelled, so not unknown
+    assert lm.lint("Sa-tur-day[s ae dx er d ey] ne-on[n iy aa n] night", None) == {}
+    # Saturday without an override gets the pronunciation the user chose by ear; a bare [m] is a note of its own.
+    out = lm.lint("Sa-tur-day night [m]", None)
+    assert len(out["flags"]) == 1 and "write Sa-tur-day[s ae dx er d ey], the pronunciation the user chose by ear" in out["flags"][0]
+    assert lm.suggest_override("Sa-tur-day,") == "Sa-tur-day[s ae dx er d ey]"
+    assert lm.suggest_override("ne-on") == "ne-on[n iy aa n]" and lm.suggest_override("zorblax") is None
+    assert lm.phones("night") == ["n", "ay", "t"]
+    # A plugin build from before the overrides would sing the symbols as words: said, and nothing offered.
+    monkeypatch.setattr(lm, "overrides_supported", lambda: False)
+    out = lm.lint("Sa-tur-day[s ae dx er d ey] night", None)
+    assert len(out["flags"]) == 1 and "predates pronunciation overrides" in out["flags"][0]
+    assert lm.lint("Sa-tur-day night", None) == {}
