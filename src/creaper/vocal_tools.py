@@ -27,10 +27,17 @@ ONSET_TOLERANCE = 1 / 64
 RUSHED = 1.6
 
 
+# VocalVST sings MIDI channels 1 and 3-16; channel 2 is left to VocalVST FX's carrier
+# chords (held notes the vocoder plays), which may share the melody's item.
+FX_CHORD_CHANNEL = 2
+
+
 def melody_line(notes: list[dict]) -> list[dict]:
-    """The singable line of a MIDI part: the highest note at each onset, in time order."""
+    """The singable line of a MIDI part: the highest note at each onset, in time order,
+    leaving out notes on FX_CHORD_CHANNEL (the plugin does the same)."""
     line: list[dict] = []
-    for note in sorted((n for n in notes if not n.get("muted")), key=lambda n: (n["start"], -n["pitch"])):
+    for note in sorted((n for n in notes if not n.get("muted") and n.get("channel", 1) != FX_CHORD_CHANNEL),
+                       key=lambda n: (n["start"], -n["pitch"])):
         if line and abs(note["start"] - line[-1]["start"]) < ONSET_TOLERANCE:
             continue
         line.append(note)
@@ -1398,9 +1405,11 @@ def render_vocalvst(
     extended: list[str] = []
     gaps: list[float] = []
     secs: list[float] | None = []
+    chord_notes = 0
     for item in items:
         part = call("get_midi_notes", item_id=item["id"], limit=20000)
         parts.append(part)
+        chord_notes += sum(1 for n in part.get("notes", []) if n.get("channel", 1) == FX_CHORD_CHANNEL)
         notes = melody_line(part.get("notes", []))
         line += notes
         if part.get("length_qn") and part.get("length_seconds"):
@@ -1414,7 +1423,9 @@ def render_vocalvst(
         if _cover_notes(item, part) is not None:
             extended.append(f"{item['id']} to {item['end'].get('seconds', '?')} s")
     if not line:
-        raise ValueError("the track's MIDI items have no notes to sing")
+        raise ValueError("the track's MIDI items have no notes to sing" + (
+            f" (VocalVST leaves the {chord_notes} notes on MIDI channel {FX_CHORD_CHANNEL} to VocalVST FX's carrier "
+            "chords; put the melody on channel 1)" if chord_notes else ""))
     speaks = lyric_melody.overrides_supported(parameters=_parameter_names(track, fx["index"]))
     text = vocalvst_lyric_string(lyrics, line, overrides=speaks) if lyrics else ""
 
@@ -1543,6 +1554,9 @@ def render_vocalvst(
                                 "the symbols as words). Reinstall the plugin to use them")
     if lyric_check:
         out["lyric_check"] = lyric_check
+    if chord_notes:
+        out["chord_notes"] = (f"{chord_notes} notes on MIDI channel {FX_CHORD_CHANNEL} weren't sung: VocalVST leaves "
+                              "that channel to VocalVST FX's carrier chords")
     if formant_note:
         out["formant_note"] = formant_note
     if voice_info.get("credit"):

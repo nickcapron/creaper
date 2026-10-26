@@ -608,6 +608,26 @@ def test_hanami_sings_with_formant_at_zero_and_a_credit_line(tmp_path, monkeypat
     assert vocal_tools.say_it_as("Sa-tur-day", ["saturday"]) == {"saturday": "Sa-tur-day[s ae dx er d ey]"}
 
 
+def test_chord_notes_on_channel_two_are_left_to_the_fx(tmp_path, monkeypatch):
+    from creaper import vocal_tools
+
+    sung = [{"pitch": p, "start": i * 1.0, "length": 0.9, "velocity": 100} for i, p in enumerate((60, 62, 64, 64, 62, 60))]
+    chords = [{"pitch": p, "start": 0.0, "length": 6.0, "velocity": 80, "channel": 2} for p in (48, 52, 55)]
+    assert vocal_tools.melody_line(sung + chords) == sung                         # the plugin skips channel 2 too
+    _vocalvst_bridge(tmp_path, monkeypatch, notes=sung + chords)
+    out = vocal_tools.render_vocalvst(track=1, lyrics="one two three four five six")
+    assert out["written_notes"] == 6 and out["chord_notes"].startswith("3 notes on MIDI channel 2")
+
+
+def test_an_item_of_only_channel_two_chords_has_nothing_to_sing(tmp_path, monkeypatch):
+    from creaper import vocal_tools
+
+    chords = [{"pitch": p, "start": 0.0, "length": 6.0, "velocity": 80, "channel": 2} for p in (48, 52, 55)]
+    _vocalvst_bridge(tmp_path, monkeypatch, notes=chords)
+    with pytest.raises(ValueError, match="channel 2.*put the melody on channel 1"):
+        vocal_tools.render_vocalvst(track=1, lyrics="one two three")
+
+
 def test_a_track_with_no_voice_yet_sings_with_the_users_pick_doubled(tmp_path, monkeypatch):
     from creaper import vocal_tools
 
