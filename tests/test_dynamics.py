@@ -198,10 +198,13 @@ def test_dynamics_stage_compresses_peaky_parts_and_clips_drums(monkeypatch):
     channels = [{"name": "Drums", "ref": "Drums", "role": "drums", "level": -20, "peak_db": -4},     # 16 dB
                 {"name": "Pad", "ref": "Pad", "role": "pad", "level": -20, "peak_db": -8},          # 12 dB
                 {"name": "Bass", "ref": "Bass", "role": "bass", "level": -14, "peak_db": 0},        # the plan compresses it
-                {"name": "Lead", "ref": "Lead", "role": "lead", "level": -15, "peak_db": -8}]       # 7 dB: not peaky
+                {"name": "Lead", "ref": "Lead", "role": "lead", "level": -15, "peak_db": -8},       # 7 dB: not peaky
+                # A strum left out stopped a pop master at -13 LUFS.
+                {"name": "Guitar", "ref": "Guitar", "role": "guitar", "level": -30, "peak_db": -15}]  # 15 dB
     actions = [{"ref": "Bass", "compress": {"ratio": 4}}]
+    faders["Guitar"] = 0.0
     done = mix_tools._shape_dynamics(channels, actions, "electronic dance", None, None)
-    assert [d["track"] for d in done] == ["Drums", "Pad"]
+    assert [d["track"] for d in done] == ["Drums", "Pad", "Guitar"]
     drums = done[0]
     # Pre-fader peak -6 (-9 at a -3 fader): a 8.5 dB boost puts it 2.5 over the knee; the fader takes it back.
     assert drums["soft_clip"] == {"boost_db": 8.5, "peaks_rounded_db": 2.5, "fader_db": -11.5}
@@ -333,3 +336,12 @@ def test_a_kit_already_over_the_knee_is_still_rounded():
 def test_colour_keeps_a_gentle_overshoot():
     from creaper import mix_tools
     assert mix_tools.choose_colour([{"amount": 5, "rise_db": 6.0, "crest_drop_db": 0.2}])["amount"] == 5
+
+
+def test_mastering_a_range_forgets_the_whole_song_check_from_before(monkeypatch):
+    # Mastered over the last chorus, the export was compared with auto_mix's pre-master
+    # check (-21.7 against -12.3) and warned that part of the mix hadn't played.
+    _fake_master(monkeypatch)
+    monkeypatch.setattr(server, "_master_check", {"lufs": -21.7, "seconds": 224.9})
+    server.master_to_target(style="pop", start_bar=85, end_bar=101, glue=False, force=True)
+    assert server.master_mismatch({"loudness": {"integrated_lufs": -12.3}, "duration_seconds": 226.9}, 2.0) is None

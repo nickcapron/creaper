@@ -115,7 +115,8 @@ def compare(analysis: dict, style: Style) -> list[dict]:
         verdict = "ok" if lo <= lufs <= hi else ("high" if lufs > hi else "low")
         add("integrated loudness (LUFS)", lufs, [lo, hi], verdict,
             "louder than typical: more limiting than needed, and streaming will turn it down" if verdict == "high"
-            else "quieter than a typical master (fine before mastering; master_to_target can bring it up)")
+            else "quieter than a typical master: master_to_target brings it up; where it stopped short, compress "
+                 "the peakiest parts it names (keeping their loudness) and master again")
     tp = analysis.get("levels", {}).get("true_peak_dbtp")
     if tp is not None:
         add("true peak (dBTP)", tp, f"<= {style.true_peak}", "ok" if tp <= style.true_peak else "high",

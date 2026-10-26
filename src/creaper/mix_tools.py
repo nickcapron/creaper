@@ -30,7 +30,9 @@ ROLE_LEVELS = {"kick": 0, "drums": 0, "snare": -3, "perc": -9, "bass": -2, "voca
 # the mixes measured 4-6 dB under Suno's at 125-400 Hz in 9 of 10 songs ("thin", "scientific").
 HIGHPASS_HZ = {"snare": 100, "perc": 200, "vocal": 110, "lead": 110, "guitar": 100, "keys": 100, "pad": 130, "fx": 150,
                "other": 90}
-REVERB_DB = {"vocal": -12, "lead": -15, "guitar": -15, "keys": -15, "pad": -9, "snare": -21, "perc": -24, "other": -18}
+# A vocal's sends sit 6 dB under the other parts' habit: with its echoes 11 dB under the
+# dry voice, a pop chorus over drums was heard 25% (83% alone); 6 dB drier, 67%.
+REVERB_DB = {"vocal": -18, "lead": -15, "guitar": -15, "keys": -15, "pad": -9, "snare": -21, "perc": -24, "other": -18}
 PAN_WIDTH = {"perc": 0.5, "guitar": 0.4, "keys": 0.4, "pad": 0.2, "fx": 0.4, "other": 0.3, "lead": 0.0}
 COMPRESS = {"vocal": (3.0, 5, 80), "bass": (4.0, 20, 120), "lead": (2.5, 10, 100)}  # ratio, attack ms, release ms
 HEADROOM_PEAK_DB = -6.0
@@ -512,14 +514,74 @@ def is_kit(fx: list[str]) -> bool:
 
 COVERING_ROLES = ("keys", "lead", "pad", "other")
 COVERED = 0.03   # clarity lost to the mix beyond which the words count as covered
+# A sung vocal, heard by the speech recogniser: key words lost between its solo render
+# and the mix beyond which the mix covers it. A pop chorus's vocal heard 83% alone and
+# 25% in its mix ("I still struggle to understand them"). On its stems the drums were
+# what it lost the words to, through its own echoes: 6 dB less reverb and delay brought
+# it to 67%; the vocal 6 dB louder only to 42%, and no tonal part alone covered it.
+SUNG_COVERED = 0.15
+SUNG_TAKE_FLOOR = 0.5           # heard less than this alone, the take's words are the trouble
+SUNG_DRIER_DB, SUNG_RAISE_DB = -6.0, 3.0
 
 
-def _clear_robot_vocals(actions: list[dict], start_bar: float | None, end_bar: float | None) -> list[dict]:
+def _clear_sung_vocal(a: dict, start_bar: float | None, end_bar: float | None,
+                      span: tuple[float, float] | None) -> dict:
+    """A VocalVST vocal heard alone and in the mix over the loudest bars (span, unless
+    the mix has its own range). While the mix loses SUNG_COVERED of the key words the
+    vocal keeps alone: its sends to the reverb and delay come down SUNG_DRIER_DB, then
+    the vocal comes up SUNG_RAISE_DB. A take unclear alone is left to its lyrics."""
+    from . import asr
+    from .ear_tools import measure_vocal_clarity
+
+    vocal = a.get("ref", a["name"])
+    entry: dict = {"vocal": a["name"]}
+    if not asr.available():
+        entry["skipped"] = 'a sung vocal is heard by a speech recogniser: pip install "creaper[asr]"'
+        return entry
+    if start_bar is None and end_bar is None and span:
+        start_bar, end_bar = span
+    entry["bars"] = [start_bar, end_bar]
+
+    def heard() -> tuple[dict, float | None, float | None]:
+        m = measure_vocal_clarity(vocal, start_bar, end_bar)
+        return m, (m.get("alone") or {}).get("words_heard"), (m.get("in_mix") or {}).get("words_heard")
+
+    now, alone, mixed = heard()
+    entry["before"] = {"alone": alone, "in_mix": mixed}
+    if alone is None or mixed is None:
+        entry["skipped"] = "no lyric line sung in these bars to hear"
+        return entry
+    if alone < SUNG_TAKE_FLOOR:
+        entry["verdict"] = now.get("verdict")   # the take's own words: the mix can't fix those
+        return entry
+    if alone - mixed > SUNG_COVERED:
+        sends = next((r.get("sends") or [] for r in call("get_routing")["tracks"] if r["name"] == a["name"]), [])
+        drier = {}
+        for snd in sends:
+            if re.search(r"verb|delay|echo", snd["to"], re.I) and snd.get("volume_db") is not None:
+                call("set_send", source=vocal, destination=snd["to"], volume_db=round(snd["volume_db"] + SUNG_DRIER_DB, 1))
+                drier[snd["to"]] = round(snd["volume_db"] + SUNG_DRIER_DB, 1)
+        if drier:
+            entry["drier_sends_db"] = drier
+            now, alone, mixed = heard()
+    if alone is not None and mixed is not None and alone - mixed > SUNG_COVERED:
+        vol = call("get_track_details", track=vocal)["volume_db"]
+        call("set_track_properties", track=vocal, volume_db=round(vol + SUNG_RAISE_DB, 1))
+        entry["raised_db"] = SUNG_RAISE_DB
+        now, alone, mixed = heard()
+    entry["after"] = {"alone": alone, "in_mix": mixed}
+    entry["verdict"] = now.get("verdict")
+    return entry
+
+
+def _clear_robot_vocals(actions: list[dict], start_bar: float | None, end_bar: float | None,
+                        span: tuple[float, float] | None = None) -> list[dict]:
     """Measures each robot vocal's clarity in the mix and, while the rest of the mix
     covers the words, fixes it the way that measured best: the vocal up 2 dB, then the
     parts covering it most (found by muting each in turn) ducked under it. In a test,
     ducking the lead synth and chords took clarity in the mix from 0.588 to 0.650
-    against 0.662 alone; dipping them at 2.5 kHz barely moved it."""
+    against 0.662 alone; dipping them at 2.5 kHz barely moved it. A sung vocal is heard
+    instead (_clear_sung_vocal), over span."""
     from .ear_tools import _sings_itself, measure_vocal_clarity
     out = []
     candidates = [a for a in actions if a["role"] in COVERING_ROLES and not a.get("skipped")]
@@ -532,10 +594,10 @@ def _clear_robot_vocals(actions: list[dict], start_bar: float | None, end_bar: f
         except Exception:  # noqa: BLE001 - measured below like any other
             sung = False
         if sung:
-            # A singing instrument has no clean words to score against: measuring it cost
-            # two full renders a song for a verdict of None. Its level is set by role.
-            out.append({"vocal": a["name"], "skipped": "a sung vocal (VocalVST) has no clean words to score against; "
-                                                      "check_vocal_clarity on it compares the mix before and after a change"})
+            try:
+                out.append(_clear_sung_vocal(a, start_bar, end_bar, span))
+            except Exception as e:  # noqa: BLE001 - the mix stands without it
+                out.append({"vocal": a["name"], "error": str(e)})
             continue
         try:
             now = measure_vocal_clarity(vocal, start_bar, end_bar)
@@ -587,7 +649,7 @@ def _clear_robot_vocals(actions: list[dict], start_bar: float | None, end_bar: f
 DRUM_ROLES = ("kick", "drums", "snare", "perc")
 DRUM_GLUE_DB = 1.5           # loud-vs-average drop on the drum bus (its 10 ms attack lets hits through, so this
                              # understates the real gain reduction; more fights the anti-crush floor)
-DELAY_DB = {"vocal": -20, "lead": -18}   # send levels to the shared delay
+DELAY_DB = {"vocal": -26, "lead": -18}   # send levels to the shared delay
 
 
 def _glue_drums(channels: list[dict], start_bar: float | None, end_bar: float | None,
@@ -677,7 +739,8 @@ GENTLE_FAMILIES = {"classical", "film and games", "jazz", "blues", "ambient and 
 # read a steady four-on-the-floor kit with 17 dB of it as under 14.)
 DRUM_PLR_DB, DRUM_COMP_DB, DRUM_SHAVE_DB = 12.0, 2.5, 2.5
 TONAL_PLR_DB, TONAL_COMP_DB = 10.0, 1.5
-TONAL_ROLES = ("keys", "pad", "lead", "other")
+# A strummed guitar too: one left out (15 dB peak-to-loudness) stopped a pop master at -13 LUFS.
+TONAL_ROLES = ("keys", "pad", "lead", "guitar", "other")
 SOFT_CLIPPER = "JS: Soft Clipper/Limiter"   # Boost (dB) into a soft knee that rounds peaks over 0 dBFS
 
 
@@ -1287,9 +1350,10 @@ def auto_mix(
     bus (plus parallel compression), gentle compression on the whole mix, and a level
     ride lifting choruses and drops that don't come out over the section before (with
     colour=True, saturation on the bass and the drum bus set by measurement). Robot
-    vocals covered by other parts are raised and cleared; a sung vocal (VocalVST) has no
-    clean words to score, so its place is set by role alone. Reports the mix's
-    peak-to-loudness and its peakiest parts. Genres that should breathe (classical,
+    vocals covered by other parts are raised and cleared; a sung vocal (VocalVST) is heard
+    by the speech recogniser alone and in the mix over the loudest bars and, while the mix
+    loses its words, made drier (its reverb and delay sends down 6 dB), then raised 3 dB.
+    Reports the mix's peak-to-loudness and its peakiest parts. Genres that should breathe (classical,
     film, jazz...) skip the dynamics stage. Saves a copy of the project first when it has a
     file. Leaves tracks the user already set up (EQ, compression, panning) alone on
     those points. Then check it: show_spectrogram, check_vocal_clarity,
@@ -1554,10 +1618,10 @@ def _mix_stages(report: dict, plan: dict, channels: list[dict], profile: dict | 
                 changed = True
         except Exception as e:  # noqa: BLE001
             report.setdefault("warnings", []).append(f"section moves: {e}")
-    vocal_fixes = _clear_robot_vocals(plan["channels"], start_bar, end_bar)
+    vocal_fixes = _clear_robot_vocals(plan["channels"], start_bar, end_bar, spans.get("_mix"))
     if vocal_fixes:
         report["vocal_clarity"] = vocal_fixes
-        if any("raised_db" in v or "ducked_under_vocal" in v for v in vocal_fixes):
+        if any(k in v for v in vocal_fixes for k in ("raised_db", "ducked_under_vocal", "drier_sends_db")):
             changed = True
     if changed or "headroom_shift_db" in report or dynamics or sidechain:
         master = analyze_audio(track="master", start_bar=start_bar, end_bar=end_bar)   # the mix as it now stands

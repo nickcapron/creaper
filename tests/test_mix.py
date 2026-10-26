@@ -104,7 +104,7 @@ def test_plan_cleans_up_without_touching_what_the_user_set():
     assert "highpass_hz" not in acts["Lead"] and "compress" not in acts["Lead"]   # has its own EQ and compressor
     assert "compress" not in acts["Vocal"]                               # already even (crest 8 dB)
     assert "highpass_hz" not in acts["Kick"] and "reverb_send_db" not in acts["Kick"]
-    assert acts["Vocal"]["reverb_send_db"] == -12
+    assert acts["Vocal"]["reverb_send_db"] == mix_tools.REVERB_DB["vocal"]
 
 
 def test_silent_tracks_are_left_alone():
@@ -622,21 +622,80 @@ def test_band_db_hears_added_harmonics():
     assert mix_tools.band_db(driven, fs) > mix_tools.band_db(clean, fs) + 20
 
 
-def test_a_sung_vocal_is_not_measured_for_clarity_in_auto_mix(monkeypatch):
-    # VocalVST has no clean words to score against: measuring it cost two full renders
-    # a song for a verdict of None. A robot vocal is still measured.
-    from creaper import ear_tools, mix_tools
-    measured = []
+def _sung_mix(monkeypatch, alone, in_mix):
+    """A fake mix with a VocalVST track 'Sung' whose words in the mix follow in_mix(raised dB, how much drier)."""
+    from creaper import asr, ear_tools, mix_tools
+    state = {"volume": -10.0, "sends": {"Reverb": -18.0, "Delay": -26.0, "Drum Bus": 0.0}, "measured": []}
 
     def fake_call(command, **args):
         if command == "get_track_details":
-            return {"fx": [{"name": "VST3: VocalVST" if args["track"] == "Sung" else "ReaComp"}]}
+            return {"fx": [{"name": "VST3i: VocalVST (vocalvst)" if args["track"] == "Sung" else "ReaComp"}],
+                    "volume_db": state["volume"]}
+        if command == "set_track_properties":
+            state["volume"] = args["volume_db"]
+        if command == "get_routing":
+            return {"tracks": [{"name": "Sung", "sends": [{"to": k, "volume_db": v} for k, v in state["sends"].items()]}]}
+        if command == "set_send":
+            state["sends"][args["destination"]] = args["volume_db"]
         return {}
 
+    def measure(vocal, start_bar=None, end_bar=None, *a, **k):
+        state["measured"].append((vocal, start_bar, end_bar))
+        if vocal != "Sung":
+            return {"alone": {"score": 0.8}, "in_mix": {"score": 0.79, "verdict": "clear"}}
+        return {"alone": {"words_heard": alone},
+                "in_mix": {"words_heard": in_mix(state["volume"] + 10, -18.0 - state["sends"]["Reverb"])},
+                "verdict": "heard"}
+
     monkeypatch.setattr(mix_tools, "call", fake_call)
-    monkeypatch.setattr(ear_tools, "measure_vocal_clarity", lambda vocal, *a, **k: measured.append(vocal) or {
-        "alone": {"score": 0.8}, "in_mix": {"score": 0.79, "verdict": "clear"}})
-    out = mix_tools._clear_robot_vocals([{"role": "vocal", "name": "Sung", "ref": "Sung"},
-                                         {"role": "vocal", "name": "Robot", "ref": "Robot"}], None, None)
-    assert measured == ["Robot"]
-    assert "no clean words" in out[0]["skipped"] and out[1]["verdict"] == "clear"
+    monkeypatch.setattr(asr, "available", lambda: True)
+    monkeypatch.setattr(ear_tools, "measure_vocal_clarity", measure)
+    return state
+
+
+SUNG = {"role": "vocal", "name": "Sung", "ref": "Sung"}
+
+
+def test_a_sung_vocal_the_mix_covers_is_made_drier_then_raised(monkeypatch):
+    # "the vocals are better but I still struggle to understand them": a chorus heard 83%
+    # alone, 25% in its mix; its own echoes over the drums were the cover.
+    from creaper import mix_tools
+    state = _sung_mix(monkeypatch, 0.83, lambda raised, drier: 0.25 + (0.3 if drier else 0) + (0.2 if raised else 0))
+    out = mix_tools._clear_robot_vocals([SUNG], None, None, (85.0, 93.0))[0]
+    assert out["before"] == {"alone": 0.83, "in_mix": 0.25}
+    assert out["drier_sends_db"] == {"Reverb": -24.0, "Delay": -32.0}
+    assert state["sends"]["Drum Bus"] == 0.0                              # only its echoes
+    assert out["raised_db"] == mix_tools.SUNG_RAISE_DB and state["volume"] == -7.0
+    assert out["after"]["in_mix"] == 0.75 and out["bars"] == [85.0, 93.0]
+    assert {m[1:] for m in state["measured"]} == {(85.0, 93.0)}            # the loudest bars, not the whole song
+
+
+def test_a_sung_vocal_drier_enough_is_not_raised(monkeypatch):
+    from creaper import mix_tools
+    state = _sung_mix(monkeypatch, 0.83, lambda raised, drier: 0.75 if drier else 0.25)
+    out = mix_tools._clear_robot_vocals([SUNG], None, None, (85.0, 93.0))[0]
+    assert "raised_db" not in out and state["volume"] == -10.0 and out["after"]["in_mix"] == 0.75
+
+
+def test_a_sung_vocal_the_mix_keeps_is_left_alone(monkeypatch):
+    from creaper import mix_tools
+    state = _sung_mix(monkeypatch, 0.83, lambda raised, drier: 0.75)
+    out = mix_tools._clear_robot_vocals([SUNG], None, None, (85.0, 93.0))[0]
+    assert "drier_sends_db" not in out and "raised_db" not in out and state["sends"]["Reverb"] == -18.0
+
+
+def test_a_sung_take_unclear_alone_is_left_to_its_lyrics(monkeypatch):
+    # Its own words are the trouble: no mix brings them back. 67% alone still gets the mix fixed.
+    from creaper import mix_tools
+    state = _sung_mix(monkeypatch, 0.4, lambda raised, drier: 0.1)
+    out = mix_tools._clear_robot_vocals([SUNG], None, None, (85.0, 93.0))[0]
+    assert "raised_db" not in out and "drier_sends_db" not in out and state["volume"] == -10.0
+    _sung_mix(monkeypatch, 0.67, lambda raised, drier: 0.17)
+    assert "drier_sends_db" in mix_tools._clear_robot_vocals([SUNG], None, None, (85.0, 93.0))[0]
+
+
+def test_a_robot_vocal_is_still_measured_beside_a_sung_one(monkeypatch):
+    from creaper import mix_tools
+    _sung_mix(monkeypatch, 0.9, lambda raised, drier: 0.88)
+    out = mix_tools._clear_robot_vocals([SUNG, {"role": "vocal", "name": "Robot", "ref": "Robot"}], None, None)
+    assert out[0]["after"]["in_mix"] == 0.88 and "raised_db" not in out[0] and out[1]["verdict"] == "clear"

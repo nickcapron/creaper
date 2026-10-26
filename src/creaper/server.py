@@ -1913,6 +1913,9 @@ def master_to_target(
     from . import batch
     from .mix_tools import GENTLE_FAMILIES, SOFT_CLIPPER
 
+    # The master changes here: a whole-song check from before (auto_mix's) no longer says
+    # what an export should measure. Mastered over a range, it read -21.7 against -12.3.
+    _master_check.clear()
     profile_style = styles.find_style(style) if style else None
     clip_allowed = clip and not (profile_style and profile_style.family in GENTLE_FAMILIES)
     target_given = target_lufs
