@@ -8,5 +8,5 @@ def _no_installed_vocalvst_decides(monkeypatch):
     both (off, empty) and turn them on where they test them."""
     from creaper import lyric_melody
 
-    monkeypatch.setattr(lyric_melody, "overrides_supported", lambda: False)
+    monkeypatch.setattr(lyric_melody, "overrides_supported", lambda **kw: False)
     monkeypatch.setattr(lyric_melody, "_phones_cache", {})

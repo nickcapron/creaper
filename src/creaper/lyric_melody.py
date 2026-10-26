@@ -115,9 +115,38 @@ def strip_overrides(lyrics: str) -> str:
     return " ".join(out)
 
 
-def overrides_supported() -> bool:
-    """Whether the installed VocalVST reads pronunciation overrides: its binary is newer
-    than OVERRIDES_SINCE. True when no plugin is found (nothing to lose)."""
+VOCALVST_LOG = Path(os.environ.get("APPDATA") or (Path.home() / "AppData/Roaming")) / "VocalVST" / "host.log"
+FEATURES_TAIL = 256 * 1024     # how much of the log's end is read for its last 'features:' line
+
+
+def plugin_features() -> set[str] | None:
+    """What the installed VocalVST says it can do: builds from late 2026-10-25 log
+    'features: typed phonemes, double' after every 'render started'; names are only ever
+    added. None when the log has no such line (an older build, or no render yet)."""
+    try:
+        size = VOCALVST_LOG.stat().st_size
+        with VOCALVST_LOG.open("rb") as f:
+            f.seek(max(0, size - FEATURES_TAIL))
+            tail = f.read().decode("utf-8", errors="replace")
+    except OSError:
+        return None
+    lines = [ln for ln in tail.splitlines() if "features:" in ln]
+    if not lines:
+        return None
+    names = lines[-1].split("features:", 1)[1]
+    return {n.strip().lower() for n in names.split(",") if n.strip()}
+
+
+def overrides_supported(parameters=None) -> bool:
+    """Whether the installed VocalVST reads pronunciation overrides. The plugin's own
+    word first (its 'features:' log line), then its parameters when given (a build
+    with a 'Double' control understands them too), then the binary's date against
+    OVERRIDES_SINCE. True when no plugin is found (nothing to lose)."""
+    features = plugin_features()
+    if features is not None:
+        return "typed phonemes" in features
+    if parameters is not None:
+        return "Double" in set(parameters)
     for path in _cmudict_paths():
         binary = path.parent / "VocalVST.vst3"
         try:

@@ -198,7 +198,7 @@ def test_a_pronunciation_override_is_one_token_that_rides_on_the_words_last_piec
 def test_lint_checks_a_pronunciation_and_offers_the_ones_picked_by_ear(monkeypatch):
     _dictionary(monkeypatch, **{"saturday": "100", "night": "1", "neon": "10"})
     monkeypatch.setattr(lm, "_phones_cache", {"neon": "n iy aa n", "night": "n ay t"})
-    monkeypatch.setattr(lm, "overrides_supported", lambda: True)
+    monkeypatch.setattr(lm, "overrides_supported", lambda **kw: True)
     out = lm.lint("Sa-tur-day[s ae zz d ey] ne-on[n iy aa n] nite", None)
     symbols, fit, unknown = out["flags"]
     assert "not ARPAbet in the pronunciation of 'Sa-tur-day' (zz)" in symbols and "dx for a flapped" in symbols
@@ -212,7 +212,30 @@ def test_lint_checks_a_pronunciation_and_offers_the_ones_picked_by_ear(monkeypat
     assert lm.suggest_override("ne-on") == "ne-on[n iy aa n]" and lm.suggest_override("zorblax") is None
     assert lm.phones("night") == ["n", "ay", "t"]
     # A plugin build from before the overrides would sing the symbols as words: said, and nothing offered.
-    monkeypatch.setattr(lm, "overrides_supported", lambda: False)
+    monkeypatch.setattr(lm, "overrides_supported", lambda **kw: False)
     out = lm.lint("Sa-tur-day[s ae dx er d ey] night", None)
     assert len(out["flags"]) == 1 and "predates pronunciation overrides" in out["flags"][0]
     assert lm.lint("Sa-tur-day night", None) == {}
+
+
+def test_override_support_is_read_from_the_plugins_own_word_first(tmp_path, monkeypatch):
+    monkeypatch.undo()                                      # the autouse pin: this test reads the real check
+    log = tmp_path / "host.log"
+    monkeypatch.setattr(lm, "VOCALVST_LOG", log)
+    monkeypatch.setattr(lm, "_cmudict_paths", lambda: [tmp_path / "VocalVST.vst3/Contents/x86_64-win/cmudict.dict"])
+    assert lm.plugin_features() is None                     # no log: nothing known
+    assert lm.overrides_supported() is True                 # ... and no plugin found: nothing to lose
+    binary = tmp_path / "VocalVST.vst3/Contents/x86_64-win/VocalVST.vst3"
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"MZ")
+    import os
+    os.utime(binary, (lm.OVERRIDES_SINCE - 60, lm.OVERRIDES_SINCE - 60))
+    assert lm.overrides_supported() is False                # an older binary, no better signal
+    assert lm.overrides_supported(parameters={"Render", "Double", "Double spread"}) is True   # a build with Double reads them
+    assert lm.overrides_supported(parameters={"Render", "Breaths"}) is False
+    log.write_text("2026-10-26T01:40:00.000-07:00#ab12/Vocal render started: 4 phrases\n"
+                   "2026-10-26T01:40:00.001-07:00#ab12/Vocal features: typed phonemes, double\n")
+    assert lm.plugin_features() == {"typed phonemes", "double"}
+    assert lm.overrides_supported(parameters={"Render"}) is True          # the plugin's own word wins
+    log.write_text("2026-10-26T01:40:00.001-07:00#ab12/Vocal features: double\n")
+    assert lm.overrides_supported(parameters={"Render", "Double"}) is False

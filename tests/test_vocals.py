@@ -1017,12 +1017,12 @@ def test_render_vocalvst_reports_what_a_listener_hears_and_what_trips_the_singer
     assert "say_it_as" not in out["heard"]            # this machine's plugin predates pronunciations: none offered
 
     # With a plugin that reads them, a missed word comes back with its sounds spelled for the singer.
-    monkeypatch.setattr(lyric_melody, "overrides_supported", lambda: True)
+    monkeypatch.setattr(lyric_melody, "overrides_supported", lambda **kw: True)
     monkeypatch.setattr(lyric_melody, "_phones_cache", {"ride": "r ay d"})
     out = vocal_tools.render_vocalvst(track="Vocal", lyrics="we ride at dawn to-night")
     assert out["heard"]["say_it_as"] == {"ride": "ride[r ay d]"}
     assert out["next"].startswith("for a missed word the line needs, spell its sounds as heard.say_it_as shows")
-    monkeypatch.setattr(lyric_melody, "overrides_supported", lambda: False)
+    monkeypatch.setattr(lyric_melody, "overrides_supported", lambda **kw: False)
 
     # A word the singer's dictionary lacks is named before the render; hear_words=False skips the hearing.
     heard.clear()
@@ -1089,7 +1089,7 @@ def test_a_pronunciation_stays_on_its_word_for_a_plugin_that_reads_it(monkeypatc
     spelled = "Sa-tur-day[s ae dx er d ey] night, _ ba-by [m]"
     with pytest.raises(ValueError, match="8 syllables"):
         vocal_tools.singer_syllables(spelled, line)
-    monkeypatch.setattr(lyric_melody, "overrides_supported", lambda: True)
+    monkeypatch.setattr(lyric_melody, "overrides_supported", lambda **kw: True)
     assert vocal_tools.vocalvst_lyric_string(spelled, line + [line[0]]) == "Sa-tur-day[s ae dx er d ey] night, + ba-by [m]"
     per_note = vocal_tools.vocalvst_per_note("Sa-tur-day[s ae dx er d ey] night, + ba-by")
     assert per_note[:3] == [(0, "Sa"), (0, "tur"), (0, "day[s ae dx er d ey]")]
@@ -1100,7 +1100,7 @@ def test_a_pronunciation_stays_on_its_word_for_a_plugin_that_reads_it(monkeypatc
     lines = vocal_tools.sung_lines([{"start": {"qn": 0.0}, "notes": notes}], "Sa-tur-day[s ae dx er d ey] night")
     assert [ln["line"] for ln in lines] == ["Saturday night"]
     # An older plugin would sing the symbols as words, so creaper drops them for it.
-    monkeypatch.setattr(lyric_melody, "overrides_supported", lambda: False)
+    monkeypatch.setattr(lyric_melody, "overrides_supported", lambda **kw: False)
     assert vocal_tools.vocalvst_lyric_string(spelled, line + [line[0]]) == "Sa-tur-day night, + ba-by m"
     monkeypatch.setattr(lyric_melody, "_phones_cache", {"ride": "r ay d"})
     assert vocal_tools.say_it_as("we ride at dawn to-night Sa-tur-day", ["ride", "saturday", "dawn"]) == \

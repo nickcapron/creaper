@@ -574,7 +574,7 @@ def singer_syllables(lyrics: str, line: list[dict], hold: str = "-") -> list[str
     return out
 
 
-def vocalvst_lyric_string(lyrics: str, line: list[dict]) -> str:
+def vocalvst_lyric_string(lyrics: str, line: list[dict], overrides: bool | None = None) -> str:
     """The lyrics as VocalVST takes them: the words as typed, hyphens kept ('Sa-tur-day'
     is one word on three notes: the plugin looks the whole word up and sings its real
     syllables, s-ae | dx-er | dx-ey; typed apart, 'Sa tur day' is three words sounded
@@ -583,7 +583,9 @@ def vocalvst_lyric_string(lyrics: str, line: list[dict]) -> str:
     the installed plugin predates them (lyric_melody.overrides_supported), when it is
     dropped. One syllable or hold per note, checked against the line."""
     singer_syllables(lyrics, line, hold="+")
-    if lyric_melody.has_overrides(lyrics) and not lyric_melody.overrides_supported():
+    if overrides is None:
+        overrides = lyric_melody.overrides_supported()
+    if lyric_melody.has_overrides(lyrics) and not overrides:
         lyrics = lyric_melody.strip_overrides(lyrics)
     return " ".join("+" if tk in ("_", "-", "+") else tk for tk in lyric_melody.tokens(lyrics))
 
@@ -1198,6 +1200,14 @@ def _log_details(log_size: int) -> dict:
     return out
 
 
+def _parameter_names(track: str | int, fx: int) -> set[str]:
+    """The names of the plugin's parameters (what this build has)."""
+    try:
+        return {p.get("name") for p in call("get_fx_parameters", track=track, fx=fx).get("parameters", [])}
+    except Exception:  # noqa: BLE001 - a build whose parameters can't be read decides nothing
+        return set()
+
+
 def _set_knobs(track: str | int, fx: int, wanted: dict[str, float]) -> tuple[list[str], dict[str, str]]:
     """Sets VocalVST's newer controls (Breaths, Formant, Seed, Phrase gap: added after
     Render on 2026-10-24) by their displayed values, in one call. Returns the names this
@@ -1370,7 +1380,8 @@ def render_vocalvst(
             extended.append(f"{item['id']} to {item['end'].get('seconds', '?')} s")
     if not line:
         raise ValueError("the track's MIDI items have no notes to sing")
-    text = vocalvst_lyric_string(lyrics, line) if lyrics else ""
+    speaks = lyric_melody.overrides_supported(parameters=_parameter_names(track, fx["index"]))
+    text = vocalvst_lyric_string(lyrics, line, overrides=speaks) if lyrics else ""
     lyric_check = lyric_melody.lint(lyrics, secs) if lyrics and mode != "scat" else {}
 
     state = call("capture_fx_state", track=track, fx=fx["index"])
@@ -1484,7 +1495,7 @@ def render_vocalvst(
         out["phonemes_unknown"] = (f"this voicebank has no {unknown_phones.group(1).strip()}, so it substituted or "
                                    "dropped them: respell those pronunciations with lower-case ARPAbet (dx for a "
                                    "flapped t/d, ax for a schwa)")
-    if lyrics and lyric_melody.has_overrides(lyrics) and not lyric_melody.overrides_supported():
+    if lyrics and lyric_melody.has_overrides(lyrics) and not speaks:
         out["pronunciation"] = ("the [pronunciations] were dropped: this VocalVST build predates them (it would sing "
                                 "the symbols as words). Reinstall the plugin to use them")
     if lyric_check:
@@ -1504,7 +1515,7 @@ def render_vocalvst(
                 out["next"] = ("rewrite the lines in heard.unclear_lines (their missed words first; lyric_check "
                                "says what trips the singer), then " + HEAR_NEXT + "; the vocal isn't done while any remain")
                 missed = [w for h in out["heard"].get("heard") or [] for w in h.get("missed") or []]
-                spelled = say_it_as(lyrics, missed) if missed and lyric_melody.overrides_supported() else {}
+                spelled = say_it_as(lyrics, missed) if missed and speaks else {}
                 if spelled:
                     out["heard"]["say_it_as"] = spelled
                     out["next"] = ("for a missed word the line needs, spell its sounds as heard.say_it_as shows "
