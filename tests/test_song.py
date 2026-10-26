@@ -551,6 +551,30 @@ def test_an_empty_midi_item_needs_no_instrument(monkeypatch):
     assert [(r["track"], r["status"]) for r in rows] == [("Lead", "fail")]
 
 
+def test_the_sounds_stage_names_a_synth_where_an_acoustic_style_wants_a_real_instrument(monkeypatch):
+    fx = {"Bass": [{"index": 1, "name": "VST3i: Prophet-VS V (Arturia)"}],
+          "Lead": [{"index": 1, "name": "VST3i: Jup-8 V4 (Arturia)"}],
+          "Pad": [{"index": 1, "name": "VST3i: Analog Lab V (Arturia)"}],
+          "Chords": [{"index": 1, "name": "VSTi: ReaSamplOmatic5000 (Cockos)"}],
+          "Hook": [{"index": 1, "name": "VST3i: Jup-8 V4 (Arturia)"}]}
+    monkeypatch.setattr(song_tools, "call", lambda cmd, **kw: {
+        "items": [{"type": "midi", "muted": False, "note_count": 9}], "instrument_fx": 1, "fx": fx[kw["track"]]})
+    tracks = [{"name": n} for n in fx]
+    ctx = type("Ctx", (), {"overview": {"tracks": tracks}, "genre": "americana"})()
+    rows = song_tools._sounds_rows(ctx)
+    assert [r["status"] for r in rows if r["check"] == "instrument"] == ["pass"] * 5
+    fits = [(r["track"], r["status"]) for r in rows if r["check"] == "instrument fits the style"]
+    assert fits == [("Bass", "warn"), ("Lead", "warn"), ("Hook", "warn")]   # Analog Lab and a sampler aren't synths here
+    bass = next(r for r in rows if r.get("track") == "Bass" and r["status"] == "warn")
+    assert "Prophet-VS V (Arturia) is a synthesizer playing the bass in americana" in bass["detail"]
+    assert "upright" in bass["detail"].lower() and "find_samples(role='bass')" in bass["fix"]
+    # Other styles welcome synths; no genre at all holds the sounds to nothing.
+    ctx.genre = "house"
+    assert all(r["check"] == "instrument" for r in song_tools._sounds_rows(ctx))
+    ctx.genre = None
+    assert all(r["check"] == "instrument" for r in song_tools._sounds_rows(ctx))
+
+
 def test_mastering_moves_get_the_balance_checked_again(monkeypatch):
     """Mastering added a limiter to the lead and raised it 3 dB after the mix was signed off;
     nothing checked the balance again and the user found the lead overpowering."""
@@ -606,10 +630,21 @@ def test_the_mix_stage_asks_for_auto_mix_and_a_sounding_vocal(monkeypatch, tmp_p
         {"name": "Vox", "guid": "{V}", "fx": ["VST3i: VocalVST (vocalvst)"]},
         {"name": "Vox 2", "guid": "{V2}", "fx": ["VST3i: VocalVST (vocalvst)"], "mute": True},
     ]}
-    monkeypatch.setattr(song_tools, "call", lambda cmd, **kw: {
-        "get_project_overview": overview,
-        "get_track_details": {"items": [{"type": "midi", "muted": False, "start": {"seconds": 2.0}, "end": {"seconds": 6.0}}]},
-    }[cmd])
+    notes = {"{I}": [{"start": 28.0, "length": 1.0}]}     # the first word comes 28 QN into an item that starts at QN 4
+
+    def fake_call(cmd, **kw):
+        if cmd == "get_project_overview":
+            return overview
+        if cmd == "get_track_details":
+            return {"items": [{"id": "{I}", "type": "midi", "muted": False, "start": {"seconds": 2.0, "qn": 4.0},
+                               "end": {"seconds": 40.0}}]}
+        if cmd == "get_midi_notes":
+            return {"notes": notes.get(kw["item_id"], [])}
+        if cmd == "qn_to_times":
+            return [q * 0.5 for q in kw["qns"]]
+        raise AssertionError(cmd)
+
+    monkeypatch.setattr(song_tools, "call", fake_call)
     sounding = {"{V}": False}
     probed = []
     monkeypatch.setattr(vocal_tools, "_track_audio", lambda track, a, b: probed.append((a, b)) or (sounding.get(track, True), b""))
@@ -618,7 +653,12 @@ def test_the_mix_stage_asks_for_auto_mix_and_a_sounding_vocal(monkeypatch, tmp_p
     assert [(r["check"], r["status"]) for r in rows] == [("auto_mix", "fail"), ("vocal take", "warn")]
     assert "hand-set effects on Drums are" in rows[0]["fix"] and rows[1]["track"] == "Vox"
     assert "mute the track and finish the song" in rows[1]["fix"]
-    assert probed == [(2.0, 7.0)]            # the muted vocal isn't probed; a short window, not the whole item
+    # The muted vocal isn't probed; the probe starts where the singing starts (QN 32 = 16 s), not at the
+    # item's start (a vocal item that began at bar 1 with an eight-bar intro was called silent), and it's short.
+    assert probed == [(16.0, 22.0)]
+    notes["{I}"] = []
+    assert song_tools._mix_rows(song_tools._Context("disco", {"auto_mix": {"at": "now"}})) == []    # no notes: nothing to sing yet
+    notes["{I}"] = [{"start": 28.0, "length": 1.0}]
     sounding["{V}"] = True
     assert song_tools._mix_rows(song_tools._Context("disco", {"auto_mix": {"at": "now"}})) == []
     # Tracks added after the run are named; a probe that can't run is said, not passed.

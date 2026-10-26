@@ -880,7 +880,35 @@ def add_genre_groove(
         result["fill_style"] = fill
         result["distinct_bars"] = grooves.distinct_bars(pattern, step, bar_qn)
     result["how_the_drums_work"] = g.drums
+    if energy is not None:
+        note = _energy_against_section(item_id, start, energy)
+        if note:
+            result["energy_note"] = note
     return result
+
+
+def _energy_against_section(item_id: str, start_qn: float, energy: int) -> str | None:
+    """The section (a region) this groove lands in, when its name promises another energy:
+    a chorus written at a verse's energy 2 (an americana song's Chorus 1) measures level
+    with the verse and the energy arc check sends the model back to it."""
+    from . import song_tools
+
+    try:
+        item = call("get_midi_notes", item_id=item_id, limit=1)
+        base = float(((item or {}).get("start") or {}).get("qn"))
+        sections = song_tools._sections(call("get_project_overview"))
+    except Exception:  # noqa: BLE001 - no regions, or an item the bridge can't place: nothing to compare with
+        return None
+    pos = base + float(start_qn)
+    here = next((s for s in sections if s["start_qn"] <= pos < s["end_qn"]), None)
+    if here is None:
+        return None
+    want = int(here["energy"])
+    if abs(want - energy) < 2 and not (want == 4 and energy < 3):
+        return None
+    return (f"{here['name']} promises energy {want} (its name) and this groove is energy {energy}: it will measure "
+            f"like the sections around it and the energy arc check will flag it. Write it at {want} unless another "
+            "part carries the change")
 
 
 def section_fill(row: dict, total_qn: float, chord_qn: float) -> list[dict]:

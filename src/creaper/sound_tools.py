@@ -564,7 +564,28 @@ def load_arturia_preset(
         for key in ("warning", "tuning_warning", "transposed_warning"):
             if heard.get(key):
                 out.setdefault("problems", []).append(heard[key])
+        slow = _swells_where_it_should_speak(track, out["sound"])
+        if slow:
+            out.setdefault("problems", []).append(slow)
     return out
+
+
+SPEAKING_ATTACK_MS = 120.0   # a hook, bass or strummed part has to land on the beat
+
+
+def _swells_where_it_should_speak(track, summary: dict | None) -> str | None:
+    """A preset whose notes swell in (a pad) on a track whose name says lead, bass, guitar
+    or keys: the Jup-8 'Harmonica' (264 ms attack, dark) went on a country song's hook track
+    by name and buried it."""
+    from . import mix_tools
+
+    attack = (summary or {}).get("median_attack_ms")
+    role = mix_tools.role_of(str(track))
+    if attack is None or role not in ("lead", "bass", "guitar", "keys") or attack <= SPEAKING_ATTACK_MS:
+        return None
+    return (f"its notes swell in over {attack:g} ms (a pad), but a {role} part has to speak on the beat: a hook or "
+            "bass played this way blurs and sinks. Pick a preset with a quick attack (find_arturia_presets by type, "
+            "or audition_sounds with character 'plucky' or 'sharp'), or use this sound as the pad")
 
 
 # ------------------------------------------------------------------- layering

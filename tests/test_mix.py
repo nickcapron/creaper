@@ -7,6 +7,8 @@ def test_roles_from_names_and_sound():
     assert role_of("909 Kick") == "kick" and role_of("Clap") == "snare" and role_of("Open Hat") == "perc"
     assert role_of("Octave Bass") == "bass" and role_of("Bass Duck") == "bass" and role_of("Robot Vocal") == "vocal"
     assert role_of("Strings Pad") == "pad" and role_of("Clav") == "keys" and role_of("Synth Hook") == "lead"
+    assert role_of("Acoustic Guitar") == "guitar" and role_of("Banjo") == "guitar" and role_of("Pedal Steel") == "guitar"
+    assert role_of("Lead Guitar") == "lead" and role_of("Chords") == "keys"          # a part named as the lead leads
     assert role_of("909 Drums") == "drums" and role_of("Riser FX") == "fx"
     low = {"bands": {"sub (20-60 Hz)": {"share_pct": 40}, "bass (60-250 Hz)": {"share_pct": 35}}}
     assert role_of("Track 7", low) == "bass"
@@ -44,6 +46,17 @@ def test_plan_sets_levels_relative_to_the_drums_for_the_genre():
     pop = plan_mix(chans, {"family": "pop", "mix": {"low_end": "moderate"}})
     # Pop wants the vocal 3 LU over the drums (+8 here); boosts stop at MAX_BOOST_DB.
     assert {a["name"]: a["gain_db"] for a in pop["channels"]}["Vocal"] == mix_tools.MAX_BOOST_DB == 6.0 and not pop["sidechains"]
+
+
+def test_the_acoustic_guitar_carries_a_country_song():
+    chans = [channel("Drums", "drums", -10), channel("Chords", "guitar", -10), channel("Organ", "pad", -10),
+             channel("Vocal", "vocal", -10)]
+    country = {a["name"]: a["gain_db"] for a in plan_mix(chans, {"family": "country and folk"})["channels"]}
+    assert country["Chords"] == -3.0 and country["Organ"] == -12.0 and country["Vocal"] == 3.0   # the strum just under the voice
+    pop = {a["name"]: a["gain_db"] for a in plan_mix(chans, {"family": "pop"})["channels"]}
+    assert pop["Chords"] == -6.0 and pop["Organ"] == -10.0
+    rock = {a["name"]: a["gain_db"] for a in plan_mix(chans, {"family": "rock"})["channels"]}
+    assert rock["Chords"] == -3.0                                                      # the wall
 
 
 def test_a_sung_vocal_sits_over_the_drums_and_the_balance_says_so():

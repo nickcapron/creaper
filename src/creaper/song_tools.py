@@ -185,10 +185,42 @@ def target_bars(length: str | None, bpm: float, bar_qn: float) -> int | None:
     return max(1, int(round(seconds * bpm / 60 / bar_qn)))
 
 
+# Synthesizers (not Analog Lab, which hosts pianos and organs too, nor samplers). In an
+# acoustic style a synth on the bass, guitar or lead passed the sounds stage unremarked: a
+# Prophet-VS bass and a Jup-8 pad called 'Harmonica' made a Zach Bryan-style song "more
+# pop than country".
+SYNTH_PLUGINS = re.compile(r"mini v|prophet|jup-8|jun-6|op-xa|cs-80|dx7|\bsem v|matrix-12|pigments|buchla|arp 2600|"
+                           r"modular v|synthi|\bcz v|\bcmi v|acid v|ms-20|polymoog|korg|serum|massive|vital|sylenth|"
+                           r"spire|\bdiva\b|repro|phase ?plant|vocoder|synclavier v", re.I)
+REAL_INSTRUMENT_ROLES = ("bass", "guitar", "lead")
+
+
+def _instrument_name(details: dict) -> str | None:
+    index = details.get("instrument_fx")
+    if index is None:
+        return None
+    for f in details.get("fx") or []:
+        if isinstance(f, dict) and f.get("index") == index:
+            return f.get("name")
+    return None
+
+
 def _sounds_rows(ctx: _Context) -> list[dict]:
     """Every MIDI track has an instrument; before the parts are written, the tracks with
-    their sounds chosen count (the sounds stage comes before the parts)."""
+    their sounds chosen count (the sounds stage comes before the parts). In an acoustic
+    style (country and folk, blues) a synth on the bass, guitar or lead is a warning that
+    names the real instruments the style and the sample library have."""
+    from . import mix_tools
+
     rows = []
+    acoustic = None
+    try:
+        genre = getattr(ctx, "genre", None)
+        acoustic = genres.find(genre) if genre else None
+        if acoustic is not None and acoustic.family not in mix_tools.ACOUSTIC_FAMILIES:
+            acoustic = None
+    except Exception:  # noqa: BLE001 - an unknown genre: no style to hold the sounds to
+        acoustic = None
     for t in ctx.overview.get("tracks", []):
         if t.get("mute"):
             continue      # a muted guide (a robot vocal's melody) plays nothing: it needs no instrument
@@ -201,6 +233,17 @@ def _sounds_rows(ctx: _Context) -> list[dict]:
         if midi or has:
             rows.append(songmap.row("instrument", "pass" if has else "fail", None, None,
                                     "load a sound: audition_sounds or load_arturia_preset", track=t["name"]))
+        name = _instrument_name(details)
+        role = mix_tools.role_of(t["name"])
+        if acoustic is not None and name and role in REAL_INSTRUMENT_ROLES and SYNTH_PLUGINS.search(name):
+            how = {"bass": acoustic.bass, "lead": acoustic.melody, "guitar": acoustic.harmony}.get(role) or ""
+            rows.append(songmap.row(
+                "instrument fits the style", "warn", None, None,
+                f"a real {role}: find_samples(role='{role}') or search 'acoustic bass', 'banjo', 'mandolin', 'violin', "
+                "'steel' and build_sampled_instrument from the hits (the library has them), or an Analog Lab acoustic "
+                "preset; keep the synth only if the user asked for one",
+                track=t["name"], detail=f"{name} is a synthesizer playing the {role} in {acoustic.name}"
+                + (f": {how}" if how else "")))
     return rows or [songmap.row("instrument", "fail", None, None,
                                 "no sounds yet: a track per part with its sound (audition_sounds)")]
 
@@ -417,9 +460,19 @@ def _mix_rows(ctx: _Context) -> list[dict]:
             items = [i for i in details.get("items", []) if i.get("type") == "midi" and not i.get("muted")]
             if not items:
                 continue
-            # Only the opening seconds of the first item: a take sounds there, and a whole-song
+            # Only the seconds where the singing starts: a take sounds there, and a whole-song
             # render per vocal on every check_song would cost more than the check is worth.
-            start = min(i["start"]["seconds"] for i in items)
+            # The first note, not the item's start: a country song's vocal item began at bar 1
+            # with eight bars of intro before the first word, and the probe called it silent.
+            first_qn = None
+            for item in items:
+                notes = call("get_midi_notes", item_id=item["id"], limit=20000).get("notes", [])
+                starts = [float(item["start"]["qn"]) + float(n["start"]) for n in notes if not n.get("muted")]
+                if starts and (first_qn is None or min(starts) < first_qn):
+                    first_qn = min(starts)
+            if first_qn is None:
+                continue      # no notes: nothing to sing yet
+            start = float(call("qn_to_times", qns=[first_qn])[0])
             end = min(max(i["end"]["seconds"] for i in items) + 1.0, start + VOCAL_PROBE_S)
             sounding = vocal_tools._track_audio(t.get("guid") or t["name"], start, end)[0]
         except Exception as e:  # noqa: BLE001 - say so rather than pass a vocal nobody heard

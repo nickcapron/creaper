@@ -212,6 +212,12 @@ def test_load_arturia_preset_tool(db, tmp_path, monkeypatch):
     assert applied["state"]["plugin"] == "VST3i: Jup-8 V4 (Arturia)" and applied["replace_instrument"] is True
     assert out["confirmed"] is True and out["browser_path"] == "Jup-8 V4 > Factory > Night Drive"
     assert out["problems"] == ["held notes play a pattern of their own"]
+    # A pad loaded on a hook track is said: the Jup-8 'Harmonica' swelled in over 264 ms on a country song's lead.
+    monkeypatch.setattr(music_tools, "audition_instrument", lambda **kw: {
+        "summary": {"character": "pure/dark, slow attack (pad/swell)", "median_attack_ms": 264.4}})
+    out = sound_tools.load_arturia_preset(track="Lead", preset="Night Drive")
+    assert len(out["problems"]) == 1 and "swell in over 264.4 ms (a pad), but a lead part has to speak" in out["problems"][0]
+    assert "problems" not in sound_tools.load_arturia_preset(track="Pad", preset="Night Drive")
 
 
 def test_another_seed_draws_other_candidates():

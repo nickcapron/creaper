@@ -25,10 +25,11 @@ from .server import DESTRUCTIVE, Bar, analyze_audio, call, setup_sidechain, tool
 # voice is the record: it sits over the drums (at 1 LU under them a synth-funk vocal was
 # "muddied into the mix"; the wall genres below pull it back inside the guitars).
 ROLE_LEVELS = {"kick": 0, "drums": 0, "snare": -3, "perc": -9, "bass": -2, "vocal": 1, "lead": -5,
-               "keys": -7, "pad": -10, "fx": -12, "other": -7}
-HIGHPASS_HZ = {"snare": 100, "perc": 300, "vocal": 110, "lead": 150, "keys": 140, "pad": 180, "fx": 150, "other": 120}
-REVERB_DB = {"vocal": -12, "lead": -15, "keys": -15, "pad": -9, "snare": -21, "perc": -24, "other": -18}
-PAN_WIDTH = {"perc": 0.35, "keys": 0.25, "pad": 0.2, "fx": 0.4, "other": 0.3, "lead": 0.0}
+               "guitar": -6, "keys": -7, "pad": -10, "fx": -12, "other": -7}
+HIGHPASS_HZ = {"snare": 100, "perc": 300, "vocal": 110, "lead": 150, "guitar": 100, "keys": 140, "pad": 180, "fx": 150,
+               "other": 120}
+REVERB_DB = {"vocal": -12, "lead": -15, "guitar": -15, "keys": -15, "pad": -9, "snare": -21, "perc": -24, "other": -18}
+PAN_WIDTH = {"perc": 0.35, "guitar": 0.2, "keys": 0.25, "pad": 0.2, "fx": 0.4, "other": 0.3, "lead": 0.0}
 COMPRESS = {"vocal": (3.0, 5, 80), "bass": (4.0, 20, 120), "lead": (2.5, 10, 100)}  # ratio, attack ms, release ms
 HEADROOM_PEAK_DB = -6.0
 # The tone pass (shares of each part's own energy, %).
@@ -79,17 +80,22 @@ ROLE_WORDS = [
     # A part named as the lead is the lead, whatever plays it ("Lead Violin", "Sax Solo").
     ("lead", r"\blead\b|\bsolo\b|melody|\btheme\b|hook"),
     ("keys", r"pizz|staccato|spiccato"),
+    # A strummed or picked string part: in country, folk and blues it's the backbone under the
+    # voice, not background keys (an americana song had its acoustic mixed as 'keys', 13 dB down
+    # and high-passed at 210 Hz, until the model pulled it back by hand).
+    ("guitar", r"guitar|acoustic|strum|banjo|mandolin|ukulele|\buke\b|dobro|\bsteel\b|resonator|\bgtr\b"),
     ("pad", r"\bpad|string|violin|viola|cello|fiddle|ensemble|orchestra|choir|atmos|ambien|drone|texture|swell"),
     ("keys", r"key|piano|rhodes|clav|organ|\bep\b|wurli|stab|brass|horn|trumpet|trombone|tuba|bassoon|woodwind|"
-             r"chord|guitar|harp|marimba|vibraphone|celesta|mallet"),
+             r"chord|harp|marimba|vibraphone|celesta|mallet"),
     ("lead", r"arp|pluck|synth|flute|clarinet|oboe|\bsax|whistle|ocarina"),
     ("fx", r"\bfx\b|sfx|riser|sweep|impact|noise|downlifter|uplifter|whoosh|transition|crowd|walla|foley|traffic|"
            r"\bcars?\b|\brain\b|\bwind\b|\bcity\b|\bhum\b|\bbirds?\b|footsteps?|\bfield\b|room ?tone"),
 ]
-Role = Literal["kick", "snare", "perc", "bass", "vocal", "drums", "lead", "keys", "pad", "fx", "other"]
+Role = Literal["kick", "snare", "perc", "bass", "vocal", "drums", "lead", "guitar", "keys", "pad", "fx", "other"]
 DANCE_FAMILIES = {"electronic dance"}
 MELODY_OVER_BED_FAMILIES = {"film and games", "ambient and experimental", "classical"}
 WALL_FAMILIES = {"rock", "metal and punk"}   # guitars at the vocal's level, not under it
+ACOUSTIC_FAMILIES = {"country and folk", "blues", "european folk"}   # the strummed guitar carries the song
 BED_UNDER_LEAD_LU = 3
 
 
@@ -341,7 +347,14 @@ def plan_mix(channels: list[dict], style: dict | None = None) -> dict:
         # vocal sat 14 dB over its guitars ("all I can hear is the singing").
         offsets["vocal"] -= 5 if style["family"] == "metal and punk" else 2
         offsets["keys"] = max(offsets["keys"], -3)
+        offsets["guitar"] = max(offsets["guitar"], -3)
         offsets["lead"] = max(offsets["lead"], -3)
+    if style.get("family") in ACOUSTIC_FAMILIES:
+        # The acoustic guitar is the band: it sits just under the voice, and an organ or
+        # string pad stays behind it (a Zach Bryan-style song came out "more pop than country"
+        # with the acoustic mixed as background keys and the organ level with it).
+        offsets["guitar"] = max(offsets["guitar"], -3)
+        offsets["pad"] = min(offsets["pad"], -12)
     if style.get("family") in MELODY_OVER_BED_FAMILIES:
         # A cue's solo melody leads over its drone: the dance-music bass level (3 LU over
         # the lead) put a solo flute under the drone in an ambient game cue.
@@ -1239,7 +1252,9 @@ def auto_mix(
         "before it), with a gain plugin first on the master; needs the sections as regions"))] = True,
     roles: Annotated[dict[str, Role] | None, Field(description=(
         "Each part's job, by track name, where its name doesn't say it: {\"Violin I\": \"lead\", \"City Hum\": "
-        "\"fx\"}. The featured melody is 'lead' (it sits over the other parts); levels follow the roles"))] = None,
+        "\"fx\", \"Chords\": \"guitar\"}. The featured melody is 'lead' (it sits over the other parts); a strummed "
+        "or picked acoustic is 'guitar' (in country, folk and blues it sits just under the voice); levels follow "
+        "the roles"))] = None,
     dry_run: Annotated[bool, Field(description=(
         "Only report what it would do (it costs the same render as a real run: don't dry-run first)"))] = False,
 ) -> dict:

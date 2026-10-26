@@ -175,6 +175,22 @@ def test_add_genre_groove_writes_a_whole_varied_section(monkeypatch):
     assert out["bars"] == 16 and out["fill_style"] == "clap_roll" and out["distinct_bars"] >= 0.3
     music_tools.add_genre_groove(item_id="{A}", genre="house", repeats=4, variations=False)
     assert written["repeats"] == 4 and len(written["pattern"]["kick"].replace(" ", "")) == 16   # the stock bar
+    assert "energy_note" not in out                       # no regions: nothing to hold the energy to
+
+
+def test_a_groove_at_the_wrong_energy_for_its_section_is_said(monkeypatch):
+    from creaper import music_tools
+    regions = [{"name": "Verse 1", "start": {"qn": 32.0, "bar": 9}, "end": {"qn": 96.0, "bar": 25}},
+               {"name": "Chorus 1", "start": {"qn": 96.0, "bar": 25}, "end": {"qn": 128.0, "bar": 33}}]
+    monkeypatch.setattr(music_tools, "call", lambda cmd, **kw: {
+        "get_project_overview": {"time_signature": "4/4", "regions": regions},
+        "get_midi_notes": {"start": {"qn": 0.0}, "notes": []}}.get(cmd, {"time_signature": "4/4"}))
+    monkeypatch.setattr(music_tools, "add_drum_pattern", lambda **kw: {})
+    out = music_tools.add_genre_groove(item_id="{A}", genre="americana", start=96, bars=8, energy=2, seed=1)
+    assert out["energy_note"].startswith("Chorus 1 promises energy 4 (its name) and this groove is energy 2")
+    assert "energy_note" not in music_tools.add_genre_groove(item_id="{A}", genre="americana", start=96, bars=8, energy=4)
+    assert "energy_note" not in music_tools.add_genre_groove(item_id="{A}", genre="americana", start=32, bars=16, energy=2)
+    assert "energy_note" not in music_tools.add_genre_groove(item_id="{A}", genre="americana", start=32, bars=16, energy=3)
 
 
 # ------------------------------------------------------------------- chords
