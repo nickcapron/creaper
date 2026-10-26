@@ -48,7 +48,8 @@ def plan_song(genre, sections: list[tuple[str, int]], seed: int, energies: list[
     the song rather than one loop copied: drums at the section's energy (busier hats in
     a chorus, a thinner kick in an intro) with a new seed each time, the bass and chords
     on every section's own seed, the lead in the verse's shape in verses (a new line
-    each verse) and the same hook in every chorus (the hook should come back), a
+    each verse) and the same hook in every chorus (the hook should come back), doubled
+    a third over it in a middle chorus and an octave up in the last, a
     counter-melody from the second chorus on so later choruses add something, and the
     breaks thinned to chords and a hint of the hook. Club genres open and close on
     drums (a DJ needs a beat to mix on). sections: [(name, bars)]."""
@@ -95,6 +96,8 @@ def plan_song(genre, sections: list[tuple[str, int]], seed: int, energies: list[
                 parts["lead"] = hook
                 if len(choruses) > 1 and idx != choruses[0]:
                     parts["counter"] = {"seed": base + idx}
+                    # The same hook, grown: a third over it in a middle chorus, the octave in the last.
+                    parts["lead"] = dict(hook, double="octave" if idx == choruses[-1] else "third")
             elif kind == "pre":
                 parts["lead"] = dict(verse_lead, seed=base + 30 + nth, register_lift=1)
             elif kind == "post":

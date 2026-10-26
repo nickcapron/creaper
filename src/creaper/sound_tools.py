@@ -647,6 +647,9 @@ def _filters(track, highpass_hz: float | None, lowpass_hz: float | None) -> list
     return done
 
 
+SUB_FLOOR_PITCH = 28   # E1, 41 Hz: a layer's lowest note stays at or above it
+
+
 @tool()
 def layer_instrument(
     track: TrackRef,
@@ -670,6 +673,11 @@ def layer_instrument(
     if not [i for i in details.get("items", []) if i.get("type") == "midi"]:
         raise ValueError(f"'{part}' has no MIDI part for the layers to play")
     number = details.get("number") or details.get("track", {}).get("number")
+    lowest = None
+    for item in details.get("items", []):
+        if item.get("type") == "midi" and item.get("id"):
+            pitches = [n["pitch"] for n in call("get_midi_notes", item_id=item["id"], limit=20000).get("notes", [])]
+            lowest = min([lowest, *pitches] if lowest is not None else pitches, default=lowest)
     installed = None
     made = []
     for i, layer in enumerate(layers, 1):
@@ -699,14 +707,20 @@ def layer_instrument(
             what = entry["name"]
         else:
             what = layer.instrument
-        if layer.octave:
+        octave = layer.octave
+        while octave < 0 and lowest is not None and lowest + 12 * octave < SUB_FLOOR_PITCH:
+            octave += 1     # an E1 bass an octave down plays at 20 Hz: felt by nobody, limited all the same
+        if octave:
             tr = call("add_fx", track=target, name="JS: MIDI Transpose Notes", position=1)
             call("set_fx_parameters", track=target, fx=tr["index"],
-                 changes=[{"parameter": "Transpose Semitones", "display_value": 12 * layer.octave}])
+                 changes=[{"parameter": "Transpose Semitones", "display_value": 12 * octave}])
         filters = _filters(target, layer.highpass_hz, layer.lowpass_hz)
         call("set_track_properties", track=target, volume_db=layer.volume_db, pan=layer.pan)
         call("set_send", source=track, destination=target, midi_only=True)
-        made.append({"track": label, "_ref": target, "sound": what, "octave": layer.octave,
+        made.append({"track": label, "_ref": target, "sound": what, "octave": octave,
+                     **({"octave_note": f"octave {octave}, not {layer.octave}: the part goes down to MIDI {lowest}, "
+                                        "and lower than that the layer would sit under what speakers play"}
+                        if octave != layer.octave else {}),
                      "volume_db": layer.volume_db,
                      "pan": layer.pan, **({"filters": filters} if filters else {})})
     folder = call("create_folder", tracks=[track] + [m.pop("_ref") for m in made], name=part + LAYERED)

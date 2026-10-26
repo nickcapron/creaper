@@ -26,22 +26,25 @@ from .server import DESTRUCTIVE, Bar, analyze_audio, call, setup_sidechain, tool
 # "muddied into the mix"; the wall genres below pull it back inside the guitars).
 ROLE_LEVELS = {"kick": 0, "drums": 0, "snare": -3, "perc": -9, "bass": -2, "vocal": 1, "lead": -5,
                "guitar": -6, "keys": -7, "pad": -10, "fx": -12, "other": -7}
-HIGHPASS_HZ = {"snare": 100, "perc": 300, "vocal": 110, "lead": 150, "guitar": 100, "keys": 140, "pad": 180, "fx": 150,
-               "other": 120}
+# High passes that clear room without taking the body: at keys 140 / pad 180 / lead 150
+# the mixes measured 4-6 dB under Suno's at 125-400 Hz in 9 of 10 songs ("thin", "scientific").
+HIGHPASS_HZ = {"snare": 100, "perc": 200, "vocal": 110, "lead": 110, "guitar": 100, "keys": 100, "pad": 130, "fx": 150,
+               "other": 90}
 REVERB_DB = {"vocal": -12, "lead": -15, "guitar": -15, "keys": -15, "pad": -9, "snare": -21, "perc": -24, "other": -18}
-PAN_WIDTH = {"perc": 0.35, "guitar": 0.2, "keys": 0.25, "pad": 0.2, "fx": 0.4, "other": 0.3, "lead": 0.0}
+PAN_WIDTH = {"perc": 0.5, "guitar": 0.4, "keys": 0.4, "pad": 0.2, "fx": 0.4, "other": 0.3, "lead": 0.0}
 COMPRESS = {"vocal": (3.0, 5, 80), "bass": (4.0, 20, 120), "lead": (2.5, 10, 100)}  # ratio, attack ms, release ms
 HEADROOM_PEAK_DB = -6.0
 # The tone pass (shares of each part's own energy, %).
 PRESENCE_LOW_PCT, PRESENCE_HIGH_PCT = 8.0, 30.0   # 2-6 kHz for vocals and leads: lift under, cut over
+VOCAL_PRESENCE_LOW_PCT = 12.0   # a sung vocal's floor: Suno's carry 3-9 dB more 2-5 kHz than creaper's did
 PRESENCE_CUT_DB, PRESENCE_HZ = -2.0, 3000
-AIR_LOW_PCT, AIR_HZ = 2.0, 10000
+AIR_LOW_PCT, AIR_HZ = 3.0, 10000
 TONE_LIFT_MIN_DB, TONE_LIFT_MAX_DB = 1.5, 6.0
 VOCAL_HIGHPASS_MIN_HZ = 80   # a singer's rumble and breath noise aren't "lowest strong content"
 # A whole kit's tone (role drums, never a lone kick, which is meant to be sub): the 90s pop
 # kit had 55% of its energy under 60 Hz and 5% over 2 kHz (centroid 588 Hz) and got no EQ,
 # so the master's limiter worked on its sub while the hats stayed dull.
-DRUM_SUB_HIGH_PCT, DRUM_SUB_TRIM_DB, DRUM_SUB_HZ = 40.0, -3.0, 60
+DRUM_SUB_HIGH_PCT, DRUM_SUB_TRIM_DB, DRUM_SUB_HZ = 25.0, -3.0, 60
 DRUM_PRESENCE_LOW_PCT, DRUM_AIR_LOW_PCT, DRUM_TONE_MAX_DB = 6.0, 4.0, 4.0
 
 
@@ -54,14 +57,17 @@ def tone_lift_db(share_pct: float, low_pct: float) -> float:
         return TONE_LIFT_MAX_DB
     db = 10 * math.log10(low_pct / share_pct)
     return max(TONE_LIFT_MIN_DB, min(TONE_LIFT_MAX_DB, round(db * 2) / 2))
+MUD_CUT_PCT = 35         # a part with more of its energy at 250-500 Hz gets a cut there (at 25, most warm parts did)
 CARVE_DB = -2.5          # kick and bass each cut where the other is loudest below 120 Hz
-LOW_HEAVY_KEYS_PCT = 15  # keys and pads with more of their energy under 250 Hz get a higher high pass
+LOW_HEAVY_KEYS_PCT = 25  # keys and pads with more of their energy under 250 Hz get a higher high pass
 # ... except parts whose low register is their job: that high pass took the fundamentals
 # off "Strings Low" (250 Hz) and "Low Brass" (210 Hz) in an orchestral cue, twice.
 LOW_REGISTER_NAMES = r"\blow\b|cello|contrabass|double ?bass|tuba|trombone|bassoon|baritone|euphonium"
 NO_HIGHPASS_HZ = 20      # ReaEQ's band 5 is a high pass that defaults to 100 Hz: parked here when unwanted
 LOW_MONO_CORRELATION = 0.9   # a bass or kick whose lows correlate less than this gets narrowed
-WIDEN_DB, WIDEN_MIN_CORRELATION = 4.0, 0.6   # pads/keys in wide genres; only while they stay safe in mono
+# Pads/keys get wider in all but narrow genres (moderate ones by less) while they stay safe in mono:
+# the mixes were 5 dB narrower than Suno's at 1-5 kHz in 10 of 10 songs.
+WIDEN_DB, WIDEN_MODERATE_DB, WIDEN_MIN_CORRELATION, WIDEN_UNDER_DB = 6.0, 4.0, 0.6, -6.0
 WIDTH_FX = "JS: Stereo Width"
 PEAKY_MIX_PLR_DB = 12.0  # a mix whose peaks sit further over its loudness needs density before mastering
 # Loudness (K-weighted) underrates sub-bass, so a sustained sub drone measured "quiet"
@@ -387,14 +393,15 @@ def plan_mix(channels: list[dict], style: dict | None = None) -> dict:
                 a["highpass_hz"] = hp
             bands = (c.get("spectrum") or {}).get("bands", {})
             mud = (bands.get("low mids (250-500 Hz)") or {}).get("share_pct", 0)
-            if c["role"] in ("keys", "pad", "lead", "vocal", "other") and mud > 25:
-                a["mud_cut_db"] = -3.0 if mud > 35 else -2.0
+            if c["role"] in ("keys", "pad", "lead", "vocal", "other") and mud > MUD_CUT_PCT:
+                a["mud_cut_db"] = -3.0 if mud > MUD_CUT_PCT + 10 else -2.0
         if not c.get("has_eq"):
             bands = (c.get("spectrum") or {}).get("bands", {})
             if c["role"] in ("vocal", "lead"):
                 presence = sum((bands.get(k) or {}).get("share_pct", 0) for k in ("upper mids (2-4 kHz)", "presence (4-6 kHz)"))
-                if presence and presence < PRESENCE_LOW_PCT:
-                    a["presence_db"] = tone_lift_db(presence, PRESENCE_LOW_PCT)
+                floor = VOCAL_PRESENCE_LOW_PCT if c["role"] == "vocal" else PRESENCE_LOW_PCT
+                if presence and presence < floor:
+                    a["presence_db"] = tone_lift_db(presence, floor)
                 elif presence > PRESENCE_HIGH_PCT:
                     a["presence_db"] = PRESENCE_CUT_DB
                 air = (bands.get("air (6-20 kHz)") or {}).get("share_pct")
@@ -422,10 +429,12 @@ def plan_mix(channels: list[dict], style: dict | None = None) -> dict:
             a["mono_low"] = True        # a bass or kick whose lows spread: they belong in the middle
         elif c["role"] == "drums" and low_corr is not None and low_corr < LOW_MONO_CORRELATION:
             a["low_end_not_mono"] = round(low_corr, 2)   # a whole kit: narrowing it would close the hats too
-        if (c["role"] in ("pad", "keys") and (style.get("mix") or {}).get("width") == "wide"
+        genre_width = (style.get("mix") or {}).get("width")
+        if (c["role"] in ("pad", "keys") and genre_width in ("wide", "moderate")
                 and (stereo_info.get("correlation") or 0) >= WIDEN_MIN_CORRELATION
-                and (stereo_info.get("side_to_mid_db") if stereo_info.get("side_to_mid_db") is not None else -60) < -9):
-            a["widen_db"] = WIDEN_DB
+                and (stereo_info.get("side_to_mid_db") if stereo_info.get("side_to_mid_db") is not None else -60)
+                < WIDEN_UNDER_DB):
+            a["widen_db"] = WIDEN_DB if genre_width == "wide" else WIDEN_MODERATE_DB
         width = PAN_WIDTH.get(c["role"], 0.0)
         if width and abs(c.get("pan") or 0) < 0.01:
             a["pan"] = round(side * width, 2)
@@ -1049,6 +1058,9 @@ def _loud_spans(channels: list[dict], envelopes: dict, offset_s: float) -> dict:
     return out
 
 
+DELAY_LOWPASS_HZ = 8000   # the echoes darker than what feeds them, not dull (5000 took the air)
+
+
 def _delay_return(bpm: float) -> dict:
     """A shared delay return (an existing one, or ReaDelay): a dotted-8th echo, darkened
     and thinned so it sits behind what feeds it. One space for leads and vocals, like
@@ -1072,7 +1084,7 @@ def _delay_return(bpm: float) -> dict:
                    {"parameter": "Length (time)", "display_value": dotted_eighth_ms},
                    {"parameter": "Length (musical)", "display_value": 0},
                    {"parameter": "Feedback", "display_value": -9},
-                   {"parameter": "Lowpass", "display_value": 5000}, {"parameter": "Hipass", "display_value": 300}]
+                   {"parameter": "Lowpass", "display_value": DELAY_LOWPASS_HZ}, {"parameter": "Hipass", "display_value": 300}]
     set_result = call("set_fx_parameters", track=guid, fx=fx.get("index", 1), changes=changes)
     failed = [c for c in set_result.get("results", []) if isinstance(c, dict) and c.get("error")]
     out = {"track": guid, "name": "Delay", "time_ms": dotted_eighth_ms, "reused": False, "plugin": fx.get("name")}
@@ -1133,8 +1145,10 @@ def _mix_bus_glue(start_bar: float | None, end_bar: float | None,
 # vocals, a hall for pads, film and classical; in between for the rest.
 REVERB_SIZE = {"pop": 0.35, "r&b and soul": 0.35, "hip-hop": 0.35, "classical": 0.65, "film and games": 0.65,
                "ambient and experimental": 0.7}
-REVERB_FILTER_HZ = (280, 7000)   # a reverb without its lows (mud) and highs (hiss, sibilance) sits behind
-ROOM_FILTER_HZ = (150, 8000)
+# A reverb without its lows (mud) and highest highs (hiss, sibilance) sits behind; at (280, 7000)
+# it also took the warmth and air that make a space sound expensive.
+REVERB_FILTER_HZ = (180, 10000)
+ROOM_FILTER_HZ = (110, 10000)
 # An FX name that makes a track a reverb return (REAPER's, or an Arturia "Rev PLATE-140"),
 # and one that makes it any effects return: the drum glue must never land on one.
 REVERB_FX = r"verb|\bRev [A-Z]"

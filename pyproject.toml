@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "creaper"
-version = "0.52.0"
+version = "0.53.0"
 description = "Let Claude compose, mix and analyze in REAPER: an MCP server plus a REAPER bridge script"
 readme = "README.md"
 license = "MIT"

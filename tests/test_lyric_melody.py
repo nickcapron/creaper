@@ -159,6 +159,32 @@ def test_a_rap_fills_the_bar_on_one_low_pitch():
                          breath_qn=lm.RAP_BREATH_QN, sung_share=lm.RAP_SUNG_SHARE, grid=lm.RAP_GRID_QN)[-1].start         < 4.0 - lm.RAP_BREATH_QN + 1e-6
 
 
+def test_a_raps_lines_breathe_in_time_not_in_beats():
+    """The grilled-cheese rap went to the plugin as 349 notes in three phrases: half a
+    beat between lines is 0.33 s at 92 BPM, under VocalVST's phrase split."""
+    key, events = _verse()
+    lines = ["Roll up to the kitchen", "Butter on the bread"]
+    out = lm.compose(lines, events, key, 50, 64, shape="rap", line_bars=1, seed=2, bpm=92)
+    n1 = out["lines"][0]["notes"]
+    first_end = max(n["start"] + n["length"] for n in out["notes"][:n1])
+    assert (out["notes"][n1]["start"] - first_end) * 60 / 92 >= lm.RAP_BREATH_S - 1e-6
+    # A dense bar keeps its words with the shorter gap rather than being refused.
+    dense = ["Roll up to the kitchen in the dead of night", "Butter on the bread and the flame set right"]
+    assert [ln["notes"] for ln in lm.compose(dense, events, key, 50, 64, shape="rap", line_bars=1, seed=2,
+                                             bpm=92)["lines"]] == [11, 10]
+
+
+def test_a_line_swells_toward_its_peak_and_eases_off():
+    """Velocity is the plugin's only loudness control: a line at one level sounds read out."""
+    key, events = _verse()
+    out = lm.compose(["Saturday night I'm coming round to see you", "in my white suit for you tonight"],
+                     events, key, 50, 64, shape="verse", seed=1)
+    first = out["notes"][:out["lines"][0]["notes"]]
+    stressed = [n["velocity"] for n in first if n["velocity"] >= 90]
+    assert max(stressed) - min(stressed) >= 6                                  # stresses vary along the arc
+    assert first[-1]["velocity"] < max(n["velocity"] for n in first)            # the tail eases off
+
+
 def test_too_many_words_for_the_bars_is_said():
     key, events = _verse()
     with pytest.raises(ValueError, match="too many syllables"):

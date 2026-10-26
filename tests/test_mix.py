@@ -98,7 +98,8 @@ def test_plan_cleans_up_without_touching_what_the_user_set():
              channel("Lead", "lead", -12, has_eq=True, has_comp=True),
              channel("Vocal", "vocal", -12, crest_db=8)]
     acts = {a["name"]: a for a in plan_mix(chans)["channels"]}
-    assert acts["Keys"]["highpass_hz"] == 140 and acts["Keys"]["mud_cut_db"] == -3.0 and acts["Keys"]["pan"] == 0.25
+    assert acts["Keys"]["highpass_hz"] == mix_tools.HIGHPASS_HZ["keys"] and acts["Keys"]["mud_cut_db"] == -2.0
+    assert acts["Keys"]["pan"] == mix_tools.PAN_WIDTH["keys"]
     assert "pan" not in acts["Keys 2"]                                   # already panned by the user
     assert "highpass_hz" not in acts["Lead"] and "compress" not in acts["Lead"]   # has its own EQ and compressor
     assert "compress" not in acts["Vocal"]                               # already even (crest 8 dB)
@@ -149,7 +150,7 @@ def test_highpass_stays_under_a_parts_lowest_notes():
     viola = octaves(**{"125 Hz": -30, "250 Hz": -6, "500 Hz": -4, "1 kHz": -8})
     assert highpass_for("pad", viola) == 106     # under its lowest strong octave (~177 Hz), not the usual 180
     hats = octaves(**{"2 kHz": -10, "4 kHz": -4, "8 kHz": -3})
-    assert highpass_for("perc", hats) == 300     # nothing low: the usual high-pass
+    assert highpass_for("perc", hats) == mix_tools.HIGHPASS_HZ["perc"]     # nothing low: the usual high-pass
     assert highpass_for("bass", cello) is None
 
 
@@ -404,7 +405,7 @@ def test_the_returns_use_the_users_arturia_effects(monkeypatch):
     mix_tools, calls, settings = _fx_fake(monkeypatch, ["Rev PLATE-140", "Rev INTENSITY", "Delay TAPE-201"])
     assert mix_tools._reverb_return(120, "pop") == "Reverb"
     assert [a["name"] for c, a in calls if c == "add_fx"] == ["Rev PLATE-140"]
-    assert settings() == {"Blend Dry/wet": 1.0, "Decay Time": 2, "Pre Delay": 31.2, "HP Filter": 280}
+    assert settings() == {"Blend Dry/wet": 1.0, "Decay Time": 2, "Pre Delay": 31.2, "HP Filter": mix_tools.REVERB_FILTER_HZ[0]}
     mix_tools, calls, settings = _fx_fake(monkeypatch, ["Rev PLATE-140", "Rev INTENSITY", "Delay TAPE-201"])
     mix_tools._reverb_return(90, "film and games")                       # a hall for a cue
     assert [a["name"] for c, a in calls if c == "add_fx"] == ["Rev INTENSITY"] and settings()["Size"] == 0.65
@@ -518,10 +519,10 @@ def test_tone_pass_presence_air_carve_and_low_heavy_keys():
     acts = {a["name"]: a for a in mix_tools.plan_mix(channels)["channels"]}
     assert acts["Bass"]["carve"] == {"hz": 32, "db": mix_tools.CARVE_DB}     # where the kick is loudest
     assert acts["Kick"]["carve"] == {"hz": 63, "db": mix_tools.CARVE_DB}     # and the other way round
-    # Lifts scale with the deficit: 5% of 2-6 kHz against the 8% floor is +2 dB, 0.5% air against 2% is the +6 cap.
+    # Lifts scale with the deficit: 5% of 2-6 kHz against the 8% floor is +2 dB, 0.5% air against 3% is the +6 cap.
     assert acts["Lead"]["presence_db"] == 2.0 and acts["Lead"]["air_db"] == 6.0
     assert acts["Vocal"]["presence_db"] == mix_tools.PRESENCE_CUT_DB and "air_db" not in acts["Vocal"]
-    assert acts["Pad"]["highpass_hz"] >= 250
+    assert acts["Pad"]["highpass_hz"] >= int(mix_tools.HIGHPASS_HZ["pad"] * 1.5)     # low-heavy: cleared further
     # Every EQ sets band 5 on purpose: a bass with only a carve isn't high-passed at ReaEQ's default 100 Hz.
     bass_eq = {c["parameter"]: c["display_value"] for c in mix_tools.eq_changes(acts["Bass"])}
     assert bass_eq["Freq-High Pass 5"] == mix_tools.NO_HIGHPASS_HZ and bass_eq["Freq-Band 2"] == 32
@@ -535,7 +536,8 @@ def test_a_dull_sung_vocal_gets_a_real_lift_and_keeps_its_high_pass():
     spec["octave_bands_db"] = {"31.5 Hz": -40, "63 Hz": -30, "125 Hz": -15, "1 kHz": -10}
     vocal = {"name": "Vocal", "role": "vocal", "level": -13, "spectrum": spec}
     act = {a["name"]: a for a in mix_tools.plan_mix([{"name": "Drums", "role": "drums", "level": -10}, vocal])["channels"]}["Vocal"]
-    assert act["presence_db"] == 4.5 and act["air_db"] == 3.0   # 10 log10(8/3) and 10 log10(2/1), to the half dB
+    # 10 log10(12/3) (a sung vocal's floor, VOCAL_PRESENCE_LOW_PCT) and 10 log10(3/1), to the half dB
+    assert act["presence_db"] == 6.0 and act["air_db"] == 5.0
     assert act["highpass_hz"] >= mix_tools.VOCAL_HIGHPASS_MIN_HZ
     assert mix_tools.tone_lift_db(0, 8) == mix_tools.TONE_LIFT_MAX_DB and mix_tools.tone_lift_db(7.9, 8) == mix_tools.TONE_LIFT_MIN_DB
 
@@ -575,7 +577,7 @@ def test_low_strings_and_brass_keep_their_fundamentals():
                 {"name": "Synth Pad", "role": "pad", "level": -20, "spectrum": low}]
     acts = {a["name"]: a for a in mix_tools.plan_mix(channels)["channels"]}
     assert "highpass_hz" not in acts["Strings Low"] and "highpass_hz" not in acts["Low Brass"]  # under 40 Hz: none
-    assert acts["Synth Pad"]["highpass_hz"] >= 250     # a pad crowding the bass still gets cleared
+    assert acts["Synth Pad"]["highpass_hz"] >= int(mix_tools.HIGHPASS_HZ["pad"] * 1.5)  # crowding the bass: cleared
 
 
 def test_kick_and_bass_sharing_an_octave_leave_it_to_the_kick():

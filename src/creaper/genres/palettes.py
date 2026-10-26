@@ -41,7 +41,8 @@ class Palette:
     notes: str = ""
 
 
-SUB_LAYER = "a mono sine or triangle sub an octave down, filtered mid layer on top (high-pass it near 120 Hz)"
+SUB_LAYER = ("a mono sine or triangle sub (an octave down when the bass sits above E2, in its own octave when "
+             "it's lower), filtered mid layer on top (high-pass it near 120 Hz)")
 
 PALETTES: dict[str, Palette] = {
     "synthwave": Palette(

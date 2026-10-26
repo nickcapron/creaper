@@ -960,6 +960,37 @@ def range_advice(pitches: list[int], bank: str | Path, speaker: str = "", rap: b
 
 
 SYLLABLE_GAP_SECONDS = 0.2   # sung syllables closer than this blur into each other
+BREATH_GAP_S = 0.3           # a rest this long lets the singer breathe (the plugin's Breaths go there)
+LONG_PHRASE_S = 8.0          # sung on without one for longer, a line turns into one operatic run
+FLAT_VELOCITY_STD = 6.0      # MIDI velocity spread under this: every word at one loudness
+
+
+def longest_phrase(spans: list[tuple[float, float]]) -> float:
+    """The longest run of notes (start, end in seconds) with no rest of BREATH_GAP_S
+    between them, in seconds."""
+    longest, run_start, run_end = 0.0, None, None
+    for a, b in sorted(spans):
+        if run_start is None or a - run_end >= BREATH_GAP_S:
+            run_start, run_end = a, b
+        else:
+            run_end = max(run_end, b)
+        longest = max(longest, run_end - run_start)
+    return longest
+
+
+def flat_velocity_advice(velocities: list[int]) -> str | None:
+    """Advice when a sung line's notes all have about one velocity, VocalVST's only
+    per-word loudness control."""
+    if len(velocities) < 8:
+        return None
+    mean = sum(velocities) / len(velocities)
+    spread = (sum((v - mean) ** 2 for v in velocities) / len(velocities)) ** 0.5
+    if spread >= FLAT_VELOCITY_STD:
+        return None
+    return ("every note has about the same velocity, so every word comes out at one loudness and the take sounds "
+            "read out: stressed syllables near 100, unstressed near 75, a swell toward each line's high point "
+            "(write_vocal_melody writes it that way)")
+
 
 
 def syllable_rate_advice(gaps: list[float]) -> str | None:
@@ -991,6 +1022,7 @@ def _vocalvst_fx(track: str | int) -> tuple[dict, list[dict]]:
     if fx is None:
         raise ValueError(f"track {details.get('number', track)} \"{details.get('name', '')}\" has no VocalVST on it: "
                          "create_track(name, instrument='VocalVST') or add_fx it first")
+    fx = {**fx, "track_guid": details.get("guid")}
     items = sorted((i for i in details.get("items", []) if i.get("type") == "midi" and not i.get("muted")),
                    key=lambda i: i["start"]["seconds"])
     if not items:
@@ -1170,6 +1202,11 @@ def vocalvst_lines(track: str | int) -> list[dict]:
     parts = [call("get_midi_notes", item_id=item["id"], limit=20000) for item in items]
     return sung_lines(parts, lyrics)
 
+
+GOOD_ENOUGH_HEARD = 0.85      # words heard: past this, a rewrite and re-render buys a few % for minutes
+MAX_REWRITES = 2              # re-renders of one track for its words; the rap spent 9 renders on 75% -> 98%
+RAP_PHRASE_GAP_S = 0.3        # a rap's lines are phrases of their own (the plugin's default gap is 0.8 s)
+_HEARD_TAKES: dict[str, int] = {}
 
 HEAR_NEXT = ("render_vocalvst again with the new lyrics (write_vocal_melody first when the words change their "
              "syllable count)")
@@ -1380,7 +1417,8 @@ def render_vocalvst(
         "The take's noise seed: the same seed with the same notes and settings gives the same take again; 0 picks "
         "a new one (the result says which, so a take you like can be pinned)"))] = None,
     phrase_gap_s: Annotated[float | None, Field(ge=0.2, le=4, description=(
-        "Pauses this long or longer split the take into phrases rendered one by one (the plugin's default is 0.8 s)"))] = None,
+        "Pauses this long or longer split the take into phrases rendered one by one (the plugin's default is 0.8 s; "
+        "a rap gets 0.3 s, so each line is its own phrase)"))] = None,
     timeout_seconds: Annotated[float, Field(ge=30, le=900, description="How long to wait for the render")] = 240,
     hear_words: Annotated[bool, Field(description=(
         "Afterwards, transcribe the take with a speech recogniser and report each line as heard, the words it "
@@ -1392,6 +1430,10 @@ def render_vocalvst(
         "good\"); off for a harmony, a rap (two flattened voices sound like a choir), and when "
         "add_vocal_harmony(interval='unison') doubles the line instead (both would make four voices). Doubles the "
         "render time. Default: on when singing, off for a rap"))] = None,
+    force: Annotated[bool, Field(description=(
+        "Render even when the line sits outside the voice's sweet spot or runs longer than "
+        f"{LONG_PHRASE_S:g} s without a breath (both are refused before the render otherwise, since either costs "
+        "a whole take): only when that is what the song wants"))] = False,
 ) -> dict:
     """Makes VocalVST (the user's singing plugin) sing the MIDI on its track: sets the
     lyrics and mode, plays the transport over every note on the track, silently (the
@@ -1410,14 +1452,15 @@ def render_vocalvst(
     phrase gap are the plugin's newer controls. Before the render, `lyric_check` names
     words the singer will stumble on; after it, `heard` is what a speech recogniser
     made of each line ("Sat turd day night" for "Saturday night"): rewrite the lines in
-    unclear_lines before anyone listens, and don't call the vocal done while there are
-    any."""
+    unclear_lines before anyone listens, until `next` says the words are good enough
+    (about 85% heard, or two rewrites)."""
     fx, items = _vocalvst_fx(track)
     want = resolve_voice(voice) if voice else None   # or the default lead, once the track's own voice is known
     line: list[dict] = []
     parts: list[dict] = []
     extended: list[str] = []
     gaps: list[float] = []
+    spans: list[tuple[float, float]] = []
     secs: list[float] | None = []
     chord_notes = 0
     for item in items:
@@ -1430,6 +1473,8 @@ def render_vocalvst(
             per_qn = part["length_seconds"] / part["length_qn"]
             gaps += [(b["start"] - a["start"]) * per_qn for a, b in zip(notes, notes[1:])
                      if (b["start"] - a["start"]) * per_qn < 1.0]     # not across a rest between lines
+            at = (item.get("start") or {}).get("seconds") or 0.0
+            spans += [(at + n["start"] * per_qn, at + (n["start"] + n["length"]) * per_qn) for n in notes]
             if secs is not None:
                 secs += [n["length"] * per_qn for n in notes]
         else:
@@ -1499,12 +1544,23 @@ def render_vocalvst(
                              + str(VOICEBANK_ROOT) + " in Explorer, or choose it with the Voicebank button in "
                              "the plugin's window (update_fx with show=True), then call again")
     voice_info = bank_voices(bank) or {}
+    where = range_advice([n["pitch"] for n in line], bank, speaker, rap=mode == "rap")
+    longest = longest_phrase(spans)
+    if not force and where.get("advice"):
+        raise ValueError(f"not rendered: {where['advice']}. write_vocal_melody(voice=...) writes the line for the voice "
+                         "that sings it; force=True renders it as it is")
+    if not force and longest > LONG_PHRASE_S:
+        raise ValueError(f"not rendered: the line runs {longest:.0f} s without a breath (a gap of "
+                         f"{BREATH_GAP_S:g} s or more), and the singer turns it into one long operatic phrase. Leave a "
+                         "rest after each line (write_vocal_melody does); force=True renders it as it is")
     lyric_check = lyric_melody.lint(lyrics, secs, bank=bank) if lyrics and mode != "scat" else {}
     formant_note = None
     if formant and voice_info.get("formant_fixed"):
         formant_note, formant = voice_info["formant_fixed"], None
     if double is None:
         double = mode != "rap"
+    if phrase_gap_s is None and mode == "rap":
+        phrase_gap_s = RAP_PHRASE_GAP_S   # each line its own phrase, not one long run
     if mode == "rap":
         expression = None            # the rule pitch curve: the pitch model, and its Expression, don't run
     call("set_fx_parameter", track=track, fx=fx["index"], parameter="Mode", display_text=mode.capitalize())
@@ -1554,7 +1610,7 @@ def render_vocalvst(
            **_log_details(log_size),
            "pass": {"from_seconds": round(start, 3), "to_seconds": round(end, 3)},
            "voicebank": Path(bank).name, "voice": speaker or "the bank's default",
-           "range": range_advice([n["pitch"] for n in line], bank, speaker, rap=mode == "rap"), "result": report,
+           "range": where, "result": report,
            "plays": "in sync with the transport over the captured region, and in offline renders (analyze_audio, "
                     "measure_tracks, export_mix); not in audition_instrument",
            "next": "check it in the mix with check_vocal_clarity after auto_mix; render again after any change "
@@ -1591,7 +1647,17 @@ def render_vocalvst(
                 out["heard"] = _hear_take(track, parts, lyrics, span)
             except Exception as e:  # noqa: BLE001  (a failed hearing mustn't undo the take)
                 out["heard"] = {"error": f"couldn't transcribe the take: {e}"}
-            if out["heard"].get("unclear_lines"):
+            heard_key = fx.get("track_guid") or str(track)
+            takes = _HEARD_TAKES[heard_key] = _HEARD_TAKES.get(heard_key, 0) + 1
+            share = out["heard"].get("words_heard")
+            if out["heard"].get("unclear_lines") and (
+                    (share is not None and share >= GOOD_ENOUGH_HEARD) or takes > MAX_REWRITES):
+                out["next"] = ((f"{share:.0%} of the key words heard: " if share is not None else "")
+                               + ("good enough, move on with the song" if share is not None and share >= GOOD_ENOUGH_HEARD
+                                  else f"{takes} takes heard already, so move on with the song")
+                               + "; another render costs minutes for a few more words. Name the unclear lines to the "
+                               "user when the song is done")
+            elif out["heard"].get("unclear_lines"):
                 out["next"] = ("rewrite the lines in heard.unclear_lines (their missed words first; lyric_check "
                                "says what trips the singer), then " + HEAR_NEXT + "; the vocal isn't done while any remain")
                 missed = [w for h in out["heard"].get("heard") or [] for w in h.get("missed") or []]
@@ -1618,6 +1684,9 @@ def render_vocalvst(
     without = re.search(r"(\d+) notes without lyrics", report)
     if lyrics and without and int(without.group(1)):
         out["warning"] = without.group(1) + " notes got no syllable and sing la: fewer syllables than captured notes"
+    flat = flat_velocity_advice([n.get("velocity", 100) for n in line])
+    if flat:
+        out["dynamics"] = flat
     fast = syllable_rate_advice(gaps) if lyrics and mode == "sing" else None
     if fast:
         out["words"] = fast
@@ -1628,8 +1697,9 @@ def render_vocalvst(
 
 
 def _voice_range(voice: str | None, bank: str | Path | None = None) -> tuple[int, int, str]:
-    """The sweet spot of a voice (or bank), and whose it is; TIGER's when nothing is
-    known and it's installed, else Canary's."""
+    """The sweet spot of a voice (or bank), and whose it is. With neither given, the
+    default lead's (DEFAULT_LEAD), since that's who render_vocalvst sings a new track
+    with; then TIGER's when installed, else Canary's."""
     known = None
     if voice:
         path, speaker = resolve_voice(voice)
@@ -1638,6 +1708,9 @@ def _voice_range(voice: str | None, bank: str | Path | None = None) -> tuple[int
             known = {**known, "sweet": (known["sweet"][0] + 7, known["sweet"][1] + 7)}
     elif bank:
         known = bank_voices(bank)
+    else:
+        lead = default_voice()
+        known = bank_voices(lead[0]) if lead else None
     if not known:
         installed = installed_voices()
         name = "TIGER" if any(k.startswith("tiger") for k in installed) else "Canary"
@@ -1659,8 +1732,9 @@ def write_vocal_melody(
     key: Annotated[str | None, Field(description="Key, e.g. 'A minor'; default: detected from the chords")] = None,
     chord_length: Annotated[float, Field(gt=0, description="QN per chord when chords is text")] = 4.0,
     voice: Annotated[str | None, Field(description=(
-        "The singer, for the range: a VocalVST voice ('tiger_disco', 'Canary'); default: TIGER's range when "
-        "it's installed, else Canary's. low/high override it"))] = None,
+        "The singer, for the range: a VocalVST voice ('Nectar', 'tiger_disco'); give the same one to "
+        "render_vocalvst. Default: the default lead's range (Nectar), the voice render_vocalvst sings a new "
+        "track with. low/high override it"))] = None,
     low: Annotated[str | int | None, Field(description="Lowest note, e.g. D3; default: the voice's sweet spot")] = None,
     high: Annotated[str | int | None, Field(description="Highest note, e.g. E4")] = None,
     shape: Annotated[Literal["verse", "chorus", "bridge", "rap"], Field(description=(
@@ -1693,33 +1767,37 @@ def write_vocal_melody(
     k = music_tools._key(key)
     events, k = music_tools._events(chords, k, chord_length, start)
     lo, hi, singer = _voice_range(voice)
+    sung_by = voice or (DEFAULT_LEAD if default_voice() else None)
     if low is not None:
         lo = theory.note_to_midi(low)
     if high is not None:
         hi = theory.note_to_midi(high)
     if hi - lo < 7:
         raise ValueError("the range needs at least a fifth between low and high")
+    try:
+        bpm = float(call("get_project_overview").get("tempo_bpm") or 120)
+    except Exception:  # noqa: BLE001 - a busy REAPER: a typical tempo
+        bpm = 120.0
     chosen = seed if seed is not None else random.randrange(1, 10**6)
     out = lyric_melody.compose(lines, events, k, lo, hi, shape=shape, meter=music_tools._project_meter(),
-                               line_bars=line_bars, start=start, seed=chosen, melisma=melisma, syncopation=syncopation)
+                               line_bars=line_bars, start=start, seed=chosen, melisma=melisma, syncopation=syncopation,
+                               bpm=bpm)
     written = call("add_midi_notes", item_id=item_id, notes=out["notes"], replace=replace)
     names = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
     nn = lambda p: f"{names[p % 12]}{p // 12 - 1}"  # noqa: E731
     result = {"key": k.name, "seed": chosen, "notes_written": len(out["notes"]), "lyrics": out["lyrics"],
               "lines": out["lines"], "line_bars": out["line_bars"],
-              "range": {"lowest": nn(out["range"][0]), "highest": nn(out["range"][1]), "voice": f"{singer} ({nn(lo)}-{nn(hi)})"},
+              "range": {"lowest": nn(out["range"][0]), "highest": nn(out["range"][1]),
+                        "voice": f"{sung_by or singer} ({nn(lo)}-{nn(hi)})"},
               "syllables_per_beat_max": out["syllables_per_beat_max"],
               "next": (f"render_vocalvst(track, lyrics=<this lyrics string>, mode={'rap' if shape == 'rap' else 'sing'!r}, "
-                       "voice=...) sings it; the string is one token per note, so pass it as returned")}
+                       f"voice={sung_by or '...'!r}) sings it: the range was written for that voice. The string is one "
+                       "token per note, so pass it as returned")}
     if isinstance(written, dict):
         result["item"] = {k_: written[k_] for k_ in ("notes", "end", "grew") if k_ in written}
     if out["syllables_per_beat_max"] > (RAP_MAX_PER_BEAT if shape == "rap" else SUNG_MAX_PER_BEAT):
         result["warning"] = (f"{out['syllables_per_beat_max']:g} syllables a beat at the busiest: words this fast "
                              "blur; give the lines more bars (line_bars) or fewer words")
-    try:
-        bpm = float(call("get_project_overview").get("tempo_bpm") or 120)
-    except Exception:  # noqa: BLE001 - a busy REAPER: lint at a typical tempo
-        bpm = 120.0
     check = lyric_melody.lint(out["lyrics"], [n["length"] * 60.0 / bpm for n in out["notes"]])
     if check:
         result["lyric_check"] = check
@@ -1801,7 +1879,8 @@ def add_vocal_harmony(
     if lyrics and lyrics.split()[0] in ("+", "_", "-"):
         lyrics = "la " + " ".join(lyrics.split()[1:])      # a slice can't start on a hold
     render = render_vocalvst(new_track, lyrics=lyrics, mode="sing", voice=voice, expression=expression,
-                             formant=formant, seed=seed, timeout_seconds=timeout_seconds, double=False)
+                             formant=formant, seed=seed, timeout_seconds=timeout_seconds, double=False,
+                             force=True)   # the lead's line passed the checks; a harmony sits off it on purpose
     out = {"track": new_track, "interval": interval, "key": k.name, "items": copied, "voice": render.get("voice"),
            "pan": pan, "volume_db": volume_db, "render": render.get("result"), "range": render.get("range"),
            "next": "measure_tracks the two together; a second harmony (a sixth below, pan the other way) thickens a "

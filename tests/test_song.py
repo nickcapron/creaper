@@ -205,8 +205,18 @@ def test_build_song_writes_every_section_as_its_own_variant(reaper):
     # No two sections play the same drums, bass or chords.
     for track in ("Drums", "Bass", "Chords"):
         assert not [s for s in m["sections"] if s["tracks"].get(track, {}).get("same_as")], track
-    leads = [s["tracks"]["Lead"] for s in m["sections"] if s["section"].startswith("Chorus") and "Lead" in s["tracks"]]
-    assert any(c.get("same_as") for c in leads)             # the hook returns
+    # The hook returns in every chorus, grown in the later ones: a third over it, then the octave.
+    choruses = [i for i in reaper.items.values() if (i["name"] or "").startswith("Chorus") and i["name"].endswith(" lead")]
+    def tune(item):      # the lowest note at each onset (the feel nudges onsets by a few ms)
+        at = {}
+        for n in item["notes"]:
+            key = round(n["start"] * 6)
+            at[key] = min(at.get(key, 999), n["pitch"])
+        return [at[k] for k in sorted(at)]
+    assert len(choruses) >= 3 and tune(choruses[1]) == tune(choruses[0])      # same tune (a longer last chorus differs)
+    assert len(choruses[1]["notes"]) == 2 * len(choruses[0]["notes"])             # a third over it
+    last = {(round(n["start"] * 6), n["pitch"]) for n in choruses[-1]["notes"]}
+    assert sum((at, p - 12) in last for at, p in last) == len(last) // 2          # the octave over it
     assert out["seed"] == 3 and out["key"] == "A minor"
     assert all(n["start"] + n["length"] <= i["end"] - i["start"] + 1e-6
                for i in reaper.items.values() for n in i["notes"])

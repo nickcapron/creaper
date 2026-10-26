@@ -197,8 +197,8 @@ Samples and vocals:
   (find_samples role "vocal", then chop_vocal or place_loop); VocalVST's sung words
   when installed (write_vocal_melody from the lyrics, then render_vocalvst with its lyrics
   and voice= Nectar (Hanami), or TIGER for a man; it reports
-  what a listener makes of each line: rewrite the unclear lines and render again before
-  moving on, don't ask the user whether the words came through;
+  what a listener makes of each line: rewrite the unclear lines and re-render until
+  its next says enough, don't ask the user whether the words came through;
   add_vocal_harmony stacks the choruses; distortion after it for shrieks. A rap:
   write_vocal_melody shape "rap", render_vocalvst mode "rap", a plain voice; it's a
   singer flattened, not speech, say so) or a singing synth app (export_vocal_midi);
@@ -1865,6 +1865,9 @@ def add_vocal_chain(
     return result
 
 
+MASTER_HIGHPASS_HZ = 30.0     # the G-funk master had 10% of its energy at 20-30 Hz, all of it limited
+
+
 @tool()
 def master_to_target(
     target_lufs: Annotated[float | None, Field(ge=-30, le=-4, description="Integrated loudness to reach")] = None,
@@ -1875,6 +1878,9 @@ def master_to_target(
     glue_compressor: Annotated[str | None, Field(description="Bus compressor to use for glue, e.g. the user's 'Bus FORCE' or 'Comp VCA-65'; default ReaComp")] = None,
     glue_db: Annotated[float, Field(ge=0.5, le=6, description="How much the glue compressor should tame the peaks, in dB")] = 1.5,
     eq: Annotated[str | None, Field(description="Also put this EQ first on the master (added flat, for shaping tone), e.g. 'EQ SITRAL-295'")] = None,
+    sub_highpass_hz: Annotated[float | None, Field(ge=20, le=40, description=(
+        "A ReaEQ high pass first on the master, here: the sub under it is felt by nobody, but the limiter spends "
+        "its few dB on it and flattens the kick. null leaves it off"))] = MASTER_HIGHPASS_HZ,
     clip: Annotated[bool, Field(description=(
         "When the limiter alone can't reach the target, let a soft clipper before it round the mix's peaks "
         "(as little as gets there, at most ~3 dB); off for styles that should breathe"))] = True,
@@ -1963,6 +1969,14 @@ def master_to_target(
     if eq and not find_fx(eq):
         added = call("add_fx", track="master", name=eq, position=1)
         result["eq"] = f"{added['name']} is first on the master, flat; shape the tone with set_fx_parameters"
+    if sub_highpass_hz and not find_fx("ReaEQ"):
+        # A master ReaEQ already there is the user's or an earlier run's: left as it is.
+        added = call("add_fx", track="master", name="ReaEQ", position=1)
+        at = added.get("index") or (find_fx("ReaEQ") or {}).get("index")
+        if at:
+            call("set_fx_parameters", track="master", fx=at,
+                 changes=[{"parameter": "Freq-High Pass 5", "display_value": sub_highpass_hz}])
+            result["sub_highpass"] = f"ReaEQ first on the master, high pass at {sub_highpass_hz:g} Hz"
 
     limiter = find_fx("ReaLimit") or call("add_fx", track="master", name="ReaLimit")
     if glue:

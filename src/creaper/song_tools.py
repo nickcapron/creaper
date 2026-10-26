@@ -17,7 +17,7 @@ import numpy as np
 import soundfile as sf
 from pydantic import Field
 
-from . import analysis, arrange_tools, composer, genres, harmony, jsonstore, songmap, structure, styles
+from . import analysis, arrange_tools, composer, genres, harmony, jsonstore, lyric_melody, songmap, structure, styles
 from .server import DESTRUCTIVE, READ_ONLY, bridge, call, confirm_with_user, tool
 
 STAGES = ("form", "sounds", "parts", "feel", "transitions", "mix", "master")
@@ -750,6 +750,8 @@ def build_song(
                                              register_lift=p["register_lift"], seed=p["seed"], candidates=3,
                                              feel=played_as, **voice)
                 report["parts"][part] = {"shape": p["shape"], "hook_score": (r.get("hook_score") or {}).get("score")}
+                if p.get("double") and lead_for != "voice":
+                    report["parts"][part]["double"] = _double_lead(item["id"], sec_key, p["double"])
             elif part == "counter" and "lead" in items:
                 r = music_tools.write_counter_melody(item_id=item["id"], melody_item_id=items["lead"],
                                                      chords_item_id=items.get("chords"), key=sec_key, seed=p["seed"],
@@ -768,6 +770,25 @@ def build_song(
                  "write_automation into the peaks, auto_mix(style), check_song. Re-write one section's part with "
                  "its tool (a new seed) rather than copying another section."),
     }
+
+
+LEAD_DOUBLE_STEPS = {"third": 2, "octave": 7}   # scale steps over the hook
+LEAD_DOUBLE_VELOCITY = -15                       # under the hook, not beside it
+
+
+def _double_lead(item_id: str, key: str, how: str) -> str:
+    """Adds the hook again a third or an octave over itself, quieter, in the same item:
+    a later chorus grows instead of repeating the first."""
+    k = harmony.parse_key(key)
+    notes = call("get_midi_notes", item_id=item_id, limit=20000).get("notes", [])
+    if not notes or k is None:
+        return "not doubled: no notes or no key"
+    steps = LEAD_DOUBLE_STEPS[how]
+    extra = [{"pitch": n["pitch"] + 12 if how == "octave" else lyric_melody.diatonic_shift(n["pitch"], k, steps),
+              "start": n["start"], "length": n["length"], "velocity": max(1, n.get("velocity", 96) + LEAD_DOUBLE_VELOCITY),
+              "channel": n.get("channel", 1)} for n in notes]
+    call("add_midi_notes", item_id=item_id, notes=[n for n in extra if n["pitch"] <= 127], replace=False)
+    return f"{how} over the hook, {LEAD_DOUBLE_VELOCITY} velocity"
 
 
 # ------------------------------------------------------------- stage gates

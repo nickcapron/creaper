@@ -129,7 +129,7 @@ def test_master_to_target_soft_clips_when_the_limiter_alone_cant(monkeypatch, tm
     peak = analysis._db(float(abs(mix).max()))
     alone = batch.plan_limiter(mix, FS, -6.0, -1.0, peak - 5.0)["lufs"]       # where the old master stopped
     state = _master_with_renders(monkeypatch, tmp_path, mix)
-    out = server.master_to_target(target_lufs=round(alone + 1.0, 1), glue=False, force=True)
+    out = server.master_to_target(target_lufs=round(alone + 1.0, 1), glue=False, force=True, sub_highpass_hz=None)
     assert out["reached"], out
     assert "limited_at" not in out
     assert state["added"] == [(SOFT_CLIPPER, 1)]                 # before the limiter, which moved to 2
@@ -145,7 +145,7 @@ def test_master_to_target_soft_clips_when_the_limiter_alone_cant(monkeypatch, tm
 def test_a_hopeless_target_clips_its_most_and_says_so(monkeypatch, tmp_path):
     mix = _peaky_mix(24)
     state = _master_with_renders(monkeypatch, tmp_path, mix)
-    out = server.master_to_target(target_lufs=-4.0, glue=False, force=True)
+    out = server.master_to_target(target_lufs=-4.0, glue=False, force=True, sub_highpass_hz=None)
     assert not out["reached"] and state["clip_on"]
     assert out["clipper"]["peaks_over_brickwall_db"] == batch.MASTER_CLIP_OVER_DB
     assert "soft-clipped" in out["limited_at"] and "needs density" in out["limited_at"]
@@ -158,10 +158,10 @@ def test_no_clipper_for_a_reachable_target_or_when_turned_off(monkeypatch, tmp_p
     peak = analysis._db(float(abs(mix).max()))
     alone = batch.plan_limiter(mix, FS, -6.0, -1.0, peak - 5.0)["lufs"]
     state = _master_with_renders(monkeypatch, tmp_path, mix)
-    out = server.master_to_target(target_lufs=round(alone - 2.0, 1), glue=False, force=True)
+    out = server.master_to_target(target_lufs=round(alone - 2.0, 1), glue=False, force=True, sub_highpass_hz=None)
     assert out["reached"] and state["added"] == [] and "clipper" not in out
     state = _master_with_renders(monkeypatch, tmp_path / "off", mix)
-    out = server.master_to_target(target_lufs=-4.0, glue=False, force=True, clip=False)
+    out = server.master_to_target(target_lufs=-4.0, glue=False, force=True, sub_highpass_hz=None, clip=False)
     assert not out["reached"] and state["added"] == [] and "clipper" not in out
     assert "soft-clipped" not in out["limited_at"] and "more than 5 dB of limiting" in out["limited_at"]
 
@@ -169,7 +169,7 @@ def test_no_clipper_for_a_reachable_target_or_when_turned_off(monkeypatch, tmp_p
 def test_styles_that_should_breathe_keep_the_clipper_off(monkeypatch, tmp_path):
     mix = _peaky_mix(24)
     state = _master_with_renders(monkeypatch, tmp_path, mix)
-    out = server.master_to_target(target_lufs=-4.0, style="jazz", glue=False, force=True)
+    out = server.master_to_target(target_lufs=-4.0, style="jazz", glue=False, force=True, sub_highpass_hz=None)
     assert state["added"] == [] and "clipper" not in out and not out["reached"]
 
 
@@ -179,13 +179,13 @@ def test_an_earlier_clipper_is_bypassed_for_the_measurement_and_reused(monkeypat
     alone = batch.plan_limiter(mix, FS, -6.0, -1.0, peak - 5.0)["lufs"]
     state = _master_with_renders(monkeypatch, tmp_path, mix, fx_names=(SOFT_CLIPPER, "ReaLimit"))
     state["clip_on"], state["boost"] = True, 7.0           # left loud by an earlier run
-    out = server.master_to_target(target_lufs=round(alone + 1.0, 1), glue=False, force=True)
+    out = server.master_to_target(target_lufs=round(alone + 1.0, 1), glue=False, force=True, sub_highpass_hz=None)
     assert out["reached"] and state["added"] == []         # reused, not added again
     assert out["clipper"]["boost_db"] == state["boost"] < 7.0   # set for this mix, not left at 7
     # And when the limiter alone gets there, the old clipper stays off.
     state = _master_with_renders(monkeypatch, tmp_path / "quiet", mix, fx_names=(SOFT_CLIPPER, "ReaLimit"))
     state["clip_on"], state["boost"] = True, 7.0
-    out = server.master_to_target(target_lufs=round(alone - 2.0, 1), glue=False, force=True)
+    out = server.master_to_target(target_lufs=round(alone - 2.0, 1), glue=False, force=True, sub_highpass_hz=None)
     assert out["reached"] and not state["clip_on"] and out["clipper"]["bypassed"]
 
 
@@ -199,3 +199,14 @@ def test_peakiest_parts_leave_out_risers_and_impacts(monkeypatch):
     monkeypatch.setattr(ear_tools, "measure_tracks", lambda **k: table)
     rows = server._peakiest_parts(None, None)
     assert [r["track"] for r in rows] == ["Drums", "Chords"]
+
+
+def test_the_master_is_high_passed_under_what_anyone_hears(monkeypatch, tmp_path):
+    """The G-funk master had 10% of its energy at 20-30 Hz, all of it limited."""
+    mix = _peaky_mix(24)
+    state = _master_with_renders(monkeypatch, tmp_path, mix)
+    out = server.master_to_target(target_lufs=-14.0, glue=False, force=True)
+    assert state["added"][0] == ("ReaEQ", 1) and "30 Hz" in out["sub_highpass"]
+    state = _master_with_renders(monkeypatch, tmp_path / "again", mix, fx_names=("ReaEQ", "ReaLimit"))
+    out = server.master_to_target(target_lufs=-14.0, glue=False, force=True)
+    assert "ReaEQ" not in [n for n, _ in state["added"]] and "sub_highpass" not in out   # one already there stays

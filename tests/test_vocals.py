@@ -702,8 +702,12 @@ def test_render_vocalvst_says_where_the_line_sits_for_the_voice(tmp_path, monkey
     assert out["range"]["middle"] == "D4" and "advice" not in out["range"]
     high = [{"pitch": p, "start": i * 1.0, "length": 0.9, "velocity": 100} for i, p in enumerate((72, 74, 76, 72, 71, 72))]
     (tmp_path / "high").mkdir()
-    _vocalvst_bridge(tmp_path / "high", monkeypatch, notes=high)
-    out = vocal_tools.render_vocalvst(track=1)
+    calls, _ = _vocalvst_bridge(tmp_path / "high", monkeypatch, notes=high)
+    # Out of the voice's sweet spot, the line isn't rendered: that would cost a whole take.
+    with pytest.raises(ValueError, match="not rendered: the line sits high.*down 12"):
+        vocal_tools.render_vocalvst(track=1)
+    assert "transport" not in [c for c, _ in calls]
+    out = vocal_tools.render_vocalvst(track=1, force=True)
     assert "sits high" in out["range"]["advice"] and "down 12" in out["range"]["advice"]
 
 
@@ -1105,6 +1109,38 @@ def test_render_vocalvst_reports_what_a_listener_hears_and_what_trips_the_singer
     monkeypatch.setattr(asr, "available", lambda: False)
     out = vocal_tools.render_vocalvst(track="Vocal", lyrics="we ride at dawn to-night")
     assert out["heard"].startswith("not checked: pip install")
+
+
+def test_the_words_are_good_enough_after_two_rewrites_or_85_percent(tmp_path, monkeypatch):
+    """The rap spent 9 renders (about 35 min) raising words_heard from 75% to 98%."""
+    from creaper import asr, lyric_melody, vocal_tools
+
+    _vocalvst_bridge(tmp_path, monkeypatch, sounds_after=0)
+    monkeypatch.setattr(lyric_melody, "_dictionary_cache", {"we": "1", "ride": "1", "at": "1", "dawn": "1", "tonight": "01"})
+    monkeypatch.setattr(asr, "available", lambda: True)
+    monkeypatch.setattr(asr, "transcribe", lambda audio: ("Weird at dawn tonight", []))
+    nexts = [vocal_tools.render_vocalvst(track="Vocal", lyrics="we ride at dawn to-night")["next"] for _ in range(3)]
+    assert nexts[0].startswith("rewrite") and nexts[1].startswith("rewrite")
+    assert "3 takes heard already, so move on" in nexts[2]
+    monkeypatch.setattr(vocal_tools, "_HEARD_TAKES", {})
+    monkeypatch.setattr(asr, "UNCLEAR", 0.95)          # one line at 88%: unclear, but the take is good enough
+    monkeypatch.setattr(asr, "transcribe", lambda audio: ("we ride at dawn", []))
+    monkeypatch.setattr(asr, "match_words", lambda lyric, text: (0.88, ["tonight"]))
+    out = vocal_tools.render_vocalvst(track="Vocal", lyrics="we ride at dawn to-night")
+    assert out["heard"]["unclear_lines"] and out["next"].startswith("88% of the key words heard: good enough")
+
+
+def test_a_line_with_no_breath_is_refused_before_the_render(tmp_path, monkeypatch):
+    from creaper import vocal_tools
+
+    run = [{"pitch": 62 + i % 3, "start": i * 0.5, "length": 0.45, "velocity": 100} for i in range(40)]   # 10 s, no rest
+    calls, _ = _vocalvst_bridge(tmp_path, monkeypatch, notes=run)
+    with pytest.raises(ValueError, match="runs 10 s without a breath"):
+        vocal_tools.render_vocalvst(track=1)
+    assert "transport" not in [c for c, _ in calls]
+    assert "same velocity" in vocal_tools.flat_velocity_advice([n["velocity"] for n in run])
+    assert vocal_tools.longest_phrase([(0, 1), (1.1, 2), (2.5, 3)]) == 2
+    assert vocal_tools.flat_velocity_advice([100, 76, 90, 104, 70, 96, 80, 100]) is None
 
 
 def test_sung_lines_split_at_rests_and_follow_the_words(monkeypatch):

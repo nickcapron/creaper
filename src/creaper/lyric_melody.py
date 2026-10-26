@@ -62,10 +62,14 @@ SHAPE_ARC = {"verse": 4, "chorus": 5, "bridge": 4, "rap": 1}       # scale steps
 # at the line's end. VocalVST's rap mode flattens whatever is written toward the line's middle
 # anyway (30% of the movement, vowels capped at 220 ms), so the notes decide rhythm and register.
 RAP_BREATH_QN = 0.5
+RAP_BREATH_S = 0.6       # ...and this long in time where the bar has room (a dense bar keeps RAP_BREATH_QN)
 RAP_SUNG_SHARE = 0.9
 RAP_STEP_UP = 0.3        # how often a stressed syllable steps up from the reciting pitch
 RAP_GRID_QN = 0.5        # a rap's stressed syllables land on 8ths, not only on beats
 VELOCITY = {"stressed": 100, "unstressed": 76, "final": 90}
+# A line swells toward its peak and eases off at the end: velocity is VocalVST's only
+# loudness control (about 6 dB either way), and a take at one level sounds read out.
+ARC_VELOCITY = 12        # from the line's start/end to its peak (half of it in a rap)
 
 
 # ------------------------------------------------------------------ syllables
@@ -533,10 +537,12 @@ def _normalise(text: str) -> str:
 
 def compose(lines: list[str], events: list[composer.ChordEvent], key: Key, low: int, high: int,
             shape: str = "verse", meter: str = "4/4", line_bars: float | None = None, start: float = 0.0,
-            seed: int | None = None, melisma: bool | None = None, syncopation: float = 0.0) -> dict:
+            seed: int | None = None, melisma: bool | None = None, syncopation: float = 0.0,
+            bpm: float | None = None) -> dict:
     """The sung line for these lyrics over these chords. Returns notes (start in QN from
     the item start, length, pitch, velocity), the lyrics string render_vocalvst takes
-    (one token per note, '_' for a held note) and a summary of each line."""
+    (one token per note, '_' for a held note) and a summary of each line. bpm sets a
+    rap's gap between lines in time (RAP_BREATH_S)."""
     lines = [ln for ln in lines if ln.strip()]
     if not lines:
         raise ValueError("give the words, one line per phrase")
@@ -558,6 +564,8 @@ def compose(lines: list[str], events: list[composer.ChordEvent], key: Key, low: 
     if melisma is None:
         melisma = shape == "chorus"
     tonic = key.tonic % 12
+    rap_breath = max(RAP_BREATH_QN, RAP_BREATH_S * bpm / 60.0) if bpm else RAP_BREATH_QN
+    swell = ARC_VELOCITY / (2 if rap else 1)
 
     out_lines: list[VocalLine] = []
     seen: dict[str, VocalLine] = {}
@@ -578,8 +586,14 @@ def compose(lines: list[str], events: list[composer.ChordEvent], key: Key, low: 
         syls = line_syllables(text)
         if not syls:
             continue
-        placed = place_line(syls, span, hold, rng, syncopation,
-                            *((RAP_BREATH_QN, RAP_SUNG_SHARE, RAP_GRID_QN) if rap else ()))
+        try:
+            placed = place_line(syls, span, hold, rng, syncopation,
+                                *((rap_breath, RAP_SUNG_SHARE, RAP_GRID_QN) if rap else ()))
+        except ValueError:
+            if not rap or rap_breath <= RAP_BREATH_QN:
+                raise
+            # A dense bar keeps its words: the shorter gap, which still splits the phrase.
+            placed = place_line(syls, span, hold, rng, syncopation, RAP_BREATH_QN, RAP_SUNG_SHARE, RAP_GRID_QN)
         if li == 0 and placed[0].start < 0:
             # The first line can't start before the item: no pickup, the downbeat it is.
             shift = -placed[0].start
@@ -618,6 +632,7 @@ def compose(lines: list[str], events: list[composer.ChordEvent], key: Key, low: 
             vel = VELOCITY["final"] if i == n - 1 else VELOCITY["stressed" if p.syllable.stressed else "unstressed"]
             if i == 0:
                 vel = min(127, vel + 4)
+            vel = max(1, min(127, int(round(vel + swell * (math.sin(frac * math.pi / 2) - 0.5)))))
             if i == n - 1 and melisma and p.length >= 2.0 and li % 2 == 1:
                 # A fall on the held last word ("yeah-eah"): the word, then a step down on '+'.
                 fall = pool[max(0, pool.index(pitch) - 1)] if pitch in pool else pitch - 2
