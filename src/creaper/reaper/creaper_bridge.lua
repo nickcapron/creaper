@@ -1,6 +1,6 @@
 -- @description creaper bridge: lets Claude work in REAPER through the creaper MCP server
 -- @author nickcapron
--- @version 0.50.0
+-- @version 0.50.1
 -- @link https://github.com/nickcapron/creaper
 -- @provides
 --   [nomain] creaper_json.lua
@@ -13,7 +13,7 @@
 --   Every change it makes is a named undo point ("creaper: ..."), so Ctrl+Z
 --   reverts anything Claude did.
 
-local BRIDGE_VERSION = "0.50.0"
+local BRIDGE_VERSION = "0.50.1"
 local PROTOCOL = 2
 
 ----------------------------------------------------------------------- JSON
@@ -2661,6 +2661,7 @@ function commands.build_sampled_instrument(p)
       set(fx, "Pitch for end note", hi - root_key)
       set(fx, "Pitch adjust", root_key - z.root)
       set(fx, "Gain for minimum velocity", p.velocity_db or -18)
+      if p.gain_db then set(fx, "Volume", p.gain_db) end  -- the instrument's level, measured from its files
       set(fx, "Obey note-offs", 1)
       set(fx, "Use note-off release override", 1)
       set(fx, "Release (note-off)", (p.release_s or 0.3) * 1000)
@@ -2680,7 +2681,7 @@ function commands.build_sampled_instrument(p)
       local _, mode = reaper.TrackFX_GetNamedConfigParm(t, fx, "MODE")
       loaded[#loaded + 1] = { fx = fx + 1, lo = lo, hi = hi, root = z.root, mode = mode, sample = z.path:match("[^\\/]+$") }
     end
-    return { track = track_ref(t), zones = loaded }
+    return { track = track_ref(t), zones = loaded, gain_db = p.gain_db }
   end)
 end
 

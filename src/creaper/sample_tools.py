@@ -305,6 +305,31 @@ PEAK_OVER_KICK_DB = 6.0      # no lane's peak ends further over the kick's than 
 #                              body would otherwise be boosted to the top and the trim drag the whole kit 20 dB down)
 OTHER_LANE_DB = -6.0         # a lane the targets don't name (a hit named after its sample)
 RS5K_VOLUME_MAX_DB = 12.0    # ReaSamplOmatic5000's Volume stops here
+INSTRUMENT_PEAK_DB = -10.0   # a sampled instrument's loudest full-velocity note, after the build (a few dB under a
+#                              kit's KIT_PEAK_DB: melodic parts play chords). A Synclavier banjo built as the file
+#                              came sat 12 dB over the band until the model pulled it down by hand.
+
+
+def instrument_level(zones: list[dict]) -> dict | None:
+    """What to add to every zone's sampler so the loudest sample's full-velocity note peaks
+    at INSTRUMENT_PEAK_DB: {'loudest_peak_db', 'trim_db'}; None when no sample could be
+    read. One trim for the whole instrument: its zones were recorded as a set, and its
+    velocity layers differ on purpose."""
+    peaks = []
+    for z in zones:
+        for f in z.get("files") or [z.get("path")]:
+            if not f:
+                continue
+            try:
+                level = hit_level_db(str(f))
+            except Exception:  # noqa: BLE001 - an unreadable file decides nothing
+                level = None
+            if level is not None:
+                peaks.append(level[1])
+    if not peaks:
+        return None
+    trim = max(-60.0, min(RS5K_VOLUME_MAX_DB, INSTRUMENT_PEAK_DB - max(peaks)))
+    return {"loudest_peak_db": round(max(peaks), 1), "trim_db": round(trim, 1)}
 
 
 def hit_level_db(path: str) -> tuple[float, float] | None:
@@ -724,8 +749,15 @@ def _build(track: str, zones: list[dict], release_s: float, velocity_db: float, 
     for z in zones:
         z["name"] = f"{Path(z['path']).stem[:24]} {theory.midi_to_note(z['lo'])}-{theory.midi_to_note(z['hi'])}" + (
             f" v{z['lovel']}-{z['hivel']}" if "lovel" in z else "")
+    level = instrument_level(zones)
+    gain_db = level["trim_db"] if level and abs(level["trim_db"]) >= 0.5 else None
     result = call("build_sampled_instrument", timeout=180.0, track=track, zones=zones,
-                  release_s=release_s, velocity_db=velocity_db)
+                  release_s=release_s, velocity_db=velocity_db, gain_db=gain_db)
+    if gain_db is not None and result.get("gain_db") is None:
+        # An older bridge ignores gain_db: set each zone's Volume from here instead.
+        for zone in result.get("zones") or []:
+            call("set_fx_parameters", track=track, fx=zone["fx"],
+                 changes=[{"parameter": "Volume", "display_value": gain_db}])
     stretched = [z for z in zones if max(round(z["root"]) - z["lo"], z["hi"] - round(z["root"])) > 6]
     lo, hi = min(z["lo"] for z in zones), max(z["hi"] for z in zones)
 
@@ -744,6 +776,10 @@ def _build(track: str, zones: list[dict], release_s: float, velocity_db: float, 
            "zones": [describe(z) for z in zones][:48]}
     if len(zones) > 48:
         out["zones_shown"] = f"48 of {len(zones)}"
+    if level:
+        out["level"] = (f"the loudest sample peaks at {level['loudest_peak_db']:g} dBFS; the samplers are set "
+                        f"{level['trim_db']:+g} dB so a full-velocity note peaks near {INSTRUMENT_PEAK_DB:g} dBFS "
+                        "(auto_mix balances it against the band from there)")
     if source:
         out["sfz"] = source
     if report:

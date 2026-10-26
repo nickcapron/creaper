@@ -99,7 +99,11 @@ def _fake_bridge(monkeypatch):
             return {}
         if cmd == "build_sampled_instrument":
             sent.update(kw)
-            return {"track": {"name": kw["track"]}, "zones": []}
+            return {"track": {"name": kw["track"]}, "zones": [{"fx": i + 1} for i in range(len(kw["zones"]))],
+                    "gain_db": kw.get("gain_db") if sent.get("_bridge_knows_gain", True) else None}
+        if cmd == "set_fx_parameters":
+            sent.setdefault("volumes", []).append((kw["fx"], kw["changes"]))
+            return {}
         raise AssertionError(cmd)
 
     monkeypatch.setattr(sample_tools, "call", fake_call)
@@ -143,6 +147,21 @@ def test_named_layers_and_round_robins_build_from_samples(monkeypatch, tmp_path)
     c5 = next(z for z in zones if z["lo"] <= 72 <= z["hi"])
     assert "lovel" not in c5                                     # recorded soft only: it plays at every velocity
     assert c5["loop"]["start_ms"] == pytest.approx(1000 / 22050 * 1000, rel=1e-3)
+    # The instrument comes out at a known level: the tones peak at 0.5 (-6 dBFS), so every sampler is set -4 dB.
+    assert sent["gain_db"] == pytest.approx(sample_tools.INSTRUMENT_PEAK_DB + 6.0, abs=0.15)
+    assert "peaks at -6 dBFS" in out["level"] and "volumes" not in sent     # the bridge took the gain itself
+
+
+def test_an_older_bridge_gets_the_samplers_volumes_set_one_by_one(monkeypatch, tmp_path):
+    files = [str(tone(tmp_path / f"Banjo_{n}.wav", m, seconds=0.6)) for n, m in (("D3", 50), ("D4", 62))]
+    sent = _fake_bridge(monkeypatch)
+    sent["_bridge_knows_gain"] = False
+    out = sample_tools.build_sampled_instrument(track="Banjo", samples=files)
+    assert [fx for fx, _ in sent["volumes"]] == [1, 2]
+    assert all(ch == [{"parameter": "Volume", "display_value": sent["gain_db"]}] for _, ch in sent["volumes"])
+    assert sample_tools.instrument_level([{"path": files[0]}])["trim_db"] == pytest.approx(-4.0, abs=0.15)
+    assert sample_tools.instrument_level([{"path": str(tmp_path / "missing.wav")}]) is None
+    assert "level" in out
 
 
 
