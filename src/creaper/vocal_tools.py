@@ -837,7 +837,10 @@ VOICE_HELP = ("Who sings: a speaker of an installed voicebank, e.g. 'tiger_elect
               "default voice ('Canary', 'TIGER'). Canary is female (canary_arc, canary_spark, canary_voltage); TIGER "
               "is male: tiger_fresh, tiger_disco (soft), tiger_electric (powerful), tiger_vinyl, tiger_mystic "
               "(breathy), tiger_glam (powerful, bright), tiger_royal (falsetto). Pick the singer the song calls for "
-              "(a male lead, a female pop voice); default: the voice the track already has")
+              "(a male lead, a female pop voice); default: the voice the track already has. None of them has a country "
+              "or roots twang and no setting adds one (formant is not nasality): say so rather than promise it; the "
+              "closest is a power style (tiger_electric, tiger_glam) at Expression 0.8 or more, with Southern vowels "
+              "spelled in the lyrics ('my' as my[m aa], 'night' as night[n aa t]) for the user to A/B")
 
 
 def bank_speakers(bank: Path) -> list[str]:
