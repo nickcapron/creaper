@@ -164,14 +164,25 @@ def phones(word: str) -> list[str] | None:
     return found.split() if found else None
 
 
-def suggest_override(token: str) -> str | None:
+PRONOUNCE_BANKS = ("tiger", "canary")   # the banks PRONOUNCE was picked on (Hanami's dictionary sings a real d)
+
+
+def by_ear_applies(bank) -> bool:
+    """Whether PRONOUNCE's by-ear spellings are for this voicebank (folder or name); an
+    unknown bank gets them."""
+    if not bank:
+        return True
+    return Path(str(bank)).name.lower().startswith(PRONOUNCE_BANKS)
+
+
+def suggest_override(token: str, by_ear: bool = True) -> str | None:
     """How to spell a word's sounds for the singer, hyphenated as typed: the override
-    picked by ear when there is one (PRONOUNCE), else the dictionary's own phonemes
-    (which the bank's dictionary may differ from; a listener decides); None for a word
-    nobody has sounds for."""
+    picked by ear when there is one (PRONOUNCE, when `by_ear`), else the dictionary's own
+    phonemes (which the bank's dictionary may differ from; a listener decides); None for
+    a word nobody has sounds for."""
     plain, _ = split_override(token)
     key = _dictionary_key(plain)
-    sounds = PRONOUNCE.get(key) or " ".join(phones(plain) or [])
+    sounds = (PRONOUNCE.get(key) if by_ear else None) or " ".join(phones(plain) or [])
     if not sounds:
         return None
     return re.sub(r"[^A-Za-z'-]", "", plain) + "[" + sounds + "]"
@@ -695,7 +706,7 @@ def _consonant_runs(word: str) -> list[int]:
     return runs
 
 
-def lint(lyrics: str, note_seconds: list[float] | None = None) -> dict:
+def lint(lyrics: str, note_seconds: list[float] | None = None, bank=None) -> dict:
     """What in a render_vocalvst lyric string (hyphenated syllables, '_' holds) a listener
     will struggle to hear, found without a render: words VocalVST's dictionary lacks
     (when it's installed), consonant pile-ups, and a syllable held long before the
@@ -751,7 +762,7 @@ def lint(lyrics: str, note_seconds: list[float] | None = None) -> dict:
                          "wrong. Use words it knows (plain English spelling; no slang spellings or made-up names)"
                          + (", or spell the sounds after the word, 'Sa-tur-day[s ae dx er d ey]'"
                             if overrides_supported() else ""))
-    if overrides_supported():
+    if overrides_supported() and by_ear_applies(bank):
         by_ear = [suggest_override(word) for word, _, _ in words
                   if _dictionary_key(word) in PRONOUNCE and word not in overrides]
         if by_ear:

@@ -578,6 +578,54 @@ def _tiger(tmp_path):
     return bank
 
 
+HANAMI_CONFIG = "acoustic: dsmain/acoustic.onnx\nspeakers:\n  - dsmain/Root\n  - dsmain/Fragrance\n  - dsmain/Nectar\nvocoder: aidolgan\n"
+
+
+def _hanami(tmp_path):
+    bank = tmp_path / "voicebanks" / "Hanami_DS_v10"
+    bank.mkdir(parents=True)
+    (bank / "dsconfig.yaml").write_text(HANAMI_CONFIG)
+    return bank
+
+
+def test_hanami_sings_with_formant_at_zero_and_a_credit_line(tmp_path, monkeypatch):
+    from creaper import lyric_melody, vocal_tools
+
+    _, state = _vocalvst_bridge(tmp_path, monkeypatch)
+    hanami = _hanami(tmp_path)
+    out = vocal_tools.render_vocalvst(track=1, lyrics="one two three four five six", voice="Fragrance", formant=0.15)
+    assert vocal_tools.vocalvst_bank(state["chunk"]) == str(hanami) and out["voice"] == "Fragrance"
+    assert "formant" not in out and "4x" in out["formant_note"]            # the knob stays at 0 on this bank
+    assert out["credit"].startswith("Voice: Hoshino Hanami by Lotte V")
+    assert out["range"]["sweet_spot"].startswith("C4-D5") and "female" in out["range"]["sweet_spot"]
+    # Its dictionary sings Saturday with a real d: the by-ear spelling is for TIGER and Canary.
+    monkeypatch.setattr(lyric_melody, "overrides_supported", lambda **kw: True)
+    monkeypatch.setattr(lyric_melody, "_dictionary_cache", {"saturday": "100", "night": "1"})
+    assert lyric_melody.lint("Sa-tur-day night", None, bank=hanami) == {}
+    assert "chose by ear" in lyric_melody.lint("Sa-tur-day night", None, bank=tmp_path / "TIGER_DS_v106")["flags"][0]
+    assert lyric_melody.by_ear_applies(None) and not lyric_melody.by_ear_applies("Hanami_DS_v10")
+    assert "dx er d ey" not in vocal_tools.say_it_as("Sa-tur-day", ["saturday"], bank=hanami).get("saturday", "")
+    assert vocal_tools.say_it_as("Sa-tur-day", ["saturday"]) == {"saturday": "Sa-tur-day[s ae dx er d ey]"}
+
+
+def test_a_track_with_no_voice_yet_sings_with_the_users_pick_doubled(tmp_path, monkeypatch):
+    from creaper import vocal_tools
+
+    calls, state = _vocalvst_bridge(tmp_path, monkeypatch)
+    hanami = _hanami(tmp_path)
+    state["chunk"] = vocal_tools.vocalvst_state_with(state["chunk"], bank="")        # a fresh instance: no bank
+    out = vocal_tools.render_vocalvst(track=1, lyrics="one two three four five six")
+    assert vocal_tools.vocalvst_bank(state["chunk"]) == str(hanami) and out["voice"] == "Nectar"
+    assert out["voicebank"] == "Hanami_DS_v10" and out["credit"].startswith("Voice: Hoshino Hanami")
+    # Double is asked of the plugin (an older build without the knob says so); a harmony never doubles.
+    assert "Double" in out["controls_missing"] and "double" not in out
+    calls.clear()
+    _tiger(tmp_path)
+    out = vocal_tools.render_vocalvst(track=1, lyrics="one two three four five six", voice="tiger_electric")
+    assert out["voice"] == "tiger_electric" and "credit" not in out          # an asked-for voice stands
+    assert vocal_tools.default_voice() == (hanami, "Nectar")
+
+
 def test_bank_speakers_reads_the_dsconfig_list():
     from creaper.vocal_tools import bank_speakers
 
@@ -859,7 +907,8 @@ def test_render_vocalvst_sings_a_lead_at_expression_0_8_unless_asked(tmp_path, m
     assert vocal_tools.LEAD_EXPRESSION == 0.8 and vocal_tools.LEAD_BREATHS == 0.65 and vocal_tools.HARMONY_EXPRESSION < 0.8
     assert "Breaths" in out["controls_missing"]        # this fake's build has no Breaths knob: said, not claimed
     calls.clear()
-    out = vocal_tools.render_vocalvst(track="Vocal", lyrics="we ride at dawn to-night", expression=None, breaths=None)
+    out = vocal_tools.render_vocalvst(track="Vocal", lyrics="we ride at dawn to-night", expression=None, breaths=None,
+                                      double=None)
     assert not [kw for c, kw in calls if c == "set_fx_parameter" and kw["parameter"] == "Expression"]
     assert out["expression"] == "the plugin's own" and "controls_missing" not in out
 
@@ -927,7 +976,7 @@ def test_render_vocalvst_sets_the_newer_controls_and_reports_the_seed(tmp_path, 
     def with_knobs(cmd, **kw):
         if cmd == "get_fx_parameters" and "search" not in kw:
             calls.append((cmd, kw))
-            return {"parameters": [{"name": n} for n in ("Mode", "Gain", "Expression", "Render", "Breaths", "Formant",
+            return {"parameters": [{"name": n} for n in ("Mode", "Gain", "Expression", "Render", "Breaths", "Formant", "Double",
                                                           "Seed", "Phrase gap")]}
         if cmd == "set_fx_parameter" and kw["parameter"] == "Render":
             with log.open("a") as f:
@@ -941,8 +990,8 @@ def test_render_vocalvst_sets_the_newer_controls_and_reports_the_seed(tmp_path, 
     batches = [kw["changes"] for c, kw in calls if c == "set_fx_parameters"]
     assert len(batches) == 1                                            # one call, one undo point for all four
     assert {ch["parameter"]: ch["display_value"] for ch in batches[0]} == {"Breaths": 0.5, "Formant": 0.1, "Seed": 0,
-                                                                          "Phrase gap": 1.2}
-    assert out["seed_used"] == 4242 and out["device"] == "DirectML" and out["breaths"] == 0.5
+                                                                          "Phrase gap": 1.2, "Double": 1}
+    assert out["seed_used"] == 4242 and out["device"] == "DirectML" and out["breaths"] == 0.5 and out["double"] is True
     assert "controls_missing" not in out
 
 
@@ -963,7 +1012,7 @@ def test_a_knob_the_plugin_refuses_is_reported_not_claimed(tmp_path, monkeypatch
 
     def refusing(cmd, **kw):
         if cmd == "get_fx_parameters" and "search" not in kw:
-            return {"parameters": [{"name": n} for n in ("Render", "Breaths", "Seed")]}
+            return {"parameters": [{"name": n} for n in ("Render", "Breaths", "Seed", "Double")]}
         if cmd == "set_fx_parameters":
             calls.append((cmd, kw))
             return {"results": [{"parameter": c["parameter"], "error": "no value shows as 4242"}

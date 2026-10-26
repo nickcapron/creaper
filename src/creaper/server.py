@@ -196,7 +196,7 @@ Samples and vocals:
 - Vocals, best source first, saying which you used: real vocals in the user's samples
   (find_samples role "vocal", then chop_vocal or place_loop); VocalVST's sung words
   when installed (write_vocal_melody from the lyrics, then render_vocalvst with its lyrics
-  and the singer the song calls for, voice= TIGER male or Canary female; it reports
+  and voice= Nectar (Hanami), or TIGER for a man; it reports
   what a listener makes of each line: rewrite the unclear lines and render again before
   moving on, don't ask the user whether the words came through;
   add_vocal_harmony stacks the choruses; distortion after it for shrieks) or a singing

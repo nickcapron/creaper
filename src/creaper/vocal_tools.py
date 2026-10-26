@@ -832,15 +832,33 @@ BANK_VOICES = {   # TIGER's range is its author's (A2-C#5); Canary's is an estim
                            "tiger_electric": "powerful (rock, eurobeat, metal under distortion)",
                            "tiger_vinyl": "standard, warmer", "tiger_mystic": "soft, breathy",
                            "tiger_glam": "powerful, bright (glam, pop-rock)", "tiger_royal": "falsetto"}},
+    # Hoshino Hanami ~AI(heart)dol~ v1.0 by Lotte V (installed 2026-10-25): F3-A5 per its author, the
+    # sweet spot an estimate. Its formant shift spans 4x the other banks', so the Formant knob
+    # stays at 0 on it until the plugin rescales it per bank; English isn't its native language.
+    "Hanami": {"singer": "female", "sweet": (60, 74), "range": (53, 81),
+               "speakers": {"Root": "the default voice, normal", "Fragrance": "power", "Nectar": "soft"},
+               "formant_fixed": "Hanami's formant range is about 4x TIGER's and Canary's, so the knob stays at 0 on "
+                                "it (0.15 would be a large shift) until the plugin rescales it",
+               "credit": "Voice: Hoshino Hanami by Lotte V (credit required; its bundled vocoder is CC BY-NC-SA 4.0, "
+                         "so the output is non-commercial, like the other banks')"},
 }
-VOICE_HELP = ("Who sings: a speaker of an installed voicebank, e.g. 'tiger_electric', or a bank's name for its "
-              "default voice ('Canary', 'TIGER'). Canary is female (canary_arc, canary_spark, canary_voltage); TIGER "
+# The user's pick after hearing the banks (2026-10-25): Hanami's Nectar, doubled, is the lead
+# unless the song calls for a man or the user asks for another; Fragrance for loud songs.
+# TIGER's styles all got "it's the voice I don't like".
+DEFAULT_LEAD, POWER_LEAD = "Nectar", "Fragrance"
+VOICE_HELP = ("Who sings: a speaker of an installed voicebank, e.g. 'Nectar', or a bank's name for its default voice "
+              "('Hanami', 'Canary', 'TIGER'). The user's pick for a lead is 'Nectar' (Hanami, female, soft) with "
+              "double=True, 'Fragrance' (Hanami, power) for loud songs; a track with no voice yet gets Nectar. TIGER "
+              "(male) only when the song calls for a man or the user asks: they didn't like it. "
+              "Canary is female (canary_arc, canary_spark, canary_voltage); TIGER "
               "is male: tiger_fresh, tiger_disco (soft), tiger_electric (powerful), tiger_vinyl, tiger_mystic "
               "(breathy), tiger_glam (powerful, bright), tiger_royal (falsetto). Pick the singer the song calls for "
               "(a male lead, a female pop voice); default: the voice the track already has. None of them has a country "
               "or roots twang and no setting adds one (formant is not nasality): say so rather than promise it; the "
               "closest is a power style (tiger_electric, tiger_glam) at Expression 0.8 or more, with Southern vowels "
-              "spelled in the lyrics ('my' as my[m aa], 'night' as night[n aa t]) for the user to A/B")
+              "spelled in the lyrics ('my' as my[m aa], 'night' as night[n aa t]) for the user to A/B. Hanami is "
+              "female too (Root, Fragrance (power), Nectar (soft)), F3-A5, English not its native language: read "
+              "heard closely; leave formant at 0 on it")
 
 
 def bank_speakers(bank: Path) -> list[str]:
@@ -881,6 +899,15 @@ def installed_voices() -> dict[str, tuple[Path, str]]:
         for speaker in bank_speakers(bank):
             out.setdefault(speaker, (bank, speaker))
     return out
+
+
+def default_voice() -> tuple[Path, str] | None:
+    """The user's default lead (DEFAULT_LEAD) when its bank is installed, else None (the
+    plugin's first bank then stands, as before)."""
+    try:
+        return resolve_voice(DEFAULT_LEAD)
+    except ValueError:
+        return None
 
 
 def resolve_voice(voice: str) -> tuple[Path, str]:
@@ -1134,7 +1161,7 @@ HEAR_NEXT = ("render_vocalvst again with the new lyrics (write_vocal_melody firs
              "syllable count)")
 
 
-def say_it_as(lyrics: str, missed: list[str]) -> dict[str, str]:
+def say_it_as(lyrics: str, missed: list[str], bank: str | Path | None = None) -> dict[str, str]:
     """For the lyric words a recogniser missed, how to spell their sounds for the singer
     ({'saturday': 'Sa-tur-day[s ae dx er d ey]'}): the pronunciation picked by ear when
     there is one, else the dictionary's. Words already spelled out, and words nobody has
@@ -1145,7 +1172,7 @@ def say_it_as(lyrics: str, missed: list[str]) -> dict[str, str]:
         plain, override = lyric_melody.split_override(tk)
         key = re.sub(r"[^a-z0-9]", "", plain.lower().replace("-", ""))
         if key in wanted and override is None and key not in out:
-            suggestion = lyric_melody.suggest_override(plain)
+            suggestion = lyric_melody.suggest_override(plain, by_ear=lyric_melody.by_ear_applies(bank))
             if suggestion:
                 out[key] = suggestion
     return out
@@ -1339,6 +1366,11 @@ def render_vocalvst(
         "Afterwards, transcribe the take with a speech recogniser and report each line as heard, the words it "
         "missed and the lines to rewrite (needs the creaper[asr] extra; about a minute on a whole song). Off to "
         "skip it, e.g. for a double of a line already checked"))] = True,
+    double: Annotated[bool | None, Field(description=(
+        "The plugin's Double: sings every phrase a second time as its own take (another seed, onsets up to 20 ms "
+        "apart, a few cents off) panned against the lead. On for a lead (the user's pick: \"the double is good\"); "
+        "off for a harmony or a rap, and when add_vocal_harmony(interval='unison') doubles the line instead (both "
+        "would make four voices). Doubles the render time; null keeps the plugin's setting"))] = True,
 ) -> dict:
     """Makes VocalVST (the user's singing plugin) sing the MIDI on its track: sets the
     lyrics and mode, plays the transport over every note on the track, silently (the
@@ -1360,7 +1392,7 @@ def render_vocalvst(
     unclear_lines before anyone listens, and don't call the vocal done while there are
     any."""
     fx, items = _vocalvst_fx(track)
-    want = resolve_voice(voice) if voice else None
+    want = resolve_voice(voice) if voice else None   # or the default lead, once the track's own voice is known
     line: list[dict] = []
     parts: list[dict] = []
     extended: list[str] = []
@@ -1385,7 +1417,6 @@ def render_vocalvst(
         raise ValueError("the track's MIDI items have no notes to sing")
     speaks = lyric_melody.overrides_supported(parameters=_parameter_names(track, fx["index"]))
     text = vocalvst_lyric_string(lyrics, line, overrides=speaks) if lyrics else ""
-    lyric_check = lyric_melody.lint(lyrics, secs) if lyrics and mode != "scat" else {}
 
     state = call("capture_fx_state", track=track, fx=fx["index"])
     if not state.get("chunk"):
@@ -1395,6 +1426,8 @@ def render_vocalvst(
         changes["lyrics"] = text
     bank = vocalvst_bank(state["chunk"])
     speaker = vocalvst_attr(state["chunk"], "speaker")
+    if want is None and not (bank and (Path(bank) / "dsconfig.yaml").is_file()):
+        want = default_voice()            # a track with no voice yet sings with the user's pick
     candidates: list[str] = []
     if want:
         # The bank and speaker go in together: the plugin drops a speaker its bank lacks.
@@ -1440,11 +1473,17 @@ def render_vocalvst(
                              + "): the plugin can't see them from REAPER. Move the voicebank to "
                              + str(VOICEBANK_ROOT) + " in Explorer, or choose it with the Voicebank button in "
                              "the plugin's window (update_fx with show=True), then call again")
+    voice_info = bank_voices(bank) or {}
+    lyric_check = lyric_melody.lint(lyrics, secs, bank=bank) if lyrics and mode != "scat" else {}
+    formant_note = None
+    if formant and voice_info.get("formant_fixed"):
+        formant_note, formant = voice_info["formant_fixed"], None
     call("set_fx_parameter", track=track, fx=fx["index"], parameter="Mode", display_text=mode.capitalize())
     if expression is not None:
         # A 0-1 knob: the normalized value is the displayed one, so no display matching.
         call("set_fx_parameter", track=track, fx=fx["index"], parameter="Expression", value=float(expression))
-    knobs = {"Breaths": breaths, "Formant": formant, "Seed": seed, "Phrase gap": phrase_gap_s}
+    knobs = {"Breaths": breaths, "Formant": formant, "Seed": seed, "Phrase gap": phrase_gap_s,
+             "Double": None if double is None else int(double)}
     missing, failed = _set_knobs(track, fx["index"], {k: v for k, v in knobs.items() if v is not None})
 
     # The pass: the plugin records only what the transport plays through it, by position,
@@ -1479,8 +1518,9 @@ def render_vocalvst(
     report = _wait_for_render(log_size, timeout_seconds, before, lambda: _track_audio(track, *span))
     out = {"track": track, "mode": mode, "lyrics": text or None, "written_notes": len(line), "captured": captured,
            "expression": expression if expression is not None else "the plugin's own",
+           **({"double": bool(double)} if double is not None and "Double" not in missing and "Double" not in failed else {}),
            **{k.lower().replace(" ", "_"): v for k, v in knobs.items()
-              if v is not None and k not in missing and k not in failed},
+              if v is not None and k != "Double" and k not in missing and k not in failed},
            **_log_details(log_size),
            "pass": {"from_seconds": round(start, 3), "to_seconds": round(end, 3)},
            "voicebank": Path(bank).name, "voice": speaker or "the bank's default",
@@ -1503,6 +1543,10 @@ def render_vocalvst(
                                 "the symbols as words). Reinstall the plugin to use them")
     if lyric_check:
         out["lyric_check"] = lyric_check
+    if formant_note:
+        out["formant_note"] = formant_note
+    if voice_info.get("credit"):
+        out["credit"] = voice_info["credit"]
     if woken:
         out["woken"] = woken
     if report.startswith("Rendered") and lyrics and mode != "scat" and hear_words:
@@ -1518,7 +1562,7 @@ def render_vocalvst(
                 out["next"] = ("rewrite the lines in heard.unclear_lines (their missed words first; lyric_check "
                                "says what trips the singer), then " + HEAR_NEXT + "; the vocal isn't done while any remain")
                 missed = [w for h in out["heard"].get("heard") or [] for w in h.get("missed") or []]
-                spelled = say_it_as(lyrics, missed) if missed and speaks else {}
+                spelled = say_it_as(lyrics, missed, bank=bank) if missed and speaks else {}
                 if spelled:
                     out["heard"]["say_it_as"] = spelled
                     out["next"] = ("for a missed word the line needs, spell its sounds as heard.say_it_as shows "
@@ -1720,7 +1764,7 @@ def add_vocal_harmony(
     if lyrics and lyrics.split()[0] in ("+", "_", "-"):
         lyrics = "la " + " ".join(lyrics.split()[1:])      # a slice can't start on a hold
     render = render_vocalvst(new_track, lyrics=lyrics, mode="sing", voice=voice, expression=expression,
-                             formant=formant, seed=seed, timeout_seconds=timeout_seconds)
+                             formant=formant, seed=seed, timeout_seconds=timeout_seconds, double=False)
     out = {"track": new_track, "interval": interval, "key": k.name, "items": copied, "voice": render.get("voice"),
            "pan": pan, "volume_db": volume_db, "render": render.get("result"), "range": render.get("range"),
            "next": "measure_tracks the two together; a second harmony (a sixth below, pan the other way) thickens a "
