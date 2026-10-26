@@ -136,6 +136,29 @@ def test_repeated_words_repeat_their_tune_and_the_chorus_falls():
     assert all(l["held_beats"] >= 2.0 for l in lines)
 
 
+def test_a_rap_fills_the_bar_on_one_low_pitch():
+    """The grilled-cheese rap: 1-bar lines of 9-11 syllables were refused as a sung verse
+    and the model wrote a pentatonic melody by hand, which the plugin sang. A rap flow
+    fits the bar, recites on one low pitch and drops at each line's end."""
+    key, events = _verse()
+    lines = ["Roll up to the kitchen in the dead of night", "Butter on the bread and the flame set right"]
+    with pytest.raises(ValueError, match="too many syllables"):
+        lm.compose(lines, events, key, 50, 64, shape="verse", line_bars=1)
+    out = lm.compose(lines, events, key, 50, 64, shape="rap", line_bars=1, seed=2)
+    assert out["shape"] == "rap" and [ln["notes"] for ln in out["lines"]] == [11, 10]
+    notes = out["notes"]
+    first, second = notes[:11], notes[11:]
+    assert max(n["start"] + n["length"] for n in first) <= 4.0 and second[0]["start"] >= 4.0 - 1e-6
+    assert max(n["length"] for n in notes) <= 1.0                               # nothing held
+    pitches = [n["pitch"] for n in first]
+    home = max(set(pitches), key=pitches.count)
+    assert home <= 52 and pitches.count(home) >= 7 and max(pitches) - min(pitches) <= 4     # one low reciting pitch
+    assert first[-1]["pitch"] < home and second[-1]["pitch"] < home            # a drop ends each line
+    assert out["syllables_per_beat_max"] <= 4.0
+    assert lm.place_line(lm.line_syllables(lines[0]), 4.0, 0.5, __import__("random").Random(1),
+                         breath_qn=lm.RAP_BREATH_QN, sung_share=lm.RAP_SUNG_SHARE, grid=lm.RAP_GRID_QN)[-1].start         < 4.0 - lm.RAP_BREATH_QN + 1e-6
+
+
 def test_too_many_words_for_the_bars_is_said():
     key, events = _verse()
     with pytest.raises(ValueError, match="too many syllables"):

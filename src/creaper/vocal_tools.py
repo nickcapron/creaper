@@ -312,6 +312,7 @@ def add_robot_vocal(
 
 
 SUNG_MAX_PER_BEAT = 2.0   # a sung line keeps its words clear at up to two syllables a beat
+RAP_MAX_PER_BEAT = 4.0    # a rap runs in 16ths; past that VocalVST's 220 ms vowels overlap
 
 
 def _sing(words: list[dict], line: list[dict], times: list[float], note_times: list[float], base: float,
@@ -925,9 +926,9 @@ def resolve_voice(voice: str) -> tuple[Path, str]:
     return found
 
 
-def range_advice(pitches: list[int], bank: str | Path, speaker: str = "") -> dict:
+def range_advice(pitches: list[int], bank: str | Path, speaker: str = "", rap: bool = False) -> dict:
     """Where a melody sits for the voice singing it, and what to do when it's out of the
-    voice's sweet spot."""
+    voice's sweet spot. A rap sits low on purpose: only its top is checked."""
     names = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
     nn = lambda p: f"{names[p % 12]}{p // 12 - 1}"  # noqa: E731
     middle = sorted(pitches)[len(pitches) // 2]
@@ -937,6 +938,12 @@ def range_advice(pitches: list[int], bank: str | Path, speaker: str = "") -> dic
         return out
     lo, hi = known["sweet"]
     top = known["range"][1]
+    if rap:
+        out["rap"] = (f"the plugin flattens the line toward its middle ({nn(middle)}); a middle low in the voice "
+                      f"(from {nn(known['range'][0])}) is right for speech")
+        if max(pitches) > top:
+            out["advice"] = f"its top note {nn(max(pitches))} is past this voice's range (up to {nn(top)}): bring it down"
+        return out
     out["sweet_spot"] = f"{nn(lo)}-{nn(hi)} for the middle of the line ({known['singer']} voice)"
     if speaker == "tiger_royal":
         lo, hi = lo + 7, hi + 7      # falsetto sits higher
@@ -1350,7 +1357,13 @@ def render_vocalvst(
         "out by letter. A word the singer mangles can be spelled in ARPAbet after it, one vowel sound per piece: "
         "'Sa-tur-day[s ae dx er d ey]' (the result's heard.say_it_as offers these for missed words). Leave it out "
         "for a wordless line: scat syllables in scat mode, 'la' otherwise"))] = None,
-    mode: Annotated[Literal["sing", "rap", "scat"], Field(description="sing: pitched, vibrato on held notes; rap: spoken contour, syllables cut to about 220 ms; scat: nonsense syllables when there are no lyrics")] = "sing",
+    mode: Annotated[Literal["sing", "rap", "scat"], Field(description=(
+        "sing: pitched, vibrato on held notes. rap: the same singer with the pitch flattened (the plugin keeps 30% "
+        "of the written movement around the line's middle, a small fall inside each syllable, vowels cut to 220 ms, "
+        "no vibrato; Expression does nothing): write the notes with write_vocal_melody(shape='rap'), low and "
+        "dense, and pick a plain voice (tiger_disco for a man, Nectar for a woman), not a belting style "
+        "(tiger_electric, tiger_glam, Fragrance) which sounds operatic when flattened. It is a singing model, not "
+        "speech: tell the user so. scat: nonsense syllables when there are no lyrics"))] = "sing",
     voice: Annotated[str | None, Field(description=VOICE_HELP)] = None,
     expression: Annotated[float | None, Field(ge=0, le=1, description=(
         "The plugin's Expression: 0 sings the notes exactly as written, 1 lets the voice's own attacks, glides "
@@ -1375,9 +1388,10 @@ def render_vocalvst(
         "skip it, e.g. for a double of a line already checked"))] = True,
     double: Annotated[bool | None, Field(description=(
         "The plugin's Double: sings every phrase a second time as its own take (another seed, onsets up to 20 ms "
-        "apart, a few cents off) panned against the lead. On for a lead (the user's pick: \"the double is good\"); "
-        "off for a harmony or a rap, and when add_vocal_harmony(interval='unison') doubles the line instead (both "
-        "would make four voices). Doubles the render time; null keeps the plugin's setting"))] = True,
+        "apart, a few cents off) panned against the lead. On for a sung lead (the user's pick: \"the double is "
+        "good\"); off for a harmony, a rap (two flattened voices sound like a choir), and when "
+        "add_vocal_harmony(interval='unison') doubles the line instead (both would make four voices). Doubles the "
+        "render time. Default: on when singing, off for a rap"))] = None,
 ) -> dict:
     """Makes VocalVST (the user's singing plugin) sing the MIDI on its track: sets the
     lyrics and mode, plays the transport over every note on the track, silently (the
@@ -1489,6 +1503,10 @@ def render_vocalvst(
     formant_note = None
     if formant and voice_info.get("formant_fixed"):
         formant_note, formant = voice_info["formant_fixed"], None
+    if double is None:
+        double = mode != "rap"
+    if mode == "rap":
+        expression = None            # the rule pitch curve: the pitch model, and its Expression, don't run
     call("set_fx_parameter", track=track, fx=fx["index"], parameter="Mode", display_text=mode.capitalize())
     if expression is not None:
         # A 0-1 knob: the normalized value is the displayed one, so no display matching.
@@ -1528,14 +1546,15 @@ def render_vocalvst(
     woken = _wait_for_render_switch(track, fx["index"], log_size)
     report = _wait_for_render(log_size, timeout_seconds, before, lambda: _track_audio(track, *span))
     out = {"track": track, "mode": mode, "lyrics": text or None, "written_notes": len(line), "captured": captured,
-           "expression": expression if expression is not None else "the plugin's own",
+           "expression": "no effect in rap mode" if mode == "rap" else
+                         expression if expression is not None else "the plugin's own",
            **({"double": bool(double)} if double is not None and "Double" not in missing and "Double" not in failed else {}),
            **{k.lower().replace(" ", "_"): v for k, v in knobs.items()
               if v is not None and k != "Double" and k not in missing and k not in failed},
            **_log_details(log_size),
            "pass": {"from_seconds": round(start, 3), "to_seconds": round(end, 3)},
            "voicebank": Path(bank).name, "voice": speaker or "the bank's default",
-           "range": range_advice([n["pitch"] for n in line], bank, speaker), "result": report,
+           "range": range_advice([n["pitch"] for n in line], bank, speaker, rap=mode == "rap"), "result": report,
            "plays": "in sync with the transport over the captured region, and in offline renders (analyze_audio, "
                     "measure_tracks, export_mix); not in audition_instrument",
            "next": "check it in the mix with check_vocal_clarity after auto_mix; render again after any change "
@@ -1644,9 +1663,11 @@ def write_vocal_melody(
         "it's installed, else Canary's. low/high override it"))] = None,
     low: Annotated[str | int | None, Field(description="Lowest note, e.g. D3; default: the voice's sweet spot")] = None,
     high: Annotated[str | int | None, Field(description="Highest note, e.g. E4")] = None,
-    shape: Annotated[Literal["verse", "chorus", "bridge"], Field(description=(
+    shape: Annotated[Literal["verse", "chorus", "bridge", "rap"], Field(description=(
         "verse: low in the range, talkative, lines end on a question; chorus: higher, longer held words, a fall on "
-        "every second line's last word, repeated lines repeat their tune; bridge: between"))] = "verse",
+        "every second line's last word, repeated lines repeat their tune; bridge: between; rap: spoken, the words "
+        "fill the bar in 8ths and 16ths (9-12 syllables a bar is normal), one low reciting pitch with a drop at "
+        "each line's end, no held words: the notes for render_vocalvst(mode='rap')"))] = "verse",
     line_bars: Annotated[float | None, Field(gt=0, description=(
         "Bars per line; default: the chords' length divided among the lines (1, 2 or 4)"))] = None,
     start: Annotated[float, Field(ge=0, description="Where the first line's downbeat is, in QN from the item start")] = 0.0,
@@ -1660,10 +1681,12 @@ def write_vocal_melody(
     between, pickups before the bar), the last word of a line is held and a breath
     follows, lines with the same words get the same tune, and the pitches follow the
     chords (chord tones on the stressed syllables, steps between, verse lines ending
-    off the tonic, the last line on it) inside the singer's range. Returns the notes
-    written and the `lyrics` string to give render_vocalvst, one token per note; use
-    it instead of write_melody for anything VocalVST sings. Put the item's start a bar
-    before the first downbeat when the line should begin with a pickup."""
+    off the tonic, the last line on it) inside the singer's range. shape='rap' writes
+    a flow instead: dense, on one low pitch, nothing held. Returns the notes written
+    and the `lyrics` string to give render_vocalvst, one token per note; use it
+    instead of write_melody or add_midi_notes for anything VocalVST sings or raps. Put
+    the item's start a bar before the first downbeat when the line should begin with
+    a pickup."""
     from . import music_tools
 
     lines = [ln.strip() for ln in re.split(r"[/\n]+", lyrics) if ln.strip()]
@@ -1686,11 +1709,11 @@ def write_vocal_melody(
               "lines": out["lines"], "line_bars": out["line_bars"],
               "range": {"lowest": nn(out["range"][0]), "highest": nn(out["range"][1]), "voice": f"{singer} ({nn(lo)}-{nn(hi)})"},
               "syllables_per_beat_max": out["syllables_per_beat_max"],
-              "next": "render_vocalvst(track, lyrics=<this lyrics string>, voice=...) sings it; the string is one "
-                      "token per note, so pass it as returned"}
+              "next": (f"render_vocalvst(track, lyrics=<this lyrics string>, mode={'rap' if shape == 'rap' else 'sing'!r}, "
+                       "voice=...) sings it; the string is one token per note, so pass it as returned")}
     if isinstance(written, dict):
         result["item"] = {k_: written[k_] for k_ in ("notes", "end", "grew") if k_ in written}
-    if out["syllables_per_beat_max"] > SUNG_MAX_PER_BEAT:
+    if out["syllables_per_beat_max"] > (RAP_MAX_PER_BEAT if shape == "rap" else SUNG_MAX_PER_BEAT):
         result["warning"] = (f"{out['syllables_per_beat_max']:g} syllables a beat at the busiest: words this fast "
                              "blur; give the lines more bars (line_bars) or fewer words")
     try:

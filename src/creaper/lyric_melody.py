@@ -54,9 +54,17 @@ ARTICULATION_QN = 0.05   # the gap between syllables, so the singer re-attacks e
 SUNG_SHARE = 0.6         # how much of a line's span the words take before the last one is held
 HOLD_SHARE = 0.7         # how much of what's left the last word then holds
 BREATH_QN = 1.0          # the rest after a line
-HOLD_QN = {"verse": 1.5, "chorus": 2.5, "bridge": 2.0}   # how long a line's last word is held, at least
-SHAPE_HEIGHT = {"verse": 0.35, "chorus": 0.65, "bridge": 0.5}
-SHAPE_ARC = {"verse": 4, "chorus": 5, "bridge": 4}       # scale steps the line rises over its start
+HOLD_QN = {"verse": 1.5, "chorus": 2.5, "bridge": 2.0, "rap": 0.5}   # how long a line's last word is held, at least
+SHAPE_HEIGHT = {"verse": 0.35, "chorus": 0.65, "bridge": 0.5, "rap": 0.15}
+SHAPE_ARC = {"verse": 4, "chorus": 5, "bridge": 4, "rap": 1}       # scale steps the line rises over its start
+# A rap is spoken, not sung: the words fill the bar (a short gap, not a breath, between lines),
+# on one reciting pitch low in the voice with a step up on some stressed syllables and a drop
+# at the line's end. VocalVST's rap mode flattens whatever is written toward the line's middle
+# anyway (30% of the movement, vowels capped at 220 ms), so the notes decide rhythm and register.
+RAP_BREATH_QN = 0.5
+RAP_SUNG_SHARE = 0.9
+RAP_STEP_UP = 0.3        # how often a stressed syllable steps up from the reciting pitch
+RAP_GRID_QN = 0.5        # a rap's stressed syllables land on 8ths, not only on beats
 VELOCITY = {"stressed": 100, "unstressed": 76, "final": 90}
 
 
@@ -417,13 +425,15 @@ def _durations(syls: list[Syllable], level: int) -> list[float]:
 
 
 def place_line(syls: list[Syllable], span_qn: float, hold_qn: float, rng: random.Random,
-               syncopation: float = 0.0) -> list[Placed]:
-    """Where a line's syllables fall in its span: stressed ones on beats, unstressed
-    between, up to two unstressed pickups before the downbeat, the last syllable held
-    at least hold_qn and a breath left at the end. Longer lines move to faster values."""
+               syncopation: float = 0.0, breath_qn: float = BREATH_QN, sung_share: float = SUNG_SHARE,
+               grid: float = 1.0) -> list[Placed]:
+    """Where a line's syllables fall in its span: stressed ones on beats (on `grid` QN:
+    a rap's land on 8ths too), unstressed between, up to two unstressed pickups before
+    the downbeat, the last syllable held at least hold_qn and a breath left at the end.
+    Longer lines move to faster values."""
     if not syls:
         return []
-    room = span_qn - BREATH_QN
+    room = span_qn - breath_qn
     # The note values: the slowest ones whose sung part leaves the last word room to be
     # held, nearest to SUNG_SHARE of the span. A 7-syllable line over 2 bars then sings in
     # 8ths and holds 'round' for three beats, instead of a quarter note per syllable.
@@ -431,7 +441,7 @@ def place_line(syls: list[Syllable], span_qn: float, hold_qn: float, rng: random
     for level in range(4):
         sung = sum(_durations(syls, level))
         if sung + min(hold_qn, 1.0) <= room + 1e-6:
-            fits.append((abs(sung / room - SUNG_SHARE), level))
+            fits.append((abs(sung / room - sung_share), level))
     for _, level in sorted(fits) or [(0, 3)]:
         durs = _durations(syls, level)
         pickup = 0
@@ -440,9 +450,9 @@ def place_line(syls: list[Syllable], span_qn: float, hold_qn: float, rng: random
         placed: list[Placed] = []
         t = -sum(durs[:pickup])
         for i, (s, d) in enumerate(zip(syls, durs)):
-            if s.stressed and i >= pickup and t % 1.0 > 1e-6:
+            if s.stressed and i >= pickup and t % grid > 1e-6:
                 # A stressed syllable waits for the beat; the one before it holds on.
-                wait = math.ceil(t - 1e-6) - t
+                wait = math.ceil(t / grid - 1e-6) * grid - t
                 if placed:
                     placed[-1].length += wait
                 t += wait
@@ -544,6 +554,7 @@ def compose(lines: list[str], events: list[composer.ChordEvent], key: Key, low: 
     # The arc fits under the top of the range, or a chorus would sit on its top note.
     arc = max(1, min(SHAPE_ARC.get(shape, 3), len(pool) - 1 - home))
     hold = HOLD_QN.get(shape, 1.5)
+    rap = shape == "rap"
     if melisma is None:
         melisma = shape == "chorus"
     tonic = key.tonic % 12
@@ -567,7 +578,8 @@ def compose(lines: list[str], events: list[composer.ChordEvent], key: Key, low: 
         syls = line_syllables(text)
         if not syls:
             continue
-        placed = place_line(syls, span, hold, rng, syncopation)
+        placed = place_line(syls, span, hold, rng, syncopation,
+                            *((RAP_BREATH_QN, RAP_SUNG_SHARE, RAP_GRID_QN) if rap else ()))
         if li == 0 and placed[0].start < 0:
             # The first line can't start before the item: no pickup, the downbeat it is.
             shift = -placed[0].start
@@ -597,7 +609,12 @@ def compose(lines: list[str], events: list[composer.ChordEvent], key: Key, low: 
                     want = chord_pcs - {ev.chord.root % 12} if ev and len(chord_pcs) > 1 else chord_pcs or None
                     if shape != "chorus":
                         avoid = {tonic}        # a verse line asks a question
-            pitch = _choose(pool, target, prev_pitch, chord_pcs, p.syllable.stressed, rng, want, avoid)
+            if rap:
+                # The reciting pitch, a step up on some stressed syllables, a drop to end the line.
+                at = home + (1 if p.syllable.stressed and i not in (0, n - 1) and rng.random() < RAP_STEP_UP else 0)
+                pitch = pool[max(0, home - 1) if i == n - 1 else min(len(pool) - 1, at)]
+            else:
+                pitch = _choose(pool, target, prev_pitch, chord_pcs, p.syllable.stressed, rng, want, avoid)
             vel = VELOCITY["final"] if i == n - 1 else VELOCITY["stressed" if p.syllable.stressed else "unstressed"]
             if i == 0:
                 vel = min(127, vel + 4)
@@ -622,7 +639,7 @@ def compose(lines: list[str], events: list[composer.ChordEvent], key: Key, low: 
     lyrics = _join_tokens(out_lines)
     onsets = [nt["start"] for nt in notes]
     busiest = max((sum(1 for u in onsets if t <= u < t + 4) for t in onsets), default=0) / 4
-    return {"notes": notes, "lyrics": lyrics, "tokens": tokens, "line_bars": line_bars,
+    return {"notes": notes, "lyrics": lyrics, "tokens": tokens, "line_bars": line_bars, "shape": shape,
             "lines": [{"text": vl.text, "start_qn": round(vl.start, 3), "notes": len(vl.notes),
                        "pickup_beats": vl.pickup_qn, "held_beats": round(vl.held_qn, 2)} for vl in out_lines],
             "syllables_per_beat_max": round(busiest, 2),

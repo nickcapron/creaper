@@ -546,7 +546,10 @@ def test_render_vocalvst_sets_lyrics_plays_the_pass_then_renders(tmp_path, monke
     assert vocal_tools.vocalvst_lyrics(state["chunk"]) == "we ride at dawn to-night"   # hyphens kept: one word, two notes
     assert vocal_tools.vocalvst_bank(state["chunk"]).endswith("Canary_DS") and out["voicebank"] == "Canary_DS"
     params = [(kw["parameter"], kw.get("display_text", kw.get("value"))) for c, kw in calls if c == "set_fx_parameter"]
-    assert params == [("Mode", "Rap"), ("Expression", 0.8), ("Render", "On")]
+    assert params == [("Mode", "Rap"), ("Render", "On")]                       # rap: Expression does nothing
+    assert out["expression"] == "no effect in rap mode" and "rap" in out["range"]
+    assert out.get("double") is not True and "Double" in out["controls_missing"]   # asked off; this fake lacks the knob
+    assert "advice" not in out["range"]                                       # a low line is right for a rap
     play = next(kw for c, kw in calls if c == "transport")
     assert play["action"] == "play" and play["start_seconds"] == 1.7 and play["end_seconds"] == 5.5
     render_on = next(i for i, (c, kw) in enumerate(calls) if c == "set_fx_parameter" and kw["parameter"] == "Render")
@@ -930,7 +933,8 @@ def test_render_vocalvst_sings_a_lead_at_expression_0_8_unless_asked(tmp_path, m
     out = vocal_tools.render_vocalvst(track="Vocal", lyrics="we ride at dawn to-night", expression=None, breaths=None,
                                       double=None)
     assert not [kw for c, kw in calls if c == "set_fx_parameter" and kw["parameter"] == "Expression"]
-    assert out["expression"] == "the plugin's own" and "controls_missing" not in out
+    assert out["expression"] == "the plugin's own" and "Breaths" not in out["controls_missing"]
+    assert "Double" in out["controls_missing"]          # double=None means the mode's default (on when singing)
 
 
 def test_add_vocal_harmony_stacks_a_third_above_with_the_lead_words(tmp_path, monkeypatch):
