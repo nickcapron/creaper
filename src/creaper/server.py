@@ -57,8 +57,8 @@ in order; finish_stage(stage) runs each stage's checks and refuses on a fail):
     adds. Or by hand: plan_harmony (each section's chords), then per
     section add_genre_groove(bars, energy), write_bassline, add_chord_progression,
     write_melody (shape verse or hook; candidates), write_counter_melody, write_answer.
-    Rewrite what you'd change. Then layer_instrument the bass and the chords or pad
-    (Sounds). Check: song_map; finish_stage("parts").
+    Rewrite what you'd change. Then layer_instrument where the genre's palette names
+    layers (Sounds). Check: song_map; finish_stage("parts").
  5. Feel: generators play with a feel; apply_feel on parts written note by note.
     finish_stage("feel") (check_groove on drums and bass).
  6. Transitions: add_transitions(style), then write_automation ramps across builds and
@@ -126,11 +126,11 @@ Sounds:
   Move controls part way: brightness, resonance, drive and presence at their extremes
   sound harsh and cheap. Say what you set.
 - layer_instrument for weight, once the part is written (the layers play its MIDI): a
-  bass is a mono sub (octave -1, low pass
-  ~180 Hz) under a filtered mid layer; a pad is two synths, one high-passed and wide; a
-  lead can take an octave-down double 8 dB under it. Genre palettes (get_genre_profile)
-  name the layers that fit the style. Drum kits layer too (build_drum_kit layers=, a
-  click or sub under the kick), and alternatives per lane avoid machine-gun repeats.
+  dance or hip-hop bass is a mono sub (octave -1, low pass ~180 Hz) under a mid layer;
+  a band's bass (90s pop, rock, country) stays one sound; a pad is two synths, one
+  high-passed and wide; a
+  lead can take an octave-down double 8 dB under it. Drum kits layer too (build_drum_kit
+  layers=, a click or sub under the kick); alternatives per lane avoid machine-gun repeats.
 - Saved sounds tagged for another project are its anchors, not this song's palette.
 - Prefer the user's own plugins (list_installed_fx, browse by category) over REAPER's
   stock ones. get_plugin_profile explains plugins creaper knows; read it before

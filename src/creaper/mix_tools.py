@@ -454,7 +454,7 @@ def plan_mix(channels: list[dict], style: dict | None = None) -> dict:
                 duck.append({"source": kick["name"], "target": c["name"], "depth": "medium", **refs})
             elif c["role"] == "pad" and not c.get("ducked"):
                 duck.append({"source": kick["name"], "target": c["name"], "depth": "light", **refs})
-    return {"anchor_lufs": round(anchor, 1), "channels": actions, "sidechains": duck}
+    return {"anchor_lufs": round(anchor, 1), "channels": actions, "sidechains": duck, "offsets": offsets}
 
 
 # ------------------------------------------------------------------ executing
@@ -874,6 +874,82 @@ def _soft_clip(track, start_bar: float | None, end_bar: float | None, peak: floa
         call("set_track_properties", track=track, volume_db=round(fader - boost, 1))
     shaved = round(min(DRUM_SHAVE_DB, pre_fader_peak + boost), 1)
     return {"boost_db": boost, "peaks_rounded_db": shaved, "fader_db": round(fader - boost, 1)}
+
+
+# The levels are planned before any compressor, so what the compressors took off (or a
+# model that misjudged one) is only found by measuring again: a 90s pop piano came out
+# 14 LU under the keys' place and a synth hook carried the song ("it sounds awful").
+REBALANCE_LU = 4.0                                    # further off its place than this: the fader moves
+REBALANCE_CUT_DB, REBALANCE_BOOST_DB = -8.0, 6.0
+
+
+def _rebalance(channels: list[dict], plan: dict, start_bar: float | None, end_bar: float | None) -> list[dict]:
+    """Each part measured again after the mix stages (one render pass), against its
+    role's place over the drums (plan_mix's offsets); a part more than REBALANCE_LU off
+    has its fader moved back, within REBALANCE_CUT_DB..REBALANCE_BOOST_DB. The drums
+    are the anchor and stay; a vocal is reported, not moved (the clarity stage sets it);
+    a ducked part isn't raised (its ducking is the point)."""
+    from . import batch
+
+    playing = [c for c in channels if c.get("level") is not None]
+    if len(playing) < 2:
+        return []
+    audio = batch.render_group([c["ref"] for c in playing], start_bar, end_bar)
+    levels = {}
+    for c in playing:
+        x = audio.get(c["ref"])
+        if x is not None and float(abs(x).max()) > 1e-6:
+            m = analysis.loudness(x, audio["_fs"])
+            levels[c["ref"]] = m.get("max_short_term_lufs") or m.get("integrated_lufs")
+    anchors = [levels[c["ref"]] for c in playing if c["role"] in ("kick", "drums") and levels.get(c["ref"]) is not None]
+    if not anchors:
+        return []
+    anchor = max(anchors)
+    ducked = {str(d.get("target_ref", d["target"])) for d in plan.get("sidechains", [])}
+    out = []
+    for c in playing:
+        level = levels.get(c["ref"])
+        if level is None or c["role"] in ("kick", "drums"):
+            continue
+        off = round(level - (anchor + plan["offsets"].get(c["role"], -7)), 1)
+        entry: dict = {"track": c["name"], "role": c["role"], "from_its_place_lu": off}
+        raise_ducked = off < 0 and (c.get("ducked") or str(c["ref"]) in ducked)
+        if abs(off) > REBALANCE_LU and c["role"] != "vocal" and not raise_ducked:
+            move = round(max(REBALANCE_CUT_DB, min(REBALANCE_BOOST_DB, -off)), 1)
+            now = call("get_track_details", track=c["ref"]).get("volume_db") or 0.0
+            call("set_track_properties", track=c["ref"], volume_db=round(now + move, 1))
+            entry["moved_db"] = move
+        elif abs(off) > REBALANCE_LU:
+            entry["note"] = "left where it is: " + ("the vocal's level is the clarity stage's" if c["role"] == "vocal"
+                                                    else "it's ducked under the kick")
+        out.append(entry)
+    return out
+
+
+# A rhythm part's own echo, inside its synth preset: the Jun-6 "acoustic guitar" of a 90s
+# pop song came with a 3/16 stereo delay at 35% feedback bouncing under every strum ("the
+# ping pong synth is not good"). The mix's shared delay feeds the leads and vocals instead.
+RHYTHM_ROLES = ("guitar", "keys", "bass")
+OWN_DELAY_SWITCH = re.compile(r"^delay\s*(on\s*/\s*off|on|enable|active)$", re.I)
+
+
+def _instrument_delays_off(channels: list[dict]) -> list[dict]:
+    """Turns off the delay built into each rhythm part's instrument (a switch named
+    'Delay On/Off' or similar that's on), and says which."""
+    done = []
+    for c in channels:
+        if c.get("role") not in RHYTHM_ROLES:
+            continue
+        fx = call("get_track_details", track=c["ref"]).get("fx", [])
+        for f in (f for f in fx if f.get("instrument")):
+            params = call("get_fx_parameters", track=c["ref"], fx=f["index"], search="delay", limit=40).get("parameters", [])
+            switch = next((p for p in params if OWN_DELAY_SWITCH.match(p.get("name", "").strip())
+                           and str(p.get("display", "")).strip().lower() in ("on", "1", "1.00", "active")), None)
+            if switch:
+                call("set_fx_parameters", track=c["ref"], fx=f["index"],
+                     changes=[{"parameter": switch["name"], "display_text": "Off"}])
+                done.append({"track": c["name"], "plugin": f.get("name"), "switched_off": switch["name"]})
+    return done
 
 
 SECTION_GAIN_FX, SECTION_GAIN_PARAM = "JS: Volume Adjustment", "Adjustment (dB)"   # first on the master
@@ -1432,6 +1508,12 @@ def auto_mix(
         report["backup"] = backup
     else:
         report["backup"] = "the project isn't saved, so there's no copy: Ctrl+Z steps back through the changes"
+    try:
+        own_delays = _instrument_delays_off(channels)
+        if own_delays:
+            report["instrument_delays_off"] = own_delays
+    except Exception as e:  # noqa: BLE001
+        report.setdefault("warnings", []).append(f"instrument delays: {e}")
     # With glue, the drums go to their own short room instead of the long reverb.
     room = None
     if glue and reverb and any(a["role"] in DRUM_ROLES and not a.get("skipped") for a in plan["channels"]):
@@ -1610,6 +1692,13 @@ def _mix_stages(report: dict, plan: dict, channels: list[dict], profile: dict | 
         report["drum_glue"].pop("_track", None)
     if room:
         report["drum_room"] = room
+    try:
+        balance = _rebalance(channels, plan, start_bar, end_bar)
+        if balance:
+            report["balance"] = balance
+            changed = changed or any("moved_db" in b for b in balance)
+    except Exception as e:  # noqa: BLE001
+        report.setdefault("warnings", []).append(f"balance check: {e}")
     if section_moves:
         try:
             moves = _section_moves(start_bar, end_bar)

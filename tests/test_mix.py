@@ -1,3 +1,4 @@
+import pytest
 """auto_mix's plan: roles, levels, EQ, compression, panning, sends, sidechains."""
 from creaper import mix_tools
 from creaper.mix_tools import plan_mix, role_of, section_balance
@@ -699,3 +700,58 @@ def test_a_robot_vocal_is_still_measured_beside_a_sung_one(monkeypatch):
     _sung_mix(monkeypatch, 0.9, lambda raised, drier: 0.88)
     out = mix_tools._clear_robot_vocals([SUNG, {"role": "vocal", "name": "Robot", "ref": "Robot"}], None, None)
     assert out[0]["after"]["in_mix"] == 0.88 and "raised_db" not in out[0] and out[1]["verdict"] == "clear"
+
+
+def test_a_part_the_compressors_buried_is_brought_back_to_its_place(monkeypatch):
+    import numpy as np
+    from creaper import batch
+    fs = 22050
+    t = np.arange(fs * 6) / fs
+
+    def tone(db):
+        x = 10 ** (db / 20) * np.sin(2 * np.pi * 220 * t)
+        return np.stack([x, x], axis=1)
+
+    # After the mix stages: the drums' loudest moment the anchor, the piano 14 LU under
+    # the keys' place (-7), the lead 1 LU over its own, the vocal low, the bass ducked.
+    rendered = {"D": tone(-10), "P": tone(-10 - 21), "L": tone(-10 - 4), "V": tone(-10 - 6), "B": tone(-10 - 9)}
+    monkeypatch.setattr(batch, "render_group", lambda refs, a, b: {"_fs": fs, **{r: rendered[r] for r in refs}})
+    faders = {"D": -10.0, "P": -18.0, "L": 1.0, "V": -7.0, "B": -4.0}
+    monkeypatch.setattr(mix_tools, "call", lambda cmd, **kw: (
+        {"volume_db": faders[kw["track"]]} if cmd == "get_track_details"
+        else faders.__setitem__(kw["track"], kw["volume_db"]) if cmd == "set_track_properties" else {}))
+    channels = [{"name": "Drums", "ref": "D", "role": "drums", "level": -20}, {"name": "Chords", "ref": "P", "role": "keys", "level": -8},
+                {"name": "Lead", "ref": "L", "role": "lead", "level": -30}, {"name": "Vocal", "ref": "V", "role": "vocal", "level": -12},
+                {"name": "Bass", "ref": "B", "role": "bass", "level": -15}, {"name": "Silent", "ref": "S", "role": "pad", "level": None}]
+    plan = plan_mix([{**c, "pan": 0, "spectrum": None} for c in channels], {"family": "pop"})
+    plan["sidechains"] = [{"source": "Drums", "target": "Bass", "target_ref": "B", "depth": "medium"}]
+    out = {b["track"]: b for b in mix_tools._rebalance(channels, plan, None, None)}
+    assert out["Chords"]["from_its_place_lu"] == pytest.approx(-14, abs=0.3)
+    assert out["Chords"]["moved_db"] == mix_tools.REBALANCE_BOOST_DB and faders["P"] == -12.0   # back up, within its limit
+    assert "moved_db" not in out["Lead"] and faders["L"] == 1.0                             # close enough to its place
+    assert "moved_db" not in out["Vocal"] and "clarity" in out["Vocal"]["note"]               # the vocal is reported only
+    assert "moved_db" not in out["Bass"] and "ducked" in out["Bass"]["note"]
+    assert "Drums" not in out and "Silent" not in out and faders["D"] == -10.0
+
+
+def test_a_rhythm_parts_own_echo_is_switched_off(monkeypatch):
+    params = {"G": [{"name": "Delay ON/OFF", "display": "On"}, {"name": "Delay Time (Sync)", "display": "3/16"}],
+              "L": [{"name": "Delay On/Off", "display": "On"}],
+              "K": [{"name": "Delay On/Off", "display": "Off"}]}
+    set_calls = []
+
+    def fake(cmd, **kw):
+        if cmd == "get_track_details":
+            return {"fx": [{"index": 1, "name": "VST3i: Jun-6 V (Arturia)", "instrument": True}, {"index": 2, "name": "ReaEQ"}]}
+        if cmd == "get_fx_parameters":
+            assert kw["fx"] == 1
+            return {"parameters": params[kw["track"]]}
+        if cmd == "set_fx_parameters":
+            set_calls.append((kw["track"], kw["changes"]))
+        return {}
+    monkeypatch.setattr(mix_tools, "call", fake)
+    out = mix_tools._instrument_delays_off([{"name": "Guitar", "ref": "G", "role": "guitar"},
+                                            {"name": "Lead", "ref": "L", "role": "lead"},      # a lead keeps its echo
+                                            {"name": "Keys", "ref": "K", "role": "keys"}])     # already off
+    assert out == [{"track": "Guitar", "plugin": "VST3i: Jun-6 V (Arturia)", "switched_off": "Delay ON/OFF"}]
+    assert set_calls == [("G", [{"parameter": "Delay ON/OFF", "display_text": "Off"}])]
