@@ -321,6 +321,42 @@ def test_a_track_that_renders_differently_each_time_is_set_by_the_model():
     assert sum("Pad" in p for p in bench.passes) == 3
 
 
+class FaderBench(NoisyBench):
+    """Its compressors sit before a fader: renders come back after it."""
+
+    def __init__(self, tracks, fader_db, noisy=("Pad",)):
+        super().__init__(tracks, noisy)
+        self.fader_db = fader_db
+
+    def call(self, cmd, **kw):
+        if cmd == "get_track_details":
+            return {"volume_db": self.fader_db[kw["track"]]}
+        return super().call(cmd, **kw)
+
+    def render_group(self, tracks, lo, hi):
+        out = super().render_group(tracks, lo, hi)
+        return {t: (x * 10 ** (self.fader_db[t] / 20) if t != "_fs" else x) for t, x in out.items()}
+
+
+def test_the_model_sets_a_turned_down_part_from_what_reaches_its_compressor():
+    pad = np.stack([drums(8, 0.5, 4)] * 2, axis=1)
+    import pytest as _pt
+    values = []
+    for fader in (0.0, -18.0):        # the same pad (and render wobble), its fader up or down
+        bench = FaderBench({"Pad": pad}, {"Pad": fader})
+        mp = _pt.MonkeyPatch()
+        mp.setattr(server, "call", bench.call)
+        mp.setattr(batch, "render_group", bench.render_group)
+        try:
+            out = batch.calibrate_many([{"track": "Pad", "fx": 1, "profile": plugin_profiles.find_profile("ReaComp"),
+                                         "target": 1.5, "span": (9.0, 17.0)}])[0]
+        finally:
+            mp.undo()
+        assert out["method"].startswith("the compressor model")
+        values.append(out["value"])
+    assert values[1] == pytest.approx(values[0], abs=0.2)     # not 18 dB lower: the fader comes after it
+
+
 def test_a_readable_track_that_starts_off_target_still_searches():
     bench = NoisyBench({"Snare": np.stack([drums(8, 0.3, 2)] * 2, axis=1)}, noisy=())
     import pytest as _pt

@@ -104,6 +104,8 @@ def test_calibration_converges_on_a_simulated_compressor(monkeypatch):
             return {"tempo_bpm": 120, "time_signature": "4/4"}
         if cmd == "time_to_positions":
             return [{"bar": 1 + t / 2.0} for t in kw["times"]]
+        if cmd == "get_track_details":
+            return {"volume_db": 0.0}
         raise AssertionError(cmd)
 
     monkeypatch.setattr(server, "_render_array", fake_render)

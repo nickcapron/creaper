@@ -371,7 +371,8 @@ def test_build_drum_kit_with_alternatives_and_layers(tmp_path, monkeypatch):
         return {}
     monkeypatch.setattr(sample_tools, "call", fake_call)
     out = sample_tools.build_drum_kit(track="Drums", samples={"kick": str(kick), "snare": [str(loud), str(soft)]},
-                                      layers={"kick": [sample_tools.Layer(path=str(click), gain_db=-9)]}, trim_silence=False)
+                                      layers={"kick": [sample_tools.Layer(path=str(click), gain_db=-9)]}, trim_silence=False,
+                                      fill_gaps=False)     # not the user's library's crash
     pads = next(kw for cmd, kw in calls if cmd == "build_sampler_kit")["pads"]
     assert [p["note"] for p in pads] == [36, 36, 38, 38]          # the layer shares the kick's key
     sets = [kw for cmd, kw in calls if cmd == "set_fx_parameters"]

@@ -343,13 +343,17 @@ def _calibrate_group(jobs: list[dict], idx: list[int], span: tuple, passes: int,
                                   "quiet moments), so the compressor was left at its gentle starting settings "
                                   "instead of being pushed"}
             continue
-        rms = analysis._db(float((audio.astype("float64") ** 2).mean()) ** 0.5)
+        # The renders are after the fader, the compressor before it: a pop piano turned down
+        # 18 dB got a threshold 18 dB too low and lost about 10 dB, not the 1.5 asked.
+        fader = server.call("get_track_details", track=j["track"]).get("volume_db") or 0.0
+        pre = audio.astype("float64") * 10 ** (-float(fader) / 20)
+        rms = analysis._db(float((pre ** 2).mean()) ** 0.5)
         floor = (rms - server.THRESHOLD_BELOW_RMS_DB
                  if (profile.drive_more == "down" and rms is not None and not j.get("sidechain")) else None)
         predicted = None
         if profile.name == "ReaComp" and profile.drive == "Threshold" and not j.get("sidechain"):
             k = _comp_settings(j["track"], j["fx"])
-            predicted = predict_threshold(audio, fs, target, k["ratio"], k["attack"], k["release"],
+            predicted = predict_threshold(pre, fs, target, k["ratio"], k["attack"], k["release"],
                                           *(profile.drive_range or (-60, 0)))
             if predicted is not None and floor is not None:
                 predicted = max(predicted, floor)
