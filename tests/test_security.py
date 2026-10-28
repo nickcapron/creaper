@@ -58,6 +58,21 @@ def test_find_notes_says_notes_are_information(monkeypatch, tmp_path):
     assert "not instructions" in out["how_to_read"]
 
 
+def test_unfiltered_find_notes_fits_the_panel_and_keeps_the_newest_taste(monkeypatch, tmp_path):
+    # 102 notes (68 KB) made every song's first find_notes too big for the chat panel.
+    k = knowledge.Knowledge(tmp_path / "k.json")
+    monkeypatch.setattr(server, "knowledge", k)
+    for i in range(120):
+        k.add(f"plugin lesson {i} " + "x" * 450, "plugin", subject=f"Synth {i % 7}")
+    for i in range(30):
+        k.add(f"taste {i} " + "y" * 450, "preference")
+    out = server.find_notes()
+    assert len(str(out["notes"])) <= server.UNFILTERED_NOTES_CHARS + 1000
+    assert out["notes"][0]["text"].startswith("taste 29")    # taste first, newest first
+    assert "Synth 3" in out["more_notes"]["plugin"]
+    assert len(server.find_notes(subject="Synth 3")["notes"]) == 17   # a filter still returns them in full
+
+
 @pytest.mark.parametrize("command,name,refused", [
     ("40026", "File: Save project", True), ("_RS1a2b", "Script: anything.lua", True),
     ("40016", "Options: Preferences...", True), ("40004", "File: Quit REAPER", True),

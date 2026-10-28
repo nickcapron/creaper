@@ -574,7 +574,10 @@ def add_chord_progression(
     pads stay smooth) unless feel is 'none'. The voicings keep the top line moving (no
     top note three times running) and re-voice a chord that comes back; stab styles
     anticipate the changes and held styles take a 4-3 suspension at phrase ends. The
-    default register (octave 3) changed from 4: chords now sit under the lead."""
+    default register (octave 3) changed from 4: chords now sit under the lead. Held
+    chords alone are a bed, not a part: a brief's "one chord a bar" sets the pace,
+    so put a sparse line over them (write_melody) or change the comping rhythm
+    partway (a felt piano left as block chords for 25 bars was "too boring")."""
     k = _key(key)
     events, k = _events(chords, k, chord_length, start)
     voicings = composer.voice_chords([e.chord for e in events], voicing, octave, key=k)

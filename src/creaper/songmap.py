@@ -166,7 +166,8 @@ def song_map(tracks: dict[str, list[dict]], sections: list[dict], bar_qn: float 
     track (same_as) or mostly repeats bars heard before (copied_share). tracks: name ->
     notes with absolute QN starts. sections: [{'name', 'start_qn', 'end_qn', 'energy'?}].
     Findings name the problems listeners hear: a section that's a copy on every track, a
-    track that loops all song, a chorus no busier than the verse, a lead under the chords."""
+    track that loops all song, a chorus no busier than the verse, a lead under the chords, a
+    section where nothing moves."""
     table = []
     sigs: dict[str, list[tuple[str, list]]] = {t: [] for t in tracks}
     heard: dict[str, set] = {t: set() for t in tracks}
@@ -198,6 +199,10 @@ def song_map(tracks: dict[str, list[dict]], sections: list[dict], bar_qn: float 
             heard[t].update(played)
             row["tracks"][t] = cell
         row["notes_per_bar"] = round(total / bars, 2)
+        moving = [t for t, notes in tracks.items()
+                  if t in row["tracks"] and _moves([n for n in notes if s["start_qn"] - 1e-6 <= n["start"] < s["end_qn"] - 1e-6])]
+        if row["tracks"] and not moving:
+            row["still"] = True
         table.append(row)
     return {"sections": table, "findings": findings(table, tracks, bar_qn)}
 
@@ -225,6 +230,12 @@ def findings(table: list[dict], tracks: dict[str, list[dict]], bar_qn: float) ->
                             "detail": f"{row['section']} plays exactly like {copies.pop()} on every track",
                             "fix": "give it new material: another seed for the drums and bass, a new voicing or "
                                    "comping rhythm, a part in or out"})
+        if row.get("still") and row["bars"] >= 8 and composer.section_kind(row["section"]) not in STILL_KINDS:
+            out.append({"check": "no moving part", "status": "warn", "section": row["section"],
+                        "detail": f"nothing in {row['section']} moves for its {row['bars']} bars: held chords, "
+                                  "drones or a bass on two notes",
+                        "fix": "a sparse line over the chords (write_melody) or a broken-chord passage partway; "
+                               "a felt piano left as block chords for 25 bars was 'too boring'"})
     for t, notes in tracks.items():
         bars = sum(r["bars"] for r in table if t in r["tracks"])
         if bars < 16:
@@ -254,6 +265,24 @@ def findings(table: list[dict], tracks: dict[str, list[dict]], bar_qn: float) ->
                         "detail": f"the lead ({lead}) sits under the top of the chords ({chords})",
                         "fix": "move the chords down an octave (octave 3) or the lead up"})
     return out
+
+
+STILL_KINDS = ("intro", "outro", "breakdown")   # sections that may sit still
+
+
+def _moves(notes: list[dict], spread_qn: float = 0.1) -> bool:
+    """Whether a track plays a line: three or more pitches among notes struck alone (or
+    as an octave or dyad), as a melody, an arpeggio, a walking bass or a drum pattern
+    does. Held chords, a drone and a bass rocking between two notes don't."""
+    groups: list[list[int]] = []
+    first = None
+    for n in sorted(notes, key=lambda n: n["start"]):
+        if first is None or n["start"] - first > spread_qn:
+            first = n["start"]
+            groups.append([n["pitch"]])
+        else:
+            groups[-1].append(n["pitch"])
+    return len({max(g) for g in groups if len(g) <= 2}) >= 3
 
 
 def _tops(notes: list[dict], spread_qn: float = 0.1) -> list[int]:

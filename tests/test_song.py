@@ -544,6 +544,20 @@ def test_the_register_check_sees_rolled_chords_tops():
     assert songmap._tops(chords)[:2] == [64, 64]
 
 
+def test_a_section_of_only_held_chords_and_a_drone_is_flagged():
+    # Night Shift: a felt piano one chord a bar over a hum and a bass rocking G-Eb, "too boring".
+    secs = [{"name": "Intro - Hum", "start_qn": 0, "end_qn": 64}, {"name": "Verse - Piano", "start_qn": 64, "end_qn": 160}]
+    hum = [{"pitch": 31, "start": b * 4.0, "length": 4.0} for b in range(40)]
+    bass = [{"pitch": (43, 39)[b // 2 % 2], "start": b * 4.0, "length": 8.0} for b in range(0, 40, 2)]
+    piano = [{"pitch": p + b % 3, "start": 64 + b * 4.0 + i * 0.01, "length": 4.0}
+             for b in range(24) for i, p in enumerate((55, 58, 62, 65))]
+    still = songmap.song_map({"Hum": hum, "Bass": bass, "Keys": piano}, secs)["findings"]
+    assert [f["section"] for f in still if f["check"] == "no moving part"] == ["Verse - Piano"]   # the intro may sit still
+    line = [{"pitch": p, "start": 64 + i * 6.0, "length": 2.0} for i, p in enumerate((74, 72, 70, 74, 77, 75) * 2)]
+    moving = songmap.song_map({"Hum": hum, "Bass": bass, "Keys": piano, "Melody": line}, secs)["findings"]
+    assert not [f for f in moving if f["check"] == "no moving part"]
+
+
 def test_the_last_chorus_lifts_not_the_post_chorus(reaper):
     out = song_tools.build_song(genre="pop", key="C major", lift_last_chorus=True, seed=1,
                                 sections=["Verse 1:8", "Chorus 1:8", "Verse 2:8", "Chorus 2:8", "Post-chorus:8"])

@@ -214,6 +214,22 @@ PROFILES: tuple[Profile, ...] = (
         "Automate Cutoff for sweeps rather than leaving it low.",
         controls={"cutoff": "Cutoff", "resonance": "Resonance", "output": "Output Volume"},
     ),
+    Profile(
+        "Pink Noise Generator", "generator",
+        "REAPER's JS noise source: plays on its own, no MIDI item needed. Mode Mono or Stereo; Noise (dB) "
+        "and Dry (dB) step from -25 to +25, so set the level with the fader. Noise beds: tape hiss is Mono, "
+        "high-passed at 3-4 kHz (ReaEQ: a low shelf there at -18 dB or a high pass; the RBJ filter's HPF "
+        "stops at 1 kHz), steady and barely there; broad Stereo noise across 1-6 kHz sounds like rain (a "
+        "noir cue's 'tape hiss' did); wind is a resonant band-pass swept slowly; room tone is low-passed "
+        "and very quiet.",
+        controls={"mode": "Mode", "level": "Noise (dB)", "dry": "Dry (dB)"},
+    ),
+    Profile(
+        "RBJ Highpass/Lowpass Filters", "filter",
+        "REAPER's JS high and low pass pair. HPF only reaches 1000 Hz (a higher value is clamped to it); "
+        "for a high pass above 1 kHz (tape hiss, a thin telephone part) use ReaEQ. LPF runs to 22 kHz.",
+        controls={"high-pass": "HPF", "low-pass": "LPF", "gain": "Gain"},
+    ),
 )
 
 
