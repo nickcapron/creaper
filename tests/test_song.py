@@ -149,6 +149,48 @@ def test_each_kind_of_section_gets_its_own_parts():
     assert plan[-1]["start_bar"] + plan[-1]["bars"] == 1 + sum(b for _, b in pop.form)
 
 
+def test_parts_enter_and_drop_out_inside_sections():
+    pop = genres.find("pop")
+    layout = [("Intro", 8), ("Verse 1", 16), ("Pre-Chorus 1", 8), ("Chorus 1", 8), ("Verse 2", 8), ("Chorus 2", 8),
+              ("Bridge", 8), ("Chorus 3", 16), ("Outro", 8)]
+    by = {r["section"]: r["parts"] for r in songmap.plan_song(pop, layout, seed=2)}
+    assert by["Intro"]["drums"]["rests"] == [[0, 4]]               # the chords alone, then the beat
+    assert by["Verse 1"]["bass"]["rests"] == [[0, 4]]              # the bass comes in at bar 5
+    assert "rests" not in by["Verse 2"]["bass"] or by["Verse 2"]["bass"]["rests"] == [[7, 8]]
+    for part in ("chords", "bass"):                                # the bar before a chorus breathes
+        assert [7, 8] in by["Pre-Chorus 1"][part]["rests"] and [7, 8] in by["Verse 2"][part]["rests"]
+        assert [7, 8] in by["Bridge"][part]["rests"]
+    assert "rests" not in by["Pre-Chorus 1"].get("lead", {}) and "rests" not in by["Pre-Chorus 1"]["drums"]
+    assert by["Bridge"]["drums"]["rests"] == [[0, 4]]
+    assert by["Outro"]["drums"]["rests"] == [[4, 8]]
+    assert not any("rests" in p for p in by["Chorus 1"].values())  # a chorus plays in full
+    # Club intros keep the beat for the DJ; short sections are left whole.
+    house = genres.find("house")
+    club = songmap.plan_song(house, [("Intro", 16), ("Drop", 16), ("Outro", 16)], seed=1)
+    assert "rests" not in club[0]["parts"]["drums"] and club[-1]["parts"]["bass"]["rests"] == [[8, 16]]
+    short = songmap.plan_song(pop, [("Intro", 4), ("Verse", 4), ("Chorus", 4)], seed=1)
+    assert "rests" not in short[0]["parts"].get("drums", {}) and short[1]["parts"]["bass"]["rests"] == [[3, 4]]
+
+
+def test_the_rest_bars_lose_their_notes_and_ringing_notes_stop(monkeypatch):
+    item = {"notes": [{"pitch": 45, "start": 0.0, "length": 8.0, "velocity": 90, "channel": 1},    # rings into bar 3
+                      {"pitch": 45, "start": 8.0, "length": 2.0, "velocity": 90, "channel": 1},    # inside the rest
+                      {"pitch": 47, "start": 12.0, "length": 1.0, "velocity": 90, "channel": 1}]}
+
+    def fake(cmd, **kw):
+        if cmd == "get_midi_notes":
+            return {"notes": item["notes"]}
+        if cmd == "add_midi_notes":
+            assert kw["replace"]
+            item["notes"] = kw["notes"]
+        return {}
+    monkeypatch.setattr(song_tools, "call", fake)
+    song_tools._rest("x", [[2, 3]], 4.0)
+    assert [(n["start"], n["length"]) for n in item["notes"]] == [(0.0, 8.0), (12.0, 1.0)]
+    song_tools._rest("x", [[1, 2]], 4.0)
+    assert [(n["start"], n["length"]) for n in item["notes"]] == [(0.0, 4.0), (12.0, 1.0)]
+
+
 def test_club_songs_start_and_end_on_drums():
     house = genres.find("house")
     plan = songmap.plan_song(house, song_tools._numbered(list(house.form)), seed=1)
@@ -218,6 +260,14 @@ def test_build_song_writes_every_section_as_its_own_variant(reaper):
     last = {(round(n["start"] * 6), n["pitch"]) for n in choruses[-1]["notes"]}
     assert sum((at, p - 12) in last for at, p in last) == len(last) // 2          # the octave over it
     assert out["seed"] == 3 and out["key"] == "A minor"
+    # Parts enter and leave inside sections: verse 1's bass waits 4 bars, the bar before a chorus breathes.
+    items = {i["name"]: i for i in reaper.items.values()}
+    v1_bass = items["Verse 1 bass"]["notes"]
+    assert v1_bass and min(n["start"] for n in v1_bass) >= 16 - 1e-6
+    pre = next(s for s in out["sections"] if s["section"].lower().startswith("pre-chorus"))
+    pre_chords = items[f"{pre['section']} chords"]["notes"]
+    assert all(n["start"] + n["length"] <= (pre["bars"] - 1) * 4 + 1e-6 for n in pre_chords)
+    assert pre["parts"]["chords"]["sits_out_bars"] == [[pre["start_bar"] + pre["bars"] - 1, pre["start_bar"] + pre["bars"]]]
     assert all(n["start"] + n["length"] <= i["end"] - i["start"] + 1e-6
                for i in reaper.items.values() for n in i["notes"])
 

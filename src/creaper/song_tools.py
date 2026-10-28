@@ -757,6 +757,11 @@ def build_song(
                                                      chords_item_id=items.get("chords"), key=sec_key, seed=p["seed"],
                                                      feel=played_as)
                 report["parts"][part] = {"notes": r.get("notes_written")}
+        for part, item_id in items.items():   # after every part, so the counter heard the whole chords
+            rests = row["parts"][part].get("rests")
+            if rests and part in report["parts"]:
+                _rest(item_id, rests, bar_qn)
+                report["parts"][part]["sits_out_bars"] = [[row["start_bar"] + a, row["start_bar"] + b] for a, b in rests]
         written.append(report)
     mapped = song_map()
     needs = [t["name"] for p, t in tracks.items() if t.get("created") and not (instruments or {}).get(p)]
@@ -770,6 +775,23 @@ def build_song(
                  "write_automation into the peaks, auto_mix(style), check_song. Re-write one section's part with "
                  "its tool (a new seed) rather than copying another section."),
     }
+
+
+def _rest(item_id: str, rests: list[list[int]], bar_qn: float) -> None:
+    """Takes the notes out of an item's rest bars (0-based [from, to) within it); a note
+    ringing into a rest stops where the rest begins."""
+    notes = call("get_midi_notes", item_id=item_id, limit=20000).get("notes", [])
+    kept = []
+    for n in notes:
+        start, length = n["start"], n["length"]
+        if any(a * bar_qn - 1e-6 <= start < b * bar_qn - 1e-6 for a, b in rests):
+            continue
+        for a, _ in rests:
+            if start < a * bar_qn - 1e-6 < start + length:
+                length = a * bar_qn - start
+        kept.append({"pitch": n["pitch"], "start": start, "length": round(length, 6),
+                     "velocity": n.get("velocity", 96), "channel": n.get("channel", 1)})
+    call("add_midi_notes", item_id=item_id, notes=kept, replace=True)
 
 
 LEAD_DOUBLE_STEPS = {"third": 2, "octave": 7}   # scale steps over the hook

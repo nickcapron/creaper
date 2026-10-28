@@ -111,7 +111,41 @@ def plan_song(genre, sections: list[tuple[str, int]], seed: int, energies: list[
         out.append({"section": name, "kind": kind, "energy": energy, "start_bar": bar, "bars": bars,
                     "parts": parts})
         bar += bars
+    phrase_rests(out, club)
     return out
+
+
+def phrase_rests(plan: list[dict], club: bool) -> None:
+    """Where a part sits out inside its section, so the texture changes within sections
+    and not only between them (songs measured about one texture change a minute, Suno's
+    two or more): the first verse's bass comes in at its 5th bar; chords, bass and
+    counter drop out for the last bar before every chorus or drop, so it lands; a bridge
+    loses its drums for its first half; an 8-bar or longer intro opens on its chords
+    before the beat (club intros keep the beat for the DJ); an 8-bar or longer outro
+    loses its drums for the last 4 bars (a club outro its bass for the second half).
+    Adds 'rests': [[from_bar, to_bar], ...] (0-based within the section) to those parts."""
+    def rest(row: dict, part: str, a: int, b: int) -> None:
+        if part in row["parts"] and 0 <= a < b <= row["bars"]:
+            row["parts"][part] = dict(row["parts"][part], rests=row["parts"][part].get("rests", []) + [[a, b]])
+
+    first_verse = next((r for r in plan if r["kind"] == "verse"), None)
+    for i, row in enumerate(plan):
+        bars, kind = row["bars"], row["kind"]
+        if row is first_verse and bars >= 8:
+            rest(row, "bass", 0, 4)
+        following = plan[i + 1]["kind"] if i + 1 < len(plan) else None
+        if following == "chorus" and kind != "intro" and bars >= 4:
+            for part in ("chords", "bass", "counter"):
+                rest(row, part, bars - 1, bars)
+        if kind == "bridge" and bars >= 8:
+            rest(row, "drums", 0, bars // 2)
+        if kind == "intro" and bars >= 8 and not club and "chords" in row["parts"]:
+            rest(row, "drums", 0, bars // 2)
+        if kind == "outro" and bars >= 8:
+            if club:
+                rest(row, "bass", bars // 2, bars)
+            elif len(row["parts"]) > 1:
+                rest(row, "drums", bars - 4, bars)
 
 
 # ----------------------------------------------------------------- song map
