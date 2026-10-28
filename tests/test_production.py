@@ -159,3 +159,28 @@ def test_compare_includes_tone_over_time():
     measured = {"tone_over_time": {"harsh_2_5k_pct_p95": 30.0}}
     areas = [f["area"] for f in styles.compare(measured, styles.find_style("house"))]
     assert any(a.startswith("harshness") for a in areas)
+
+
+def test_a_low_pass_that_never_opens_is_called_out(monkeypatch):
+    from creaper import server
+    from creaper.server import AutomationPoint
+    fx = [{"index": 1, "name": "VST3i: Prophet-5 V (Arturia)"}, {"index": 2, "name": "JS: Resonant Lowpass Filter"},
+          {"index": 3, "name": "JS: RBJ Highpass/Lowpass Filters"}]
+    monkeypatch.setattr(server, "call", lambda cmd, **kw: {"fx": fx} if cmd == "get_track_details" else {"written": 4})
+    parked = [AutomationPoint(bar=b, value=v) for b, v in ((1, 4500), (97, 700), (113, 4500), (177, 4500))]
+    out = server.write_automation(track="Lead", target="fx", fx=2, parameter="Frequency (Hz)", points=parked)
+    assert "never opens past 4500 Hz" in out["warning"] and out["written"] == 4
+    opened = parked + [AutomationPoint(bar=114, value=20000)]
+    assert "warning" not in server.write_automation(track="Lead", target="fx", fx=2, parameter="Frequency (Hz)", points=opened)
+    # Not a low pass, or not its cutoff: nothing to say.
+    assert "warning" not in server.write_automation(track="Lead", target="fx", fx=1, parameter="Cutoff", points=parked)
+    assert "warning" not in server.write_automation(track="Lead", target="fx", fx=2, parameter="Resonance",
+                                                    points=[AutomationPoint(bar=1, value=0.4)])
+
+
+def test_notes_say_a_fix_is_for_its_sound_not_a_default(tmp_path, monkeypatch):
+    from creaper import server
+    monkeypatch.setattr(server, "knowledge", Knowledge(tmp_path / "k.json"))
+    read = server.find_notes()["how_to_read"]
+    assert "never as defaults for a song in another style" in read
+    assert "never \"by default\"" in server.save_note.__doc__

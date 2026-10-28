@@ -33,6 +33,7 @@ def test_instrument_kinds_from_library_names():
     assert kinds("Harpsichord") == ["keys"] and kinds("UprightBass") == ["bass"] and kinds("VSUpright1") == ["keys"]
     assert kinds("Bass Fat Pizzicato", "Augmented STRINGS") == ["strings", "bass"]
     assert kinds("Thorn Pad") == [] and kinds("Tubular Bells") == ["percussion"]
+    assert kinds("FSS-SteelStringGuitar-20200521", "FreePats Steel-String Acoustic Guitar") == ["guitar"]   # not strings
 
 
 def test_sfz_instruments_are_checked_once_per_file_version(tmp_path, monkeypatch):

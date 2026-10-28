@@ -53,7 +53,7 @@ INSTRUMENT_WORDS = {
 }
 
 
-INSTRUMENT_EXCLUDES = {"keys": ("bass",)}   # an "UprightBass" is a bass, not an upright piano
+INSTRUMENT_EXCLUDES = {"keys": ("bass",), "strings": ("guitar",)}   # an "UprightBass" is a bass; a "SteelStringGuitar" a guitar
 
 
 def instrument_kinds(name: str, folder: str = "") -> list[str]:
