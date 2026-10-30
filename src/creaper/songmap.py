@@ -167,7 +167,7 @@ def song_map(tracks: dict[str, list[dict]], sections: list[dict], bar_qn: float 
     notes with absolute QN starts. sections: [{'name', 'start_qn', 'end_qn', 'energy'?}].
     Findings name the problems listeners hear: a section that's a copy on every track, a
     track that loops all song, a chorus no busier than the verse, a lead under the chords, a
-    section where nothing moves."""
+    section where nothing moves, a song with no pulse."""
     table = []
     sigs: dict[str, list[tuple[str, list]]] = {t: [] for t in tracks}
     heard: dict[str, set] = {t: set() for t in tracks}
@@ -199,10 +199,12 @@ def song_map(tracks: dict[str, list[dict]], sections: list[dict], bar_qn: float 
             heard[t].update(played)
             row["tracks"][t] = cell
         row["notes_per_bar"] = round(total / bars, 2)
-        moving = [t for t, notes in tracks.items()
-                  if t in row["tracks"] and _moves([n for n in notes if s["start_qn"] - 1e-6 <= n["start"] < s["end_qn"] - 1e-6])]
+        inside_of = {t: [n for n in notes if s["start_qn"] - 1e-6 <= n["start"] < s["end_qn"] - 1e-6]
+                     for t, notes in tracks.items() if t in row["tracks"]}
+        moving = [t for t, notes in inside_of.items() if _moves(notes)]
         if row["tracks"] and not moving:
             row["still"] = True
+        row["per_beat"] = round(max((len(_strikes(n)) / (bars * bar_qn) for n in inside_of.values()), default=0), 2)
         table.append(row)
     return {"sections": table, "findings": findings(table, tracks, bar_qn)}
 
@@ -236,6 +238,16 @@ def findings(table: list[dict], tracks: dict[str, list[dict]], bar_qn: float) ->
                                   "drones or a bass on two notes",
                         "fix": "a sparse line over the chords (write_melody) or a broken-chord passage partway; "
                                "a felt piano left as block chords for 25 bars was 'too boring'"})
+    busy = [r for r in table if r["tracks"] and composer.section_kind(r["section"]) not in STILL_KINDS]
+    if sum(r["bars"] for r in busy) >= 16 and all(r.get("per_beat", 0) < PULSE_PER_BEAT for r in table):
+        fastest = max(r.get("per_beat", 0) for r in table)
+        out.append({"check": "no pulse", "status": "warn", "value": fastest, "threshold": PULSE_PER_BEAT,
+                    "detail": f"no part keeps a pulse anywhere: the busiest plays {fastest:g} notes a beat, so the "
+                              "song only moves as fast as its slowest phrases",
+                    "fix": "one soft ostinato under the middle sections, entering after the intro: a bass or arp in "
+                           "8ths (write_bassline style 'eighths' or 'arpeggio'; add_chord_progression rhythm "
+                           "'arpeggio_up' or 'pulse_16'), tremolo strings or a ticking figure. Two quiet game cues "
+                           "of slow phrases (66 and 72 BPM) were 'too boring' until a driving bass went under them"})
     for t, notes in tracks.items():
         bars = sum(r["bars"] for r in table if t in r["tracks"])
         if bars < 16:
@@ -268,6 +280,16 @@ def findings(table: list[dict], tracks: dict[str, list[dict]], bar_qn: float) ->
 
 
 STILL_KINDS = ("intro", "outro", "breakdown")   # sections that may sit still
+PULSE_PER_BEAT = 1.5   # strikes a beat on one track that keep a pulse: 8ths with a few rests
+
+
+def _strikes(notes: list[dict], spread_qn: float = 0.1) -> list[float]:
+    """When a track strikes: notes within spread_qn of each other (a chord, a roll) are one."""
+    out: list[float] = []
+    for t in sorted(n["start"] for n in notes):
+        if not out or t - out[-1] > spread_qn:
+            out.append(t)
+    return out
 
 
 def _moves(notes: list[dict], spread_qn: float = 0.1) -> bool:

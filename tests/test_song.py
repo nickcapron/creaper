@@ -754,3 +754,21 @@ def test_the_mix_stage_asks_for_auto_mix_and_a_sounding_vocal(monkeypatch, tmp_p
     assert json.loads(plan.read_text())["auto_mix"]["tracks"] == ["Drums", "Bass"]
     monkeypatch.setattr(song_tools, "_song_paths", lambda: None)
     song_tools.mark_mixed(["Drums"])          # no saved project: nothing to mark, no error
+
+
+def test_a_song_with_no_pulse_anywhere_is_flagged():
+    # Public Inquiry (72 BPM): a cello theme and quartet phrases, at most 2.4 notes a bar; "too boring"
+    # until a driving arp bass went under the quartet in 8ths.
+    secs = [{"name": "Intro - Cello", "start_qn": 0, "end_qn": 32}, {"name": "Verse - Quartet", "start_qn": 32, "end_qn": 112},
+            {"name": "Bridge - Sour", "start_qn": 112, "end_qn": 160}]
+    cello = [{"pitch": (48, 51, 53, 55, 56)[i % 5], "start": i * 1.5, "length": 1.5} for i in range(106)]
+    quartet = [{"pitch": p, "start": 32 + b * 4.0, "length": 4.0} for b in range(32) for p in (60, 65, 68)]
+    slow = songmap.song_map({"Cello": cello, "Quartet": quartet}, secs)
+    assert [f["check"] for f in slow["findings"]].count("no pulse") == 1
+    assert slow["sections"][1]["per_beat"] == pytest.approx(0.66, abs=0.01)     # the cello, a note every 1.5 beats
+    assert songmap.song_map({"Quartet": quartet}, secs)["sections"][1]["per_beat"] == 0.25   # a chord strikes once
+    arp = [{"pitch": (41, 44, 48)[i % 3], "start": 32 + i * 0.5, "length": 0.5} for i in range(160)]
+    driven = songmap.song_map({"Cello": cello, "Quartet": quartet, "Arp Bass": arp}, secs)
+    assert not [f for f in driven["findings"] if f["check"] == "no pulse"]
+    short = [{"name": "Intro", "start_qn": 0, "end_qn": 32}, {"name": "Verse", "start_qn": 32, "end_qn": 64}]
+    assert not [f for f in songmap.song_map({"Cello": cello}, short)["findings"] if f["check"] == "no pulse"]

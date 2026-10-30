@@ -332,6 +332,67 @@ def instrument_level(zones: list[dict]) -> dict | None:
     return {"loudest_peak_db": round(max(peaks), 1), "trim_db": round(trim, 1)}
 
 
+SLOW_ONSET_MS = 120.0   # samples that take longer to speak smear a moving line (bowed sustains: 135-215 ms)
+TRIM_FADE_MS = 10.0     # the sampler's attack over a trimmed start, so the cut doesn't click
+
+
+def onset(path: str) -> tuple[float, float] | None:
+    """(start_s, attack_ms): where a sample's sound starts (-40 dB under its peak) and how
+    long it takes from there to come within 3 dB of the peak, as audition_instrument
+    measures a played note; None when it's silent or unreadable."""
+    try:
+        x, fs, _ = samplelib._load(path, seconds=2.0)
+    except Exception:  # noqa: BLE001 - an unreadable file decides nothing
+        return None
+    hop = max(1, int(fs * 0.005))
+    frames = len(x) // hop
+    if frames < 2:
+        return None
+    env = np.sqrt(np.mean(np.square(x[: frames * hop]).reshape(frames, hop), axis=1)) + 1e-12
+    if env.max() <= 1e-5:
+        return None
+    env_db = 20 * np.log10(env / env.max())
+    start = int(np.flatnonzero(env_db >= -40)[0])
+    reach = int(np.flatnonzero(env_db >= -3)[0])
+    return start * hop / fs, (reach - start) * hop / fs * 1000
+
+
+def tighten(zones: list[dict], attack_ms: float) -> dict:
+    """Start each zone's samples later so its notes speak within attack_ms: the sampler's
+    start offset (a share of the file) moved to attack_ms before the sample comes within
+    3 dB of its peak, with a short fade-in over the cut. Round robins share one offset,
+    the smallest. Looped zones keep their start (their loop is placed from the file
+    start). Returns {'before_ms', 'after_ms', 'trimmed', 'looped'}."""
+    before, after, trimmed, looped = [], [], 0, 0
+    for z in zones:
+        files = z.get("files") or [z["path"]]
+        found = [(f, onset(f)) for f in files]
+        found = [(f, o) for f, o in found if o]
+        if not found:
+            continue
+        before.append(max(o[1] for _, o in found))
+        if z.get("loop"):
+            looped += 1
+            after.append(before[-1])
+            continue
+        cuts = []
+        for f, (start, attack) in found:
+            frames, rate = _frames(f)
+            cut = start + max(0.0, attack - attack_ms) / 1000
+            cuts.append(cut * rate / frames if frames else 0.0)
+        frac = min(cuts)
+        if frac * 1000 > 1e-3 and min(o[1] for _, o in found) > attack_ms:
+            z["start_frac"], z["attack_ms"] = round(frac, 6), TRIM_FADE_MS
+            trimmed += 1
+            after.append(min(before[-1], attack_ms))
+        else:
+            after.append(before[-1])
+    if not before:
+        return {"before_ms": None, "after_ms": None, "trimmed": 0, "looped": 0}
+    return {"before_ms": round(float(np.median(before))), "after_ms": round(float(np.median(after))),
+            "trimmed": trimmed, "looped": looped}
+
+
 def hit_level_db(path: str) -> tuple[float, float] | None:
     """A sample's hit level (dB RMS over its first 60 ms from the onset, the window
     measure_tracks reads a kit's hits with) and its peak (dBFS); None when it's silent."""
@@ -687,6 +748,10 @@ def build_sampled_instrument(
     high_note: Annotated[str | int | None, Field(description="And the highest, e.g. 'G5'")] = None,
     release_s: Annotated[float, Field(ge=0.01, le=10, description="Release after note-off (strings ~0.3, pizzicato/plucks ~0.15, pads ~1)")] = 0.3,
     velocity_db: Annotated[float, Field(ge=-40, le=0, description="Level at the softest velocity: -18 is expressive, 0 ignores velocity")] = -18.0,
+    tighten_attack_ms: Annotated[float | None, Field(ge=5, le=200, description=(
+        "Trim each sample's slow onset so notes speak within this many ms. Bowed and blown sustains swell in "
+        "over 135-215 ms, which smears notes of a beat or less and sounds fake on a moving line: 40-60 for a "
+        "solo line or countermelody, leave unset for held chords and pads"))] = None,
 ) -> dict:
     """Builds a playable instrument from pitched sample files (strings, brass,
     pizzicato, choir, a sampled synth...): each sample covers a stretch of keys and
@@ -695,12 +760,16 @@ def build_sampled_instrument(
     response, note-offs and a release. Better than build_drum_kit for melodic parts,
     which plays each sample on one key at its own pitch. An .sfz file (sfz_path) gives
     its own zones; samples' names give velocity layers and round robins; WAV loop points
-    (the smpl chunk) keep sustains going while a note is held."""
+    (the smpl chunk) keep sustains going while a note is held. A section sample (Ens,
+    Section, Tutti) is many players: for a solo line prefer a solo sample, and either way
+    write the phrase's notes to touch the next (legato) with release_s ~0.2; gaps between
+    bowed notes and slow swells were heard as 'kinda fake'."""
     from . import sfz
 
     if sfz_path:
         zones = sfz.load(sfz_path, _frames)
-        return _build(track, zones, release_s, velocity_db, [], source=Path(sfz_path).name)
+        return _build(track, zones, release_s, velocity_db, [], source=Path(sfz_path).name,
+                      tighten_attack_ms=tighten_attack_ms)
     if not samples:
         raise ValueError("give the samples, or an .sfz file (sfz_path)")
     roots, report = [], []
@@ -738,11 +807,12 @@ def build_sampled_instrument(
             found = sfz.wav_loop(z["path"])
             if found and "start" in found:
                 z.update(sfz.loop_fields((found["start"], found["end"]), *_frames(z["path"])))
-    return _build(track, zones, release_s, velocity_db, report)
+    return _build(track, zones, release_s, velocity_db, report, tighten_attack_ms=tighten_attack_ms)
 
 
 def _build(track: str, zones: list[dict], release_s: float, velocity_db: float, report: list[dict],
-           source: str | None = None) -> dict:
+           source: str | None = None, tighten_attack_ms: float | None = None) -> dict:
+    attack = tighten(zones, tighten_attack_ms if tighten_attack_ms is not None else 1e9)
     overview = call("get_project_overview")
     if not any(t["name"] == track for t in overview.get("tracks", [])):
         call("create_track", name=track)
@@ -758,6 +828,13 @@ def _build(track: str, zones: list[dict], release_s: float, velocity_db: float, 
         for zone in result.get("zones") or []:
             call("set_fx_parameters", track=track, fx=zone["fx"],
                  changes=[{"parameter": "Volume", "display_value": gain_db}])
+    if attack["trimmed"] and result.get("trimmed") is None:
+        # An older bridge ignores the start offsets: set them from here.
+        for z, zone in zip(zones, result.get("zones") or []):
+            if "start_frac" in z:
+                call("set_fx_parameters", track=track, fx=zone["fx"],
+                     changes=[{"parameter": "Sample start offset", "value": z["start_frac"]},
+                              {"parameter": "Attack", "display_value": z["attack_ms"]}])
     stretched = [z for z in zones if max(round(z["root"]) - z["lo"], z["hi"] - round(z["root"])) > 6]
     lo, hi = min(z["lo"] for z in zones), max(z["hi"] for z in zones)
 
@@ -782,6 +859,15 @@ def _build(track: str, zones: list[dict], release_s: float, velocity_db: float, 
                         "(auto_mix balances it against the band from there)")
     if source:
         out["sfz"] = source
+    if attack["before_ms"] is not None:
+        if tighten_attack_ms is not None:
+            out["attack"] = (f"notes speak in about {attack['after_ms']} ms (the samples took {attack['before_ms']}); "
+                             f"{attack['trimmed']} of {len(zones)} zones trimmed"
+                             + (f", {attack['looped']} looped zones kept their start" if attack["looped"] else ""))
+        elif attack["before_ms"] > SLOW_ONSET_MS:
+            out["attack"] = (f"these samples take about {attack['before_ms']} ms to speak: right for held chords and "
+                             "pads, but a moving line of beat-long notes smears and sounds fake. For a line, delete "
+                             "the track and build again with tighten_attack_ms=50")
     if report:
         out["samples"] = report
     layers = sorted({(z["lovel"], z["hivel"]) for z in zones if "lovel" in z})

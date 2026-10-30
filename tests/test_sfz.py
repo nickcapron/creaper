@@ -217,3 +217,34 @@ def test_a_missing_release_sample_doesn_t_block_the_instrument(tmp_path):
     (tmp_path / "i.sfz").write_text(lines("<region> sample=a.wav key=60",
                                           "<region> sample=gone.wav key=60 trigger=release"))
     assert len(sfz.load(str(tmp_path / "i.sfz"))) == 1
+
+
+def swell(path, midi, ms, seconds=1.5, fs=22050):
+    """A bowed sustain: silent for 20 ms, then rising to full level over ms."""
+    t = np.arange(int(fs * seconds)) / fs
+    x = 0.5 * np.sin(2 * np.pi * 440 * 2 ** ((midi - 69) / 12) * t) * np.clip((t - 0.02) / (ms / 1000), 0, 1)
+    sf.write(str(path), x.astype(np.float32), fs, subtype="PCM_16")
+    return path
+
+
+def test_slow_onsets_are_trimmed_for_a_moving_line(monkeypatch, tmp_path):
+    # Public Inquiry: VSCO cello section sustains swelled in over 135-215 ms; as a solo line at 72 BPM
+    # they read 'kinda fake' until each sampler's start was moved past most of the swell.
+    files = [str(swell(tmp_path / f"Cello_{n}.wav", m, 200)) for n, m in (("C2", 36), ("C3", 48))]
+    sent = _fake_bridge(monkeypatch)
+    out = sample_tools.build_sampled_instrument(track="Cello", samples=files)
+    assert "tighten_attack_ms=50" in out["attack"] and not any("start_frac" in z for z in sent["zones"])
+    sent = _fake_bridge(monkeypatch)                     # this fake bridge doesn't report trims: set from here
+    out = sample_tools.build_sampled_instrument(track="Cello", samples=files, tighten_attack_ms=50)
+    z = sent["zones"][0]
+    assert z["attack_ms"] == sample_tools.TRIM_FADE_MS
+    start_s = z["start_frac"] * 1.5                      # the file is 1.5 s; it comes within 3 dB of full at ~160 ms
+    assert 0.10 < start_s < 0.13                         # so it starts 50 ms before that
+    assert "2 of 2 zones trimmed" in out["attack"]
+    offsets = [ch for _, ch in sent["volumes"] if ch[0]["parameter"] == "Sample start offset"]
+    assert len(offsets) == 2 and offsets[0][1] == {"parameter": "Attack", "display_value": sample_tools.TRIM_FADE_MS}
+    quick = [str(tone(tmp_path / "Pluck_C3.wav", 48))]   # already speaks at once: left alone, no advice
+    sent = _fake_bridge(monkeypatch)
+    out = sample_tools.build_sampled_instrument(track="Pluck", samples=quick, tighten_attack_ms=50)
+    assert "start_frac" not in sent["zones"][0] and "0 of 1 zones trimmed" in out["attack"]
+    assert "attack" not in sample_tools.build_sampled_instrument(track="Pluck", samples=quick)

@@ -25,7 +25,7 @@ STAGE_CHECKS = {
     "form": "named regions for every section, the length against the genre's form, the tempo in its range",
     "sounds": "every unmuted MIDI track has an instrument",
     "parts": "no section copies another on every track, no track loops all song, choruses busier than verses, "
-             "the lead over the chords",
+             "the lead over the chords, a part somewhere that keeps a pulse",
     "feel": "drums and bass aren't one velocity on the grid (check_groove); each lead in tune over its busiest "
             "section, with no portamento sliding into its notes (check_tuning, one short render per lead)",
     "transitions": "under 40% copied bars, no 16-bar loop, each section's level matches its energy (one render)",
@@ -537,7 +537,8 @@ def song_map(
     out = songmap.song_map(notes, sections, _bar_qn(overview))
     out["how_to_read"] = ("notes_per_bar: how busy; distinct_bars: share of its bars that differ (1 = every bar new); "
                           "same_as: plays that section's part note for note; copied_share: share of its bars heard "
-                          "earlier on that track. A returning chorus hook is meant to repeat; the parts around it "
+                          "earlier on that track; per_beat: strikes a beat on the section's busiest track (under 1.5 "
+                          "nothing keeps a pulse). A returning chorus hook is meant to repeat; the parts around it "
                           "shouldn't all.")
     return out
 

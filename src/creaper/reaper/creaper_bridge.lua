@@ -1,6 +1,6 @@
 -- @description creaper bridge: lets Claude work in REAPER through the creaper MCP server
 -- @author nickcapron
--- @version 0.56.1
+-- @version 0.57.0
 -- @link https://github.com/nickcapron/creaper
 -- @provides
 --   [nomain] creaper_json.lua
@@ -13,7 +13,7 @@
 --   Every change it makes is a named undo point ("creaper: ..."), so Ctrl+Z
 --   reverts anything Claude did.
 
-local BRIDGE_VERSION = "0.56.1"
+local BRIDGE_VERSION = "0.57.0"
 local PROTOCOL = 2
 
 ----------------------------------------------------------------------- JSON
@@ -2644,7 +2644,7 @@ function commands.build_sampled_instrument(p)
     reaper.TrackFX_SetParamNormalized(t, fx, param, solve_display_value(t, fx, param, value))
   end
   return with_undo("build sampled instrument on " .. track_name(t), function()
-    local loaded = {}
+    local loaded, trimmed = {}, 0
     for _, z in ipairs(zones) do
       local fx = reaper.TrackFX_AddByName(t, "ReaSamplOmatic5000 (Cockos)", false, -1)
       if fx < 0 then fail("couldn't load ReaSamplOmatic5000") end
@@ -2671,6 +2671,11 @@ function commands.build_sampled_instrument(p)
         set(fx, "Minimum velocity", z.lovel)
         set(fx, "Maximum velocity", z.hivel or 127)
       end
+      if z.start_frac then  -- a slow onset trimmed: start later, with a short fade-in over the cut
+        reaper.TrackFX_SetParamNormalized(t, fx, find_param(t, fx, "Sample start offset"), z.start_frac)
+        set(fx, "Attack", z.attack_ms or 10)
+        trimmed = trimmed + 1
+      end
       if z.loop then  -- loop from the loop start to the sample end offset while the key is held
         set(fx, "Loop (requires note-offs)", 1)
         set(fx, "Loop start offset", z.loop.start_ms)
@@ -2681,7 +2686,7 @@ function commands.build_sampled_instrument(p)
       local _, mode = reaper.TrackFX_GetNamedConfigParm(t, fx, "MODE")
       loaded[#loaded + 1] = { fx = fx + 1, lo = lo, hi = hi, root = z.root, mode = mode, sample = z.path:match("[^\\/]+$") }
     end
-    return { track = track_ref(t), zones = loaded, gain_db = p.gain_db }
+    return { track = track_ref(t), zones = loaded, gain_db = p.gain_db, trimmed = trimmed }
   end)
 end
 
