@@ -332,16 +332,17 @@ def instrument_level(zones: list[dict]) -> dict | None:
     return {"loudest_peak_db": round(max(peaks), 1), "trim_db": round(trim, 1)}
 
 
-SLOW_ONSET_MS = 120.0   # samples that take longer to speak smear a moving line (bowed sustains: 135-215 ms)
+SLOW_ONSET_MS = 100.0   # samples slower to speak smear a moving line (VSCO section sustains: 115-220 ms median)
 TRIM_FADE_MS = 10.0     # the sampler's attack over a trimmed start, so the cut doesn't click
 
 
 def onset(path: str) -> tuple[float, float] | None:
     """(start_s, attack_ms): where a sample's sound starts (-40 dB under its peak) and how
-    long it takes from there to come within 3 dB of the peak, as audition_instrument
-    measures a played note; None when it's silent or unreadable."""
+    long it takes from there to speak, within 6 dB of the loudest it gets in its first
+    second (what a beat-long note reaches; a bow that keeps swelling for seconds after a
+    quick start speaks at once). None when it's silent or unreadable."""
     try:
-        x, fs, _ = samplelib._load(path, seconds=2.0)
+        x, fs, _ = samplelib._load(path, seconds=2.5)
     except Exception:  # noqa: BLE001 - an unreadable file decides nothing
         return None
     hop = max(1, int(fs * 0.005))
@@ -351,16 +352,16 @@ def onset(path: str) -> tuple[float, float] | None:
     env = np.sqrt(np.mean(np.square(x[: frames * hop]).reshape(frames, hop), axis=1)) + 1e-12
     if env.max() <= 1e-5:
         return None
-    env_db = 20 * np.log10(env / env.max())
-    start = int(np.flatnonzero(env_db >= -40)[0])
-    reach = int(np.flatnonzero(env_db >= -3)[0])
-    return start * hop / fs, (reach - start) * hop / fs * 1000
+    start = int(np.flatnonzero(env >= env.max() * 0.01)[0])
+    first = env[start: start + int(1.0 * fs / hop)]
+    speaks = int(np.flatnonzero(first >= first.max() * 0.5)[0])
+    return start * hop / fs, speaks * hop / fs * 1000
 
 
 def tighten(zones: list[dict], attack_ms: float) -> dict:
     """Start each zone's samples later so its notes speak within attack_ms: the sampler's
-    start offset (a share of the file) moved to attack_ms before the sample comes within
-    3 dB of its peak, with a short fade-in over the cut. Round robins share one offset,
+    start offset (a share of the file) moved to attack_ms before the sample speaks
+    (onset), with a short fade-in over the cut. Round robins share one offset,
     the smallest. Looped zones keep their start (their loop is placed from the file
     start). Returns {'before_ms', 'after_ms', 'trimmed', 'looped'}."""
     before, after, trimmed, looped = [], [], 0, 0

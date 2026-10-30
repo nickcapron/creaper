@@ -825,6 +825,47 @@ def apply_feel(
 
 
 @tool()
+def add_vibrato(
+    item_id: ItemId,
+    depth_cents: Annotated[float, Field(ge=3, le=60, description=(
+        "How far the pitch swings each way: 10-20 for a string or wind soloist, 30+ is operatic"))] = 15.0,
+    rate_hz: Annotated[float, Field(ge=2, le=9, description="Cycles a second: 4-5 calm, 6-7 intense")] = 5.0,
+    min_beats: Annotated[float, Field(ge=0.25, le=16, description="Only notes at least this long (quarter notes)")] = 1.0,
+    delay_beats: Annotated[float, Field(ge=0, le=4, description="How long each note holds still before the vibrato starts")] = 0.25,
+    bend_range: Annotated[float, Field(ge=0.5, le=24, description=(
+        "Semitones the instrument's full pitch bend spans: 2 for build_sampled_instrument's samplers and most synths"))] = 2.0,
+    skip_notes: Annotated[list[str | int] | None, Field(description=(
+        "Pitches left still, e.g. a cello's open strings ['C2', 'G2', 'D3', 'A3'], which a player can't vibrate"))] = None,
+) -> dict:
+    """Gives the long notes of a single melodic line a player's vibrato, written as
+    pitch-bend events in the item: each note holds still briefly, then a sine vibrato
+    widens in and returns to centre before the next note. For samples recorded
+    without vibrato (Karoryfer's solo cello) or a synth lead that sounds static. One
+    line per item: pitch bend moves every note sounding on the channel, so not on
+    chords. It replaces the item's earlier pitch bend. Don't fake vibrato with a pitch
+    LFO plugin or a modulated delay: on a sampled cello REAPER's MIDI Pitch Wheel LFO
+    swung it six semitones and the LFO delay crackled."""
+    data = call("get_midi_notes", item_id=item_id, limit=20000)
+    notes = [n for n in data.get("notes", []) if not n.get("muted")]
+    if not notes:
+        raise ValueError("that item has no notes")
+    bpm = float(call("get_project_overview").get("tempo_bpm") or 120)
+    skip = {theory.note_to_midi(x) for x in skip_notes or []}
+    events, vibrated = feel.vibrato_bends(notes, bpm, depth_cents, rate_hz, min_beats, delay_beats, bend_range, skip)
+    channel = notes[0].get("channel") or 1
+    removed = call("delete_midi_cc", item_id=item_id, kind="pitchbend").get("removed", 0)
+    if events:
+        call("add_midi_cc", timeout=60.0, item_id=item_id, channel=channel, events=events)
+    out = {"item_id": item_id, "notes_with_vibrato": vibrated, "of_notes": len(notes), "bend_events": len(events),
+           "depth_cents": depth_cents, "rate_hz": rate_hz}
+    if removed:
+        out["replaced_bend_events"] = removed
+    if not vibrated:
+        out["note"] = f"no note is {min_beats:g} beats long or longer with room for a cycle: lower min_beats"
+    return out
+
+
+@tool()
 def add_genre_groove(
     item_id: ItemId,
     genre: Annotated[str, Field(description="A genre from list_genres, e.g. 'house', 'boom bap', 'bossa nova'")],

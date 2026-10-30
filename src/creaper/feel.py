@@ -16,6 +16,7 @@ part, triplets) are judged by the grid position they're nearest."""
 
 from __future__ import annotations
 
+import math
 import random
 import re
 from dataclasses import dataclass
@@ -397,3 +398,45 @@ def check_groove(notes: list[dict], bar: float, beat: float, bpm: float, jobs: d
     out["findings"] = findings or ["it plays like a performance: timing and accents move, bars vary"]
     out["verdict"] = "fail" if flat else "check" if findings else "pass"
     return out
+
+
+# ------------------------------------------------------------------ vibrato
+
+VIBRATO_STEPS = 16      # pitch-bend points per vibrato cycle: under 6 cents a step at 15 cents deep
+VIBRATO_FADE_S = 0.4    # the vibrato widens over this long, as a player's does
+
+
+def vibrato_bends(notes: list[dict], bpm: float, depth_cents: float = 15.0, rate_hz: float = 5.0,
+                  min_qn: float = 1.0, delay_qn: float = 0.25, bend_range: float = 2.0,
+                  skip: set[int] | None = None) -> tuple[list[dict], int]:
+    """Pitch-bend events (position QN, cc 'pitchbend', value -8192..8191) that give each
+    long note of a single line a vibrato: still for delay_qn, then a sine rate_hz wide
+    widening to depth_cents over VIBRATO_FADE_S, back to centre before the note ends or
+    the next note starts (a legato line's tail overlaps it). Notes shorter than min_qn
+    and pitches in skip (open strings) stay still. Returns (events, notes vibrated)."""
+    qn_per_s = bpm / 60
+    full = 8192 * depth_cents / (bend_range * 100)
+    ordered = sorted(notes, key=lambda n: n["start"])
+    events: list[dict] = []
+    done = 0
+    for i, n in enumerate(ordered):
+        if n["length"] < min_qn or (skip and n["pitch"] in skip):
+            continue
+        end = n["start"] + n["length"]
+        nxt = next((m["start"] for m in ordered[i + 1:] if m["start"] > n["start"] + 1e-6), None)
+        if nxt is not None:
+            end = min(end, nxt)
+        t0, t1 = n["start"] + delay_qn, end - 0.05 * qn_per_s
+        if t1 - t0 < 1 / rate_hz * qn_per_s:      # not one whole cycle: leave it still
+            continue
+        step = 1 / (rate_hz * VIBRATO_STEPS) * qn_per_s
+        k = 0
+        while t0 + k * step < t1:
+            s = k * step / qn_per_s
+            v = full * min(1.0, s / VIBRATO_FADE_S) * math.sin(2 * math.pi * rate_hz * s)
+            events.append({"position": round(t0 + k * step, 4), "cc": "pitchbend",
+                           "value": max(-8192, min(8191, round(v)))})
+            k += 1
+        events.append({"position": round(t1, 4), "cc": "pitchbend", "value": 0})
+        done += 1
+    return events, done

@@ -142,3 +142,51 @@ def test_metal_is_pushed_and_minimalism_is_tight():
     assert feel.feel_for_genre("Steady, unchanging pulse of 8ths; no rubato", "classical", 50, "minimalism") == "tight"
     assert feel.feel_for_genre("fast double-time blast beats", "metal and punk", 50, "grindcore") == "pushed"
     assert feel.feel_for_genre("galloping 16ths at 138", "electronic dance", 50, "uplifting trance") == "tight"
+
+
+def test_vibrato_swings_the_long_notes_and_leaves_the_rest_still():
+    # Public Inquiry: Karoryfer's solo cello is recorded without vibrato; a pitch LFO plugin garbled the
+    # sampler and a modulated delay crackled, while plain pitch-bend events played cleanly.
+    notes = [{"pitch": 48, "start": 0.0, "length": 0.5}, {"pitch": 55, "start": 0.5, "length": 4.0},
+             {"pitch": 36, "start": 4.5, "length": 4.0}, {"pitch": 53, "start": 8.5, "length": 2.2},
+             {"pitch": 51, "start": 10.5, "length": 2.0}]                 # 53 overlaps 51 (a legato tail)
+    events, n = feel.vibrato_bends(notes, bpm=72, depth_cents=15, rate_hz=5, skip={36})
+    assert n == 3                                       # not the short note, nor the open C string
+    on_c = [e for e in events if 4.5 <= e["position"] < 8.5]
+    assert not on_c
+    g = [e for e in events if 0.5 <= e["position"] < 4.5]
+    assert g[0]["position"] == pytest.approx(0.75)      # still for a quarter beat
+    assert g[-1]["value"] == 0 and g[-1]["position"] < 4.5
+    full = 8192 * 15 / 200
+    assert max(abs(e["value"]) for e in g) == pytest.approx(full, abs=2)       # +-15 cents on a 2-semitone bend
+    assert max(abs(e["value"]) for e in g if e["position"] < 0.75 + 0.2 * 72 / 60) < full * 0.55   # widening in
+    f = [e for e in events if 8.5 <= e["position"] < 10.5]
+    assert f[-1]["value"] == 0 and f[-1]["position"] < 10.5             # centred before the next note starts
+    steps = [abs(a["value"] - b["value"]) for a, b in zip(g, g[1:-1])]
+    assert max(steps) / full * 15 < 6                   # under 6 cents a step
+
+
+def test_add_vibrato_replaces_the_items_pitch_bend(monkeypatch):
+    from creaper import server  # noqa: F401  (import order: server first)
+    from creaper import music_tools
+
+    sent = []
+
+    def fake_call(cmd, **kw):
+        sent.append((cmd, kw))
+        if cmd == "get_midi_notes":
+            return {"notes": [{"pitch": 55, "start": 0.0, "length": 4.0, "channel": 2},
+                              {"pitch": 57, "start": 4.0, "length": 4.0, "channel": 2, "muted": True}]}
+        if cmd == "get_project_overview":
+            return {"tempo_bpm": 72}
+        if cmd == "delete_midi_cc":
+            return {"removed": 12}
+        return {}
+
+    monkeypatch.setattr(music_tools, "call", fake_call)
+    out = music_tools.add_vibrato(item_id="{X}", skip_notes=["C2"])
+    cmds = [c for c, _ in sent]
+    assert cmds.index("delete_midi_cc") < cmds.index("add_midi_cc")
+    add = dict(sent)["add_midi_cc"]
+    assert add["channel"] == 2 and add["events"][-1]["value"] == 0
+    assert out["notes_with_vibrato"] == 1 and out["of_notes"] == 1 and out["replaced_bend_events"] == 12

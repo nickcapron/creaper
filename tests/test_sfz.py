@@ -230,16 +230,21 @@ def swell(path, midi, ms, seconds=1.5, fs=22050):
 def test_slow_onsets_are_trimmed_for_a_moving_line(monkeypatch, tmp_path):
     # Public Inquiry: VSCO cello section sustains swelled in over 135-215 ms; as a solo line at 72 BPM
     # they read 'kinda fake' until each sampler's start was moved past most of the swell.
-    files = [str(swell(tmp_path / f"Cello_{n}.wav", m, 200)) for n, m in (("C2", 36), ("C3", 48))]
+    files = [str(swell(tmp_path / f"Cello_{n}.wav", m, 300)) for n, m in (("C2", 36), ("C3", 48))]
     sent = _fake_bridge(monkeypatch)
     out = sample_tools.build_sampled_instrument(track="Cello", samples=files)
     assert "tighten_attack_ms=50" in out["attack"] and not any("start_frac" in z for z in sent["zones"])
+    # A bow that speaks at once and then keeps swelling for seconds (Karoryfer's solo cello) isn't slow.
+    t = np.arange(int(22050 * 4.0)) / 22050
+    bow = np.sin(2 * np.pi * 130.8 * t) * np.clip(t / 0.02, 0, 1) * (0.25 + 0.25 * np.clip(t / 3.0, 0, 1))
+    sf.write(str(tmp_path / "Bow_C3.wav"), bow.astype(np.float32), 22050, subtype="PCM_16")
+    assert sample_tools.onset(str(tmp_path / "Bow_C3.wav"))[1] < 30
     sent = _fake_bridge(monkeypatch)                     # this fake bridge doesn't report trims: set from here
     out = sample_tools.build_sampled_instrument(track="Cello", samples=files, tighten_attack_ms=50)
     z = sent["zones"][0]
     assert z["attack_ms"] == sample_tools.TRIM_FADE_MS
-    start_s = z["start_frac"] * 1.5                      # the file is 1.5 s; it comes within 3 dB of full at ~160 ms
-    assert 0.10 < start_s < 0.13                         # so it starts 50 ms before that
+    start_s = z["start_frac"] * 1.5                      # the file is 1.5 s; it speaks (half its level) at ~170 ms
+    assert 0.11 < start_s < 0.13                         # so it starts 50 ms before that
     assert "2 of 2 zones trimmed" in out["attack"]
     offsets = [ch for _, ch in sent["volumes"] if ch[0]["parameter"] == "Sample start offset"]
     assert len(offsets) == 2 and offsets[0][1] == {"parameter": "Attack", "display_value": sample_tools.TRIM_FADE_MS}
