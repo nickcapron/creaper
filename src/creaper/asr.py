@@ -70,14 +70,20 @@ def transcribe(audio: np.ndarray) -> tuple[str, list[str]]:
     return " ".join(s.text.strip() for s in segments).strip(), unsure
 
 
+# A recogniser writes small numbers as digits ('Fox 5'): heard as the word.
+DIGIT_WORDS = {"0": "zero", "1": "one", "2": "two", "3": "three", "4": "four", "5": "five", "6": "six",
+               "7": "seven", "8": "eight", "9": "nine", "10": "ten", "11": "eleven", "12": "twelve"}
+
+
 def normalize(text: str) -> list[str]:
     """Lowercase words without punctuation; hyphenated syllables joined ('to-night'
-    is 'tonight'), lone holds ('_', '-') dropped, apostrophes dropped ("don't" is 'dont')."""
+    is 'tonight'), lone holds ('_', '-') dropped, apostrophes dropped ("don't" is 'dont'),
+    small numbers as words ('5' is 'five')."""
     words = []
     for token in re.sub(r"\[[^\]]*\]", "", text).lower().split():      # a [pronunciation] isn't a word
         w = re.sub(r"[^a-z0-9]", "", token.replace("-", ""))
         if w:
-            words.append(w)
+            words.append(DIGIT_WORDS.get(w, w))
     return words
 
 

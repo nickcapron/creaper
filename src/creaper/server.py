@@ -196,14 +196,14 @@ Samples and vocals:
 - Vocals, best source first, saying which you used: real vocals in the user's samples
   (find_samples role "vocal", then chop_vocal or place_loop); VocalVST's sung words
   when installed (write_vocal_melody from the lyrics, then render_vocalvst with its lyrics
-  and voice= Nectar (Hanami), or TIGER for a man; it reports
-  what a listener makes of each line: rewrite the unclear lines and re-render until
-  its next says enough, don't ask the user whether the words came through;
+  and voice= Nectar (Hanami), or TIGER for a man; re-render, rewriting the lines it
+  reports unclear, until its next says enough; don't ask the user about the words;
   add_vocal_harmony stacks the choruses; distortion after it for shrieks. A rap:
   write_vocal_melody shape "rap", render_vocalvst mode "rap", a plain voice; it's a
   singer flattened, not speech, say so) or a singing synth app (export_vocal_midi);
-  add_robot_vocal(style="sung") for a guide vocal; add_robot_vocal for robot hooks
-  (house, electro): a short hook, one syllable a beat at most. Wordless choirs and
+  add_robot_vocal: style "sung" for a guide vocal, else short robot hooks (house,
+  electro), a syllable a beat at most. Spoken lines (voice-overs, callouts): offer to
+  record the user; add_spoken_lines meanwhile. Wordless choirs and
   vocal pads: build_sampled_instrument, from the user's samples or an .sfz file.
 
 Sound effects: one project per family, each sound and variation in its own region named

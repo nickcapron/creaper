@@ -246,3 +246,8 @@ def test_check_vocal_clarity_hears_a_sung_take_alone_and_in_the_mix(monkeypatch)
 
     out = _sung_track(monkeypatch, ["Cold rain on the glass", "All night long"], ["Cold rain on the glass", "All night long"])
     assert out["verdict"] == "the words come through alone (100%) and in the mix (100%)"
+
+
+def test_digits_count_as_their_words():
+    assert asr.normalize("Eagle 1, Fox 5!") == asr.normalize("eagle one fox five")
+    assert asr.match_words("eagle one fox five", "Eagle 1, Fox 5.")[0] == 1.0

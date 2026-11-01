@@ -1,6 +1,8 @@
 """A speech voice made to sing: PSOLA pitch moves that keep the formants, the word
 stretch, vibrato, phrase splitting, the double, HNR, and add_robot_vocal(style='sung')."""
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 import soundfile as sf
@@ -238,3 +240,56 @@ def test_a_sung_line_too_dense_says_sung():
     line = [{"pitch": 60, "start": i * 0.25, "length": 0.25} for i in range(16)]
     with pytest.raises(ValueError, match="a sung voice"):
         vocal_tools.assign_lyrics(" ".join(["la"] * 16), line, vocal_tools.SUNG_MAX_PER_BEAT)
+
+
+def test_add_spoken_lines_places_unshifted_speech_at_bars(monkeypatch, tmp_path):
+    calls = []
+    spoken = {}
+
+    def fake_call(cmd, **kw):
+        calls.append((cmd, kw))
+        if cmd == "project_paths":
+            return {"default_folder": str(tmp_path)}
+        if cmd == "bar_to_qn":
+            return {"qn": (kw["bar"] - 1) * 4 + (kw["beat"] - 1)}
+        if cmd == "qn_to_times":
+            return [q * 0.5 for q in kw["qns"]]                          # 120 BPM
+        if cmd == "time_to_positions":
+            return [{"qn": t * 2} for t in kw["times"]]
+        if cmd == "get_project_overview":
+            return {"tracks": [{"name": "Drums"}]}
+        if cmd == "create_track":
+            return {"track": {"name": kw["name"]}}
+        if cmd == "place_audio_clips":
+            spoken["clips"] = kw["clips"]
+            return {"track": {"name": kw["track"]}, "placed": len(kw["clips"])}
+        raise AssertionError(cmd)
+
+    def fake_phrase(text, path, voice=None):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        speech._write(path, vowel(120, 1.0 if "lock" in text else 3.0), FS)   # 1 s and 3 s of speech
+        return path
+
+    monkeypatch.setattr(vocal_tools, "call", fake_call)
+    monkeypatch.setattr(speech, "speak_phrase", fake_phrase)
+    monkeypatch.setattr(speech, "choose_voice", lambda v: "Piper Joe")
+    monkeypatch.setattr(vocal_tools.asr, "available", lambda: False)
+    import creaper.ear_tools as ear
+    monkeypatch.setattr(ear, "measure_vocal_clarity", lambda *a, **k: {"alone": {"score": 1.0}})
+    out = vocal_tools.add_spoken_lines(lines=[{"text": "Fox five, long callout", "bar": 2},
+                                              {"text": "Missile lock", "bar": 1}], name="Pilot")
+    clips = spoken["clips"]
+    assert [c["word"] for c in clips] == ["Missile lock", "Fox five, long callout"]   # in time order
+    assert clips[0]["start_qn"] == 0 and clips[1]["start_qn"] == 4
+    assert clips[0]["end_qn"] == pytest.approx(2 * (1.0 + vocal_tools.SPOKEN_TAIL_S), abs=0.01)
+    assert all("semitones" not in c for c in clips)                                    # never pitch-shifted
+    assert out["style"] == "spoken" and out["lines_placed"] == 2 and "overlaps" not in out
+    assert "record" in out["human_voice"]
+    # A faster pace shortens the line without moving its start; a long line into the next is reported.
+    out = vocal_tools.add_spoken_lines(lines=[{"text": "Missile lock", "bar": 1}, {"text": "Fox five", "bar": 1, "beat": 2}],
+                                       name="Pilot", pace=1.25)
+    x, fs = speech._read(Path(spoken["clips"][0]["path"]))
+    assert len(x) / fs == pytest.approx(0.8, abs=0.02)
+    assert out["overlaps"] == ["'Missile lock' runs into 'Fox five'"]
+    with pytest.raises(ValueError):
+        vocal_tools.add_spoken_lines(lines=[{"text": "no bar"}])

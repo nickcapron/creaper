@@ -155,7 +155,8 @@ def add_robot_vocal(
         "more robotic and harder to understand. sung: the voice itself sings the melody (the whole line spoken "
         "in one go, each word moved to its notes keeping the voice's character, vibrato on held notes, a "
         "double); a guide vocal or a synthetic singer, not a robot. Up to two syllables a beat. Words are "
-        "clearest within about 7 semitones of the voice's speaking pitch (the result's shift_semitones)"))] = "talkbox",
+        "clearest within about 7 semitones of the voice's speaking pitch (the result's shift_semitones). "
+        "No style is plain speech: for spoken lines (voice-overs, callouts) use add_spoken_lines"))] = "talkbox",
     carrier: Annotated[str | None, Field(description="vocoder: synth that sings (default ReaSynth saw)")] = None,
     bands: Annotated[int, Field(ge=4, le=128, description="vocoder: bands; more = clearer words")] = 32,
     double: Annotated[bool, Field(description=(
@@ -308,6 +309,102 @@ def add_robot_vocal(
         result["note"] = (f"{len(rushed)} of {len(words)} words had to be sped up more than {RUSHED:g}x to fit "
                           "their notes, which blurs them: " + ", ".join(rushed[:12]) + (" ..." if len(rushed) > 12
                           else "") + ". Give them longer notes, or fewer words.")
+    return result
+
+
+SPOKEN_TAIL_S = 0.05      # a spoken line's clip runs this far past its last sound
+
+
+@tool()
+def add_spoken_lines(
+    lines: Annotated[list[dict], Field(description=(
+        "The lines to speak, each {'text': 'Missile lock, missile lock', 'bar': 31, 'beat': 1 (optional)}: "
+        "where each line starts. Punctuation shapes the delivery (commas pause, '!' and '?' inflect)"))],
+    voice: Annotated[str | None, Field(description="A voice from list_speech_voices (part of its name), or 'female'/'male'")] = None,
+    name: Annotated[str, Field(description="Name for the voice track")] = "Spoken",
+    pace: Annotated[float, Field(ge=0.7, le=1.4, description=(
+        "1 = the voice's own speed; 1.15 is clipped and urgent (callouts), 0.85 slow and weighty. Pitch is kept"))]
+    = 1.0,
+    replace: Annotated[bool, Field(description=(
+        "Swap the clips on the existing track of that name, keeping its effects, sends and ducking"))] = False,
+) -> dict:
+    """Puts plain speech in the song: each line spoken by the text-to-speech voice at
+    its own pitch and rhythm, one clip per line starting at its bar. For voice-overs,
+    radio callouts, announcer lines and spoken intros, never through add_robot_vocal:
+    every add_robot_vocal style (sung too) bends the words onto notes, which is what
+    makes speech sound like a garbled computer. It's still a synthetic voice; when the
+    user wants it to sound human (a pilot, a soldier, a narrator), offer first to
+    record them saying the lines (list_inputs, set_record_settings, record) and keep
+    these clips as the guide for timing. A line that runs into the next one is
+    reported; give it a later bar or a faster pace."""
+    if not lines:
+        raise ValueError("no lines to speak")
+    for ln in lines:
+        if not str(ln.get("text", "")).strip() or ln.get("bar") is None:
+            raise ValueError("each line needs 'text' and 'bar'")
+    chosen = speech.choose_voice(voice)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    slug = re.sub(r"[^\w-]+", "-", name).strip("-") or "spoken"
+    folder = Path(call("project_paths")["default_folder"]) / "creaper vocals" / f"{slug}-{stamp}"
+    order = sorted(range(len(lines)), key=lambda i: (float(lines[i]["bar"]), float(lines[i].get("beat") or 1)))
+    clips, spans = [], []
+    for k, i in enumerate(order):
+        ln = lines[i]
+        path = speech.speak_phrase(str(ln["text"]).strip(), folder / f"{k + 1:02d} {speech._safe(ln['text'])}.wav",
+                                   chosen)
+        x, fs = speech._read(path)
+        if abs(pace - 1.0) > 1e-3:
+            x = speech.time_stretch(x, int(round(len(x) / pace)), fs)
+            speech._write(path, x, fs)
+        start_qn = call("bar_to_qn", bar=float(ln["bar"]), beat=float(ln.get("beat") or 1))["qn"]
+        start_s = float(call("qn_to_times", qns=[start_qn])[0])
+        end_s = start_s + len(x) / fs + SPOKEN_TAIL_S
+        end_qn = call("time_to_positions", times=[end_s])[0]["qn"]
+        clips.append({"path": str(path), "start_qn": start_qn, "end_qn": end_qn, "word": str(ln["text"]).strip()})
+        spans.append((start_s, end_s, ln))
+    tracks = call("get_project_overview").get("tracks", [])
+    names = {t["name"] for t in tracks}
+    track_name, k = name, 2
+    if replace and name in names:
+        target = next(t for t in tracks if t["name"] == name)
+        for item in call("get_track_details", track=target.get("guid") or name).get("items", []):
+            call("delete_item", item_id=item["id"])
+    else:
+        while track_name in names:
+            track_name, k = f"{name} {k}", k + 1
+        call("create_track", name=track_name)
+    placed = call("place_audio_clips", timeout=120.0, track=track_name, clips=clips, name=f"spoken {track_name}")
+    result: dict = {"vocal": placed["track"], "style": "spoken", "lines_placed": placed["placed"],
+                    "lines": [{"text": c["word"], "bar": ln["bar"], "seconds": round(e - s - SPOKEN_TAIL_S, 2)}
+                              for c, (s, e, ln) in zip(clips, spans)],
+                    "next": ("Play it. It's audio now: a radio or PA sound is EQ (band-pass about 400 Hz-3.5 kHz), "
+                             "drive and hard compression; duck the music under it with setup_sidechain.")}
+    if replace and name in names:
+        result["replaced"] = f"the clips on '{name}' (its effects and sends kept)"
+    overlaps = [f"'{a[2]['text']}' runs into '{b[2]['text']}'" for a, b in zip(spans, spans[1:]) if a[1] > b[0] + 0.01]
+    if overlaps:
+        result["overlaps"] = overlaps
+    result["speech_voice"] = chosen or "system default"
+    license_ = speech.voice_license(chosen)
+    if license_:
+        result["voice_license"] = license_ + ("" if license_.startswith(speech.COMMERCIAL_OK)
+                                              else ": don't use it in music that will be released")
+    result["word_files"] = str(folder)
+    result["human_voice"] = ("This is a computer voice. If the user wants it to sound like a real person, offer to "
+                             "record them saying the lines (record) at these bars.")
+    try:
+        from .ear_tools import measure_vocal_clarity
+        others = len(tracks) > 4
+        result["clarity"] = measure_vocal_clarity(result["vocal"]["name"], in_mix=others)
+    except Exception as e:  # noqa: BLE001  (a failed measurement mustn't undo the voice)
+        result["clarity"] = {"error": f"couldn't measure clarity: {e}"}
+    if asr.available():
+        try:
+            entries = [(c["word"], {"at_bar": ln["bar"]}, asr.line_audio([Path(c["path"])], [0.0]))
+                       for c, (_, _, ln) in zip(clips, spans)]
+            result.update(asr.report(entries, "speak it again with replace=True (other words, or another voice)"))
+        except Exception as e:  # noqa: BLE001
+            result["heard"] = {"error": f"couldn't check the words: {e}"}
     return result
 
 
