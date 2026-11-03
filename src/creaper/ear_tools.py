@@ -579,7 +579,10 @@ def measure_tracks(
     section (name the sections as regions first) and flags parts that are overpowering
     or buried against their role there (e.g. "Chorus: Snare is 6 LU over its place"),
     and on a kit that plays every drum from one track, each drum's hit level against the
-    kick (a shaker or hat drowning the groove)."""
+    kick (a shaker or hat drowning the groove). harsh_parts names pads, arps and keys
+    that bite (more 2-5 kHz than a whole mix carries): what's heard as 'in your face'."""
+    from . import mix_tools
+
     overview = call("get_project_overview")
     chosen = tracks or _parts(overview)
     if not chosen:
@@ -618,11 +621,9 @@ def measure_tracks(
                                "mid": share("low mids (250-500 Hz)", "mids (500 Hz-2 kHz)"),
                                "high": share("upper mids (2-4 kHz)", "presence (4-6 kHz)", "air (6-20 kHz)")},
             }
+            roles[name] = mix_tools.role_of(name, m["spectrum"])
             if per_section:
-                from . import mix_tools
-
                 audio, fs = sf.read(str(f), always_2d=True)
-                roles[name] = mix_tools.role_of(name, m["spectrum"])
                 spans = _item_spans(stem["track"])
                 for sec in sections:
                     if spans and not _plays_in(spans, sec["start"], sec["end"]):
@@ -641,12 +642,13 @@ def measure_tracks(
            "how_to_read": "lufs_playing: how loud each part is while it plays (compare parts by it); energy_pct: "
                           "where its sound sits; brightness_hz: higher is brighter; harsh_pct_p95: share of its "
                           "energy at 2-5 kHz in its harshest seconds (the track to tame when the mix is piercing)"}
+    biting = mix_tools.harsh_beds({t: v.get("harsh_pct_p95") for t, v in table.items() if isinstance(v, dict)}, roles)
+    if biting:
+        out["harsh_parts"] = biting
     if no_sections:
         out["note"] = ("no regions in this range, so there's no per-section table: name the sections as regions "
                        "(intro, verse, chorus...) to get it")
     if per_section and sections:
-        from . import mix_tools
-
         out["sections"] = {sec: {t: v for t, v in levels.items()} for sec, levels in by_section.items()}
         out["roles"] = roles
         out["balance"] = mix_tools.section_balance(by_section, roles) or ["every part sits where its role puts it"]

@@ -525,7 +525,8 @@ def song_map(
     exactly like an earlier one on that track (same_as) and how much of it repeats bars
     heard before (copied_share). Findings name what listeners hear as "it loops": a
     section that copies another on every track, a track that loops all song, choruses
-    no busier than the verses, a lead under the chords. Name sections as regions first.
+    no busier than the verses, a lead under the chords, a thin stretch of 16 bars or more
+    where no part comes in or drops out (unchanged_bars). Name sections as regions first.
     Read-only."""
     overview = call("get_project_overview")
     sections = _sections(overview)

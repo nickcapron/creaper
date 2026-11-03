@@ -755,3 +755,24 @@ def test_a_rhythm_parts_own_echo_is_switched_off(monkeypatch):
                                             {"name": "Keys", "ref": "K", "role": "keys"}])     # already off
     assert out == [{"track": "Guitar", "plugin": "VST3i: Jun-6 V (Arturia)", "switched_off": "Delay ON/OFF"}]
     assert set_calls == [("G", [{"parameter": "Delay ON/OFF", "display_text": "Off"}])]
+
+
+def test_an_arp_is_texture_under_the_lead_and_a_biting_bed_is_cut():
+    # Daybreak (nu-disco): a guitar arp mixed as 'guitar' (its name alone read 'lead') was
+    # "too in your face" at 21% 2-5 kHz; Solina strings in a dark intro were "too hard".
+    assert role_of("Arp") == "arp" and role_of("Synth Arpeggio") == "arp" and role_of("Seq") == "arp"
+    assert role_of("Arp Bass") == "bass" and role_of("Arp Pad") == "pad" and role_of("Lead Arp") == "lead"
+    assert role_of("Pluck") == "lead"
+    bite = {"bands": {"upper mids (2-4 kHz)": {"share_pct": 15}, "presence (4-6 kHz)": {"share_pct": 8}}}
+    mild = {"bands": {"upper mids (2-4 kHz)": {"share_pct": 6}, "presence (4-6 kHz)": {"share_pct": 3}}}
+    chans = [channel("Drums", "drums", -10), channel("Arp", "arp", -10, spectrum=bite),
+             channel("Pad", "pad", -10, spectrum=mild), channel("Lead", "lead", -10, spectrum=bite)]
+    plan = {a["name"]: a for a in plan_mix(chans, {"family": "electronic dance"})["channels"]}
+    assert plan["Arp"]["gain_db"] == -11.0 and plan["Arp"]["reverb_send_db"] == -12
+    assert plan["Arp"]["presence_db"] == mix_tools.BED_PRESENCE_CUT_DB     # 23% at 2-6 kHz, behind the lead
+    assert "presence_db" not in plan["Pad"] and "presence_db" not in plan["Lead"]   # the lead is meant to cut
+    biting = mix_tools.harsh_beds({"Arp": 20.6, "Pad": 1.8, "Lead": 25.4, "Counter": 18.1, "Riser": 42.5},
+                                  {"Arp": "arp", "Pad": "pad", "Lead": "lead", "Counter": "other", "Riser": "fx"})
+    assert [b.split(" ")[0] for b in biting] == ["Arp", "Counter"]
+    assert mix_tools.section_balance({"Chorus": {"Drums": -20, "Arp": -26}}, {"Drums": "drums", "Arp": "arp"}) == [
+        "Chorus: Arp is 5.0 LU over its place (a arp part sits about 11 LU under the drums)"]

@@ -24,16 +24,19 @@ from .server import DESTRUCTIVE, Bar, analyze_audio, call, setup_sidechain, tool
 # Loudness of each role while it plays (max short-term LUFS), relative to the drums. The
 # voice is the record: it sits over the drums (at 1 LU under them a synth-funk vocal was
 # "muddied into the mix"; the wall genres below pull it back inside the guitars).
+# An arpeggio or sequence is texture under the lead: a nu-disco guitar arp mixed as 'guitar'
+# (-6; its name alone read as 'lead', -5) was "too in your face" until it went 5.5 LU down.
 ROLE_LEVELS = {"kick": 0, "drums": 0, "snare": -3, "perc": -9, "bass": -2, "vocal": 1, "lead": -5,
-               "guitar": -6, "keys": -7, "pad": -10, "fx": -12, "other": -7}
+               "guitar": -6, "keys": -7, "pad": -10, "arp": -11, "fx": -12, "other": -7}
 # High passes that clear room without taking the body: at keys 140 / pad 180 / lead 150
 # the mixes measured 4-6 dB under Suno's at 125-400 Hz in 9 of 10 songs ("thin", "scientific").
-HIGHPASS_HZ = {"snare": 100, "perc": 200, "vocal": 110, "lead": 110, "guitar": 100, "keys": 100, "pad": 130, "fx": 150,
-               "other": 90}
+HIGHPASS_HZ = {"snare": 100, "perc": 200, "vocal": 110, "lead": 110, "guitar": 100, "keys": 100, "pad": 130, "arp": 150,
+               "fx": 150, "other": 90}
 # A vocal's sends sit 6 dB under the other parts' habit: with its echoes 11 dB under the
 # dry voice, a pop chorus over drums was heard 25% (83% alone); 6 dB drier, 67%.
-REVERB_DB = {"vocal": -18, "lead": -15, "guitar": -15, "keys": -15, "pad": -9, "snare": -21, "perc": -24, "other": -18}
-PAN_WIDTH = {"perc": 0.5, "guitar": 0.4, "keys": 0.4, "pad": 0.2, "fx": 0.4, "other": 0.3, "lead": 0.0}
+REVERB_DB = {"vocal": -18, "lead": -15, "guitar": -15, "keys": -15, "pad": -9, "arp": -12, "snare": -21, "perc": -24,
+             "other": -18}
+PAN_WIDTH = {"perc": 0.5, "guitar": 0.4, "keys": 0.4, "pad": 0.2, "arp": 0.4, "fx": 0.4, "other": 0.3, "lead": 0.0}
 COMPRESS = {"vocal": (3.0, 5, 80), "bass": (4.0, 20, 120), "lead": (2.5, 10, 100)}  # ratio, attack ms, release ms
 HEADROOM_PEAK_DB = -6.0
 # The tone pass (shares of each part's own energy, %).
@@ -41,6 +44,12 @@ PRESENCE_LOW_PCT, PRESENCE_HIGH_PCT = 8.0, 30.0   # 2-6 kHz for vocals and leads
 VOCAL_PRESENCE_LOW_PCT = 12.0   # a sung vocal's floor: Suno's carry 3-9 dB more 2-5 kHz than creaper's did
 PRESENCE_CUT_DB, PRESENCE_HZ = -2.0, 3000
 AIR_LOW_PCT, AIR_HZ = 3.0, 10000
+# A part behind the lead with this much of its energy at 2-6 kHz gets cut there: the parts
+# that bite are the ones heard first. A guitar arp (21% at 2-5 kHz in its harshest seconds)
+# was "too in your face" and Solina strings in a dark intro (18%) "too hard", both with no EQ
+# but a high pass; the user's fixes were 3-4.5 dB at 3 kHz.
+BED_ROLES = ("pad", "arp", "keys", "other")
+BED_PRESENCE_HIGH_PCT, BED_PRESENCE_VERY_HIGH_PCT, BED_PRESENCE_CUT_DB = 12.0, 20.0, -3.5
 TONE_LIFT_MIN_DB, TONE_LIFT_MAX_DB = 1.5, 6.0
 VOCAL_HIGHPASS_MIN_HZ = 80   # a singer's rumble and breath noise aren't "lowest strong content"
 # A whole kit's tone (role drums, never a lone kick, which is meant to be sub): the 90s pop
@@ -95,11 +104,12 @@ ROLE_WORDS = [
     ("pad", r"\bpad|string|violin|viola|cello|fiddle|ensemble|orchestra|choir|atmos|ambien|drone|texture|swell"),
     ("keys", r"key|piano|rhodes|clav|organ|\bep\b|wurli|stab|brass|horn|trumpet|trombone|tuba|bassoon|woodwind|"
              r"chord|harp|marimba|vibraphone|celesta|mallet"),
-    ("lead", r"arp|pluck|synth|flute|clarinet|oboe|\bsax|whistle|ocarina"),
+    ("arp", r"\barp|arpegg|\bseq\b|sequence"),
+    ("lead", r"pluck|synth|flute|clarinet|oboe|\bsax|whistle|ocarina"),
     ("fx", r"\bfx\b|sfx|riser|sweep|impact|noise|downlifter|uplifter|whoosh|transition|crowd|walla|foley|traffic|"
            r"\bcars?\b|\brain\b|\bwind\b|\bcity\b|\bhum\b|\bbirds?\b|footsteps?|\bfield\b|room ?tone"),
 ]
-Role = Literal["kick", "snare", "perc", "bass", "vocal", "drums", "lead", "guitar", "keys", "pad", "fx", "other"]
+Role = Literal["kick", "snare", "perc", "bass", "vocal", "drums", "lead", "guitar", "keys", "pad", "arp", "fx", "other"]
 DANCE_FAMILIES = {"electronic dance"}
 MELODY_OVER_BED_FAMILIES = {"film and games", "ambient and experimental", "classical"}
 WALL_FAMILIES = {"rock", "metal and punk"}   # guitars at the vocal's level, not under it
@@ -172,6 +182,23 @@ SPILL_LU = 20.0
 # Drums this far under the section's loudest other part are a fill or a tail, not the
 # beat: a breakdown's -42 LUFS fill made every part there "15-20 LU over its place".
 DRUMS_PRESENT_LU = 12.0
+
+
+BED_HARSH_P95_PCT = 12.0   # a whole neutral mix's limit (styles.HARSH_P95_PCT): a part behind the lead past it bites
+
+
+def harsh_beds(harsh: dict[str, float | None], roles: dict[str, str]) -> list[str]:
+    """Parts meant to sit behind the lead (pads, arps, keys) that carry more 2-5 kHz in
+    their harshest seconds than a whole mix should: those are what a listener hears as
+    'in your face' or 'too hard', whatever their level. harsh: {track: harsh_pct_p95}."""
+    out = []
+    for t, pct in harsh.items():
+        if pct is not None and roles.get(t) in BED_ROLES and pct > BED_HARSH_P95_PCT:
+            out.append(f"{t} ({roles[t]}) has {pct:g}% of its energy at 2-5 kHz in its harshest seconds, more than a "
+                       f"whole mix carries ({BED_HARSH_P95_PCT:g}%): a part behind the lead that bites reads as 'in your "
+                       "face' or 'too hard'. Cut 3-4 dB around 3 kHz and ease the top over 7 kHz (or pick a darker "
+                       "patch) before raising anything else")
+    return out
 
 
 def section_balance(levels: dict[str, dict[str, float | None]], roles: dict[str, str]) -> list[str]:
@@ -395,7 +422,7 @@ def plan_mix(channels: list[dict], style: dict | None = None) -> dict:
                 a["highpass_hz"] = hp
             bands = (c.get("spectrum") or {}).get("bands", {})
             mud = (bands.get("low mids (250-500 Hz)") or {}).get("share_pct", 0)
-            if c["role"] in ("keys", "pad", "lead", "vocal", "other") and mud > MUD_CUT_PCT:
+            if c["role"] in ("keys", "pad", "arp", "lead", "vocal", "other") and mud > MUD_CUT_PCT:
                 a["mud_cut_db"] = -3.0 if mud > MUD_CUT_PCT + 10 else -2.0
         if not c.get("has_eq"):
             bands = (c.get("spectrum") or {}).get("bands", {})
@@ -409,6 +436,10 @@ def plan_mix(channels: list[dict], style: dict | None = None) -> dict:
                 air = (bands.get("air (6-20 kHz)") or {}).get("share_pct")
                 if air is not None and air < AIR_LOW_PCT:
                     a["air_db"] = tone_lift_db(air, AIR_LOW_PCT)
+            elif c["role"] in BED_ROLES and bands:
+                presence = sum((bands.get(k) or {}).get("share_pct", 0) for k in ("upper mids (2-4 kHz)", "presence (4-6 kHz)"))
+                if presence > BED_PRESENCE_HIGH_PCT:
+                    a["presence_db"] = BED_PRESENCE_CUT_DB if presence > BED_PRESENCE_VERY_HIGH_PCT else PRESENCE_CUT_DB
             elif c["role"] == "drums" and bands:
                 # A kit: trim a sub that is most of it, and bring dull hats and snare up.
                 if (bands.get("sub (20-60 Hz)") or {}).get("share_pct", 0) > DRUM_SUB_HIGH_PCT:
@@ -512,7 +543,7 @@ def is_kit(fx: list[str]) -> bool:
     return sum(1 for f in fx if ":" not in f and " - " in f) >= 2
 
 
-COVERING_ROLES = ("keys", "lead", "pad", "other")
+COVERING_ROLES = ("keys", "lead", "pad", "arp", "other")
 COVERED = 0.03   # clarity lost to the mix beyond which the words count as covered
 # A sung vocal, heard by the speech recogniser: key words lost between its solo render
 # and the mix beyond which the mix covers it. A pop chorus's vocal heard 83% alone and
@@ -740,7 +771,7 @@ GENTLE_FAMILIES = {"classical", "film and games", "jazz", "blues", "ambient and 
 DRUM_PLR_DB, DRUM_COMP_DB, DRUM_SHAVE_DB = 12.0, 2.5, 2.5
 TONAL_PLR_DB, TONAL_COMP_DB = 10.0, 1.5
 # A strummed guitar too: one left out (15 dB peak-to-loudness) stopped a pop master at -13 LUFS.
-TONAL_ROLES = ("keys", "pad", "lead", "guitar", "other")
+TONAL_ROLES = ("keys", "pad", "arp", "lead", "guitar", "other")
 SOFT_CLIPPER = "JS: Soft Clipper/Limiter"   # Boost (dB) into a soft knee that rounds peaks over 0 dBFS
 
 
@@ -1406,8 +1437,9 @@ def auto_mix(
     roles: Annotated[dict[str, Role] | None, Field(description=(
         "Each part's job, by track name, where its name doesn't say it: {\"Violin I\": \"lead\", \"City Hum\": "
         "\"fx\", \"Chords\": \"guitar\"}. The featured melody is 'lead' (it sits over the other parts); a strummed "
-        "or picked acoustic is 'guitar' (in country, folk and blues it sits just under the voice); levels follow "
-        "the roles"))] = None,
+        "or picked acoustic is 'guitar' (in country, folk and blues it sits just under the voice); an arpeggio "
+        "or sequence under the lead is 'arp' (a texture 11 LU under the drums), even a guitar-like one; levels "
+        "follow the roles"))] = None,
     dry_run: Annotated[bool, Field(description=(
         "Only report what it would do (it costs the same render as a real run: don't dry-run first)"))] = False,
 ) -> dict:

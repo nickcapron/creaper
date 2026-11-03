@@ -204,19 +204,22 @@ def song_map(tracks: dict[str, list[dict]], sections: list[dict], bar_qn: float 
         moving = [t for t, notes in inside_of.items() if _moves(notes)]
         if row["tracks"] and not moving:
             row["still"] = True
+        steady, parts = _steady_run(inside_of, s["start_qn"], bar_qn, bars)
+        if steady >= STEADY_BARS:
+            row["unchanged_bars"], row["unchanged_parts"] = steady, parts
         row["per_beat"] = round(max((len(_strikes(n)) / (bars * bar_qn) for n in inside_of.values()), default=0), 2)
         table.append(row)
     return {"sections": table, "findings": findings(table, tracks, bar_qn)}
 
 
 # The names auto_mix reads as a lead and as a chord part (mix_tools.ROLE_WORDS).
-LEAD_WORDS = ("lead", "melody", "vocal", "hook", "pluck", "arp", "solo", "synth")
+LEAD_WORDS = ("lead", "melody", "vocal", "hook", "solo", "pluck", "synth", "arp")
 CHORD_WORDS = ("chord", "pad", "keys", "piano", "comp", "rhodes", "organ", "string", "stab", "guitar")
 
 
 def _lead_and_chords(names: list[str]) -> tuple[str | None, str | None]:
     lower = {n: n.lower() for n in names}
-    lead = next((n for n, l in lower.items() if any(w in l for w in LEAD_WORDS)), None)
+    lead = next((n for w in LEAD_WORDS for n, l in lower.items() if w in l), None)   # a "Lead" before an "Arp"
     chords = next((n for n, l in lower.items() if n != lead and any(w in l for w in CHORD_WORDS)), None)
     return lead, chords
 
@@ -238,6 +241,16 @@ def findings(table: list[dict], tracks: dict[str, list[dict]], bar_qn: float) ->
                                   "drones or a bass on two notes",
                         "fix": "a sparse line over the chords (write_melody) or a broken-chord passage partway; "
                                "a felt piano left as block chords for 25 bars was 'too boring'"})
+        if row.get("unchanged_bars") and len(row["unchanged_parts"]) < FULL_TEXTURE_PARTS:
+            out.append({"check": "nothing enters", "status": "warn", "section": row["section"],
+                        "value": row["unchanged_bars"], "threshold": STEADY_BARS,
+                        "detail": f"for {row['unchanged_bars']} bars of {row['section']} the same "
+                                  f"{len(row['unchanged_parts'])} part(s) play ({', '.join(row['unchanged_parts'])}) "
+                                  "and nothing comes in or drops out",
+                        "fix": "bring a part in partway (a soft counter-line, strings, a shaker) or drop one out "
+                               "for a few bars; opening a filter or doubling the arp's rate over the stretch helps "
+                               "too. A 45-second beatless intro of pad and arp was 'too boring' until strings came "
+                               "in at its 9th bar and the arp went to 16ths"})
     busy = [r for r in table if r["tracks"] and composer.section_kind(r["section"]) not in STILL_KINDS]
     if sum(r["bars"] for r in busy) >= 16 and all(r.get("per_beat", 0) < PULSE_PER_BEAT for r in table):
         fastest = max(r.get("per_beat", 0) for r in table)
@@ -280,6 +293,29 @@ def findings(table: list[dict], tracks: dict[str, list[dict]], bar_qn: float) ->
 
 
 STILL_KINDS = ("intro", "outro", "breakdown")   # sections that may sit still
+# A thin texture (under four parts) that runs this many bars without a part coming in or
+# leaving reads as a loop, intro or not; a full groove carries 16 bars on its own.
+STEADY_BARS, FULL_TEXTURE_PARTS = 16, 4
+
+
+def _steady_run(notes_by_track: dict[str, list[dict]], t0: float, bar_qn: float, bars: int) -> tuple[int, list[str]]:
+    """The longest run of bars in a section where the same tracks sound (a note starting
+    in the bar or held through most of it), and those tracks."""
+    def sounding(b: int) -> frozenset:
+        lo, hi = t0 + b * bar_qn, t0 + (b + 1) * bar_qn
+        return frozenset(t for t, notes in notes_by_track.items()
+                         if any(n["start"] < hi - 1e-6 and n["start"] + max(n.get("length", 0), 1e-3) > lo + bar_qn / 2
+                                or lo - 1e-6 <= n["start"] < hi for n in notes))
+    best, best_set, run, prev = 0, frozenset(), 0, None
+    for b in range(bars):
+        now = sounding(b)
+        run = run + 1 if now == prev else 1
+        prev = now
+        if now and run > best:
+            best, best_set = run, now
+    return best, sorted(best_set)
+
+
 PULSE_PER_BEAT = 1.5   # strikes a beat on one track that keep a pulse: 8ths with a few rests
 
 

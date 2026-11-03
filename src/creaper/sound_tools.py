@@ -116,14 +116,19 @@ def summarise(results: list[dict]) -> dict:
     return out
 
 
-def relative_brightness(ranked: list[dict], character: list[str] | None) -> None:
+def relative_brightness(ranked: list[dict], character: list[str] | None,
+                        bounds: tuple[float, float] | None = None) -> None:
     """'bright' or 'dark' compared with the other candidates: the brightest (or darkest)
-    of what's there scores best, as a producer flicking through patches would judge it."""
+    of what's there scores best, as a producer flicking through patches would judge it.
+    bounds (the role's richness range) cap the yardstick: a pad-like patch at richness 101
+    among leads put every real lead 'less bright' by 6-8 points and a whistly one won."""
     want = next((c for c in character or [] if c in ("bright", "dark")), None)
     rich = [r["measured"]["richness"] for r in ranked if r.get("measured", {}).get("richness")]
     if not want or len(rich) < 2:
         return
     top, bottom = max(rich), min(rich)
+    if bounds:
+        top, bottom = max(min(top, bounds[1]), bottom), min(max(bottom, bounds[0]), top)
     for r in ranked:
         v = r.get("measured", {}).get("richness")
         if not v:
@@ -134,14 +139,30 @@ def relative_brightness(ranked: list[dict], character: list[str] | None) -> None
             r["why"] = r["why"] + [f"{'less bright' if want == 'bright' else 'brighter'} than the best of these"]
 
 
-def score(measured: dict, wanted: dict[str, tuple[float, float]], detuned: bool = False) -> tuple[float, list[str]]:
+# Bright from a few partials: the energy sits far over the fundamental in a handful of
+# peaks, a whistle more than a synth. Synclavier 'Progger Lead' (richness 7.1, 18 partials)
+# won a nu-disco lead audition and was "too whistly"; the saw and unison leads beside it
+# measured 37-116 partials, and only plucks and bells (where it's the point) shared it.
+WHISTLE_RICHNESS, WHISTLE_PARTIALS, WHISTLE_PENALTY = 4.0, 25, 1.5
+WHISTLE_ROLES = ("lead", "pad", "strings", "brass")
+
+
+def score(measured: dict, wanted: dict[str, tuple[float, float]], detuned: bool = False,
+          role: str | None = None) -> tuple[float, list[str]]:
     """Distance from the wanted ranges (0 = fits everything) and the reasons it's off.
     Times and brightness count by ratio (twice too slow is as far as half as slow);
     levels in dB by 6 dB steps; tuning by IN_TUNE_CENTS steps past IN_TUNE_CENTS (not
-    when detuned is wanted). A sound with silent notes can't win."""
+    when detuned is wanted). A sound with silent notes can't win. A lead, pad, strings
+    or brass sound that's bright from few partials scores worse (it sounds whistly)."""
     if measured.get("silent_notes"):
         return 100.0 + measured["silent_notes"], [f"{measured['silent_notes']} test notes made no sound"]
     total, why = 0.0, []
+    rich, partials = measured.get("richness"), measured.get("partials")
+    if (role in WHISTLE_ROLES and rich is not None and partials is not None
+            and rich > WHISTLE_RICHNESS and partials < WHISTLE_PARTIALS):
+        total += WHISTLE_PENALTY
+        why.append(f"bright from few partials (richness {rich:g}, {partials:g} partials): it can sound whistly or "
+                   "thin; a saw, unison or stacked patch is fuller")
     if measured.get("transposed_semitones"):
         # Every part would play in another key.
         total += 5.0
@@ -423,10 +444,10 @@ def audition_sounds(
                 ranked.append({**c, "score": 999.0, "why": [f"couldn't audition it: {e}"]})
                 continue
             measured = summarise(results)
-            s, why = score(measured, wanted, detuned="detuned" in (character or []))
+            s, why = score(measured, wanted, detuned="detuned" in (character or []), role=role)
             ranked.append({**c, "score": s, "measured": measured, "why": why})
     finally:
-        relative_brightness(ranked, character)
+        relative_brightness(ranked, character, wanted.get("richness"))
         ranked.sort(key=lambda r: r["score"])
         best = ranked[0] if ranked and ranked[0]["score"] < 100 else None
         # Back to the original plugin and sound first (a saved sound may have swapped

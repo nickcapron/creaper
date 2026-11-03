@@ -381,3 +381,20 @@ def test_arturia_search_loosens_only_what_the_palette_filled_in(monkeypatch):
     with pytest.raises(ValueError):
         st.audition_sounds(track="Bass", role="bass", candidates="arturia", characteristics=["Warm"])
     assert all(t[2] == ["Warm"] for t in tried)
+
+
+def test_a_lead_bright_from_few_partials_scores_as_whistly():
+    # Daybreak: Synclavier 'Progger Lead' (richness 7.1, 18 partials) won a nu-disco lead
+    # audition and was "too whistly"; a pad-like outlier (richness 101) had made every real
+    # lead 'less bright' by 6-8 points.
+    wanted = st.targets("lead", ["bright", "sustained"])
+    whistle = {"silent_notes": 0, "attack_ms": 5, "richness": 7.1, "partials": 18, "sustain_db": -14.15}
+    saw = {"silent_notes": 0, "attack_ms": 15, "richness": 2.3, "partials": 37, "sustain_db": -17.25}
+    s, why = st.score(whistle, wanted, role="lead")
+    assert any("whistly" in w for w in why) and s > st.score(whistle, wanted)[0]
+    assert not any("whistly" in w for w in st.score(whistle, st.targets("bell"), role="bell")[1])   # a bell's point
+    ranked = [{"name": n, "score": st.score(m, wanted, role="lead")[0], "why": [], "measured": m}
+              for n, m in (("Progger", whistle), ("Unison", saw), ("Volkanik", {"richness": 101.1}))]
+    st.relative_brightness(ranked, ["bright"], wanted["richness"])
+    by = {r["name"]: r["score"] for r in ranked}
+    assert by["Unison"] < 4      # measured from the role's top (6), not from 101 (it was 9.1)

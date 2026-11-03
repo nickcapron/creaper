@@ -772,3 +772,19 @@ def test_a_song_with_no_pulse_anywhere_is_flagged():
     assert not [f for f in driven["findings"] if f["check"] == "no pulse"]
     short = [{"name": "Intro", "start_qn": 0, "end_qn": 32}, {"name": "Verse", "start_qn": 32, "end_qn": 64}]
     assert not [f for f in songmap.song_map({"Cello": cello}, short)["findings"] if f["check"] == "no pulse"]
+
+
+def test_a_thin_stretch_where_nothing_enters_is_flagged():
+    # Daybreak: a 21-bar beatless intro of a pad and an 8th-note arp, "too boring" until
+    # strings came in at its 9th bar.
+    secs = [{"name": "Intro", "start_qn": 0, "end_qn": 84}, {"name": "Chorus", "start_qn": 84, "end_qn": 148}]
+    pad = [{"pitch": p, "start": b * 4.0, "length": 4.0} for b in range(37) for p in (52, 55, 59)]
+    arp = [{"pitch": (64, 67, 71)[i % 3], "start": i * 0.5, "length": 0.5} for i in range(296)]
+    band = {f"Part {k}": [{"pitch": 40 + k, "start": 84 + i * 1.0, "length": 1.0} for i in range(64)] for k in range(3)}
+    found = songmap.song_map({"Pad": pad, "Arp": arp, **band}, secs)
+    flagged = [f for f in found["findings"] if f["check"] == "nothing enters"]
+    assert [f["section"] for f in flagged] == ["Intro"] and flagged[0]["value"] == 21   # a full chorus carries 16 bars
+    strings = [{"pitch": 76, "start": 32 + i * 8.0, "length": 8.0} for i in range(6)]
+    later = songmap.song_map({"Pad": pad, "Arp": arp, "Strings": strings, **band}, secs)
+    assert not [f for f in later["findings"] if f["check"] == "nothing enters"]        # bars 1-8, then 9-20 with strings
+    assert songmap._lead_and_chords(["Pad", "Arp", "Lead"])[0] == "Lead"
