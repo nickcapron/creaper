@@ -371,3 +371,76 @@ def test_a_readable_track_that_starts_off_target_still_searches():
         mp.undo()
     assert abs(out["loud_part_reduction_db"] - 2.0) <= 0.3 and out["value"] != -40.0
     assert "repeat_noise_db" not in out and len(bench.passes) >= 4          # dry, wet, the noise check, the search
+
+
+def test_a_track_known_to_render_differently_skips_the_wet_and_repeat_renders():
+    """The second calibration of a noisy track (master_to_target after auto_mix) renders
+    only the dry pass: the wet and repeat renders would only find the noise again."""
+    pad = np.stack([drums(8, 0.5, 4)] * 2, axis=1)
+    bench = NoisyBench({"Pad": pad})
+    import pytest as _pt
+    mp = _pt.MonkeyPatch()
+    mp.setattr(server, "call", bench.call)
+    mp.setattr(batch, "render_group", bench.render_group)
+    job = {"track": "Pad", "fx": 1, "profile": plugin_profiles.find_profile("ReaComp"), "target": 1.5, "span": (9.0, 17.0)}
+    try:
+        first = batch.calibrate_many([dict(job)])[0]
+        before = len(bench.passes)
+        second = batch.calibrate_many([dict(job)])[0]
+    finally:
+        mp.undo()
+    assert before == 3 and len(bench.passes) - before == 1                      # dry only
+    assert second["method"].startswith("the compressor model") and second["value"] == second["predicted_start"]   # this dry render's model
+    assert second["repeat_noise_db"] == first["repeat_noise_db"] and "measured earlier" in second["note"]
+    assert second["measured"] is False and second["loud_part_reduction_db"] is None
+
+
+def test_noise_memory_follows_the_instrument_and_keeps_the_master_by_project():
+    a = {"fx": [{"name": "VSTi: Jun-6 V (Arturia)"}, {"name": "ReaComp"}], "instrument_fx": 1}
+    b = {"fx": [{"name": "VSTi: RS5K"}, {"name": "ReaComp"}], "instrument_fx": 1}
+    batch._remember_noise(batch._noise_key("p.rpp", "{T}", a), 6.0)
+    assert batch._known_noise(batch._noise_key("p.rpp", "{T}", a)) == 6.0
+    assert batch._known_noise(batch._noise_key("p.rpp", "{T}", b)) is None       # a new instrument: measure again
+    assert batch._known_noise(batch._noise_key("q.rpp", "{T}", a)) is None       # another project
+    batch._remember_noise(batch._noise_key("p.rpp", "master", {"fx": [{"name": "ReaComp"}]}), 2.7)
+    assert batch._known_noise(batch._noise_key("p.rpp", "master", {"fx": [{"name": "ReaEQ"}, {"name": "ReaLimit"}]})) == 2.7
+    batch._remember_noise(batch._noise_key("p.rpp", "{T}", a), 0.4)               # read cleanly: forget it
+    assert batch._known_noise(batch._noise_key("p.rpp", "{T}", a)) is None
+    batch._remember_noise(batch._noise_key("p.rpp", "{U}", a), 0.6)               # a borderline reading isn't kept
+    assert batch._known_noise(batch._noise_key("p.rpp", "{U}", a)) is None
+
+
+def test_a_master_over_a_range_says_the_song_lands_quieter(monkeypatch, tmp_path):
+    mix = _mix(40)
+    (tmp_path / "renders").mkdir()
+    monkeypatch.setattr(server.bridge, "directory", tmp_path, raising=False)
+    state = {"threshold": 0.0, "ceiling": -1.0, "fader": 0.0, "on": True, "renders": 0}
+
+    def fake_call(cmd, **kw):
+        if cmd == "get_track_details":
+            return {"fx": [{"index": 1, "name": "ReaLimit"}]}
+        if cmd == "update_fx":
+            state["on"] = kw["enabled"]
+        elif cmd == "set_fx_parameters":
+            for c in kw["changes"]:
+                state[c["parameter"].lower()] = c["display_value"]
+        elif cmd == "get_fx_parameters":
+            return {"parameters": [{"name": "Threshold", "display": f"{state['threshold']}"}]}
+        elif cmd == "set_track_properties":
+            state["fader"] = kw["volume_db"]
+        elif cmd == "describe_track":
+            return {"volume_db": state["fader"]}
+        elif cmd == "render_audio":
+            state["renders"] += 1
+            y = (batch.simulate_limiter(mix, FS, state["threshold"], state["ceiling"], state["fader"])
+                 if state["on"] else mix * 10 ** (state["fader"] / 20))
+            f = tmp_path / "renders" / f"m{state['renders']}.wav"
+            sf.write(str(f), y.astype(np.float32), FS, subtype="FLOAT")
+            return {"files": [str(f)], "start": {"seconds": 0.0}, "end": {"seconds": 40.0}, "track": "master"}
+        return {}
+
+    monkeypatch.setattr(server, "call", fake_call)
+    ranged = server.master_to_target(target_lufs=-12.0, glue=False, force=True, clip=False, start_bar=105, end_bar=121)
+    assert "105-121" in ranged["range_only"] and "no range" in ranged["range_only"]
+    whole = server.master_to_target(target_lufs=-12.0, glue=False, force=True, clip=False)
+    assert "range_only" not in whole

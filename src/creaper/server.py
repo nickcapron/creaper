@@ -1910,7 +1910,9 @@ def master_to_target(
         "When the limiter alone can't reach the target, let a soft clipper before it round the mix's peaks "
         "(as little as gets there, at most ~3 dB); off for styles that should breathe"))] = True,
     start_bar: Bar = None,
-    end_bar: Annotated[float | None, Field(description="Measure only this range (e.g. the loudest section) to save time")] = None,
+    end_bar: Annotated[float | None, Field(description=(
+        "Master to the target over this range only: the range reaches it and the whole song lands quieter "
+        "(a drop sits about 2 LU over the song). For a finished song or an export target leave both out"))] = None,
     passes: Annotated[int, Field(ge=1, le=5)] = 4,
     force: Annotated[bool, Field(description=(
         "Master even when the mix fails its checks (clipping, a flat loudness range, a piercing top end); "
@@ -1928,8 +1930,9 @@ def master_to_target(
     breathe, keeps it off); if the target still needs more, it stops there and names the
     peakiest parts to compress (the mix needs density, not more limiting); a sparse mix
     (peaks over 12 dB above its loudness) aims for the quiet end of the style's range.
-    Each step renders the range, so a short loud section is much faster
-    than the whole song.
+    The target is for the range measured: with start_bar/end_bar only that range
+    reaches it (2026-11-03: Drop 3 mastered to -10 left the song at -12, and the whole
+    master ran again), so a finished song is mastered whole, in one call.
     First it checks the mix (with any limiter and glue already on the master bypassed)
     and refuses, changing nothing, when it clips, when the whole song never changes level
     (loudness range under 2 LU, ambient styles excepted) or when it's piercing for its
@@ -2192,6 +2195,11 @@ def master_to_target(
         except Exception:  # noqa: BLE001 - the advice is a bonus
             pass
     result["true_peak_ok"] = final["true_peak_dbtp"] is None or final["true_peak_dbtp"] <= ceiling_dbtp + 0.05
+    if start_bar is not None or end_bar is not None:
+        result["range_only"] = (
+            f"{target_lufs:g} LUFS is what bars {start_bar or 1:g}-{end_bar if end_bar is not None else 'end'} "
+            "measure; the whole song is quieter than that (quieter sections pull its integrated loudness down). "
+            "For the song's own target master it once more with no range: that one call replaces this one")
     result["chain"] = [f["name"] for f in master_fx()]
     # Squashed = little room between peaks and loudness (loud commercial masters sit
     # around 8-9 dB). A high limiter drive alone isn't a problem: it may just be

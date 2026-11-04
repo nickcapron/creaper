@@ -54,8 +54,12 @@ def test_every_tool_the_guidance_names_exists():
 def test_panel_prompt_carries_the_workflow():
     p = chat.PANEL_PROMPT
     assert "audition_sounds" in p and "load_arturia_preset" in p and "program the synths yourself" not in p
-    for check in ("get_genre_profile", "measure_structure", "measure_tracks", "compare_mix_to_style", "check_ending"):
+    for check in ("get_genre_profile", "check_song", "measure_tracks", "check_ending"):
         assert check in p
+    # 2026-11-03: the old "run measure_structure, measure_tracks, compare_mix_to_style and
+    # check_ending" line had the panel measure the whole song 12 times on top of
+    # finish_stage and check_song (an hour of renders on a laptop): measure once per batch.
+    assert "not after each fix" in p and "no bar range" in p
 
 
 def test_slash_commands_expand_to_the_prompts():

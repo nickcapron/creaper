@@ -11,3 +11,12 @@ def _no_installed_vocalvst_decides(monkeypatch):
     monkeypatch.setattr(lyric_melody, "overrides_supported", lambda **kw: False)
     monkeypatch.setattr(vocal_tools, "_HEARD_TAKES", {})     # takes heard per track, kept for a session
     monkeypatch.setattr(lyric_melody, "_phones_cache", {})
+
+
+@pytest.fixture(autouse=True)
+def _no_remembered_render_noise(monkeypatch):
+    """batch remembers which tracks render differently every time for a session; each
+    test starts without that memory."""
+    from creaper import batch
+
+    monkeypatch.setattr(batch, "_noisy", {})

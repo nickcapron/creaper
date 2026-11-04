@@ -241,3 +241,50 @@ def test_tools_that_need_sign_in_arent_retried(tmp_path, monkeypatch):
     monkeypatch.setattr(chat, "run_claude", fake_run)
     ok, _ = chat._turn({"prompt": "hi"}, tmp_path, None, lambda **e: None)
     assert not ok and len(runs) == 1
+
+
+def test_a_turn_keeps_the_machine_awake_and_says_when_its_on_battery(tmp_path, monkeypatch):
+    # 2026-11-03: a laptop on battery slept three times inside hour-long mix and master
+    # renders. The turn now holds a keep-awake request while it runs and lets go after.
+    held = []
+
+    class Spy(chat.KeepAwake):
+        def __enter__(self):
+            held.append("on")
+            return self
+
+        def __exit__(self, *exc):
+            held.append("off")
+
+    def fake_turn(request, workdir, cancel, emit):
+        assert held == ["on"]                       # awake for the whole of the turn
+        return True, False
+
+    monkeypatch.setattr(chat, "KeepAwake", Spy)
+    monkeypatch.setattr(chat, "_turn", fake_turn)
+    monkeypatch.setattr(chat, "on_battery", lambda: True)
+    assert chat.run_turn(_request(tmp_path)) == 0
+    assert held == ["on", "off"]
+    events = [json.loads(l) for l in (tmp_path / "t.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert {"t": "info", "message": chat.ON_BATTERY_NOTE} in events
+
+
+def test_keep_awake_lets_go_even_when_the_turn_fails(monkeypatch):
+    import sys
+    calls = []
+
+    class Kernel:
+        def SetThreadExecutionState(self, flags):
+            calls.append(flags)
+            return 1
+
+    class WinDll:
+        kernel32 = Kernel()
+
+    import ctypes
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(ctypes, "windll", WinDll(), raising=False)
+    with pytest.raises(RuntimeError):
+        with chat.KeepAwake():
+            raise RuntimeError("boom")
+    assert calls == [0x80000003, 0x80000000]       # continuous + system + display, then continuous alone

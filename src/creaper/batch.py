@@ -18,8 +18,10 @@ from __future__ import annotations
 
 import math
 import os
+import time
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -245,6 +247,48 @@ class DriveSearch:
 # threshold at 0, where it compresses nothing) and walking the threshold at random.
 NOISE_FLOOR_DB = 0.3
 
+# What a track (or the master) was found to differ from itself by, kept for a while so
+# the next calibration on it renders only the dry pass and goes straight to the model.
+# A nu-disco mix on five Arturia synths (2026-11-03) read the pad at 13 dB and the arp at
+# 15 dB in auto_mix, then measured the master's noise again in every master_to_target:
+# the wet and repeat renders each time only to find what it already knew. Only a clear
+# reading is kept (NOISE_REMEMBER_DB, well over the floor, so a one-off fluke isn't),
+# for a track as long as its instrument is the same; the master for the project.
+NOISE_REMEMBER_DB = 1.0
+NOISE_MEMORY_S = 30 * 60
+_noisy: dict[tuple, tuple[float, float]] = {}       # key -> (repeat noise dB, when read)
+
+
+def _noise_key(project: Any, track: Any, details: dict) -> tuple:
+    """What a noise reading belongs to: the project and track, and for a track its
+    instrument (another synth may render the same every time). The master's noise comes
+    from the tracks feeding it, so its own effects don't change the key."""
+    if str(track).lower() == "master":
+        return (project, "master")
+    fx = details.get("fx") if isinstance(details, dict) else None
+    inst = details.get("instrument_fx") if isinstance(details, dict) else None
+    name = None
+    if isinstance(fx, list) and isinstance(inst, int) and 1 <= inst <= len(fx) and isinstance(fx[inst - 1], dict):
+        name = fx[inst - 1].get("name")
+    return (project, str(track), name)
+
+
+def _known_noise(key: tuple) -> float | None:
+    hit = _noisy.get(key)
+    if hit is None:
+        return None
+    if time.monotonic() - hit[1] > NOISE_MEMORY_S:
+        _noisy.pop(key, None)
+        return None
+    return hit[0]
+
+
+def _remember_noise(key: tuple, noise: float) -> None:
+    if noise >= NOISE_REMEMBER_DB:
+        _noisy[key] = (noise, time.monotonic())
+    else:
+        _noisy.pop(key, None)       # it read cleanly this time: measure from now on
+
 
 def _read_noise_floor(jobs: list[dict], idx: list[int], searches: dict, lo_bar, hi_bar, fs: int) -> None:
     """For compressors whose first reading was off: renders their tracks once more with the
@@ -264,6 +308,8 @@ def _read_noise_floor(jobs: list[dict], idx: list[int], searches: dict, lo_bar, 
         s = searches[i]
         floor = analysis.gain_reduction(s.dry, again[jobs[i]["track"]], fs, lag=0).get("gr_db_p95") or 0.0
         s.noise = round(float(floor), 2)
+        if getattr(s, "noise_key", None) is not None:
+            _remember_noise(s.noise_key, s.noise)
         if s.noise > NOISE_FLOOR_DB:
             s.by_model, s.done = True, True
             s.steps.append({"drive": round(s.drive, 2), "loud_part_reduction_db": s.reading, "unreadable": True})
@@ -278,7 +324,8 @@ def _model_result(s: "DriveSearch") -> dict:
            "method": ("the compressor model on the dry render" if modelled
                       else "left at its starting setting: the renders can't be read"),
            "note": (f"two renders of these bars differ from each other by {s.noise:g} dB (instruments that play "
-                    f"differently every time), more than a {s.target:g} dB target can be read through, so the "
+                    f"differently every time{', measured earlier this session' if getattr(s, 'remembered', False) else ''}), "
+                    f"more than a {s.target:g} dB target can be read through, so the "
                     + ("threshold is the model's: it takes about the target off the dry render in simulation"
                        if modelled else "compressor stays at its gentle starting setting"))}
     if modelled:
@@ -312,6 +359,10 @@ def _calibrate_group(jobs: list[dict], idx: list[int], span: tuple, passes: int,
     from . import server
 
     lo_bar, hi_bar = span
+    try:
+        project = (server.call("project_paths") or {}).get("project")
+    except Exception:  # noqa: BLE001 - an unknown project still calibrates, just keyed on None
+        project = None
     for i in idx:
         server.call("update_fx", track=jobs[i]["track"], fx=jobs[i]["fx"], enabled=False)
     try:
@@ -345,7 +396,8 @@ def _calibrate_group(jobs: list[dict], idx: list[int], span: tuple, passes: int,
             continue
         # The renders are after the fader, the compressor before it: a pop piano turned down
         # 18 dB got a threshold 18 dB too low and lost about 10 dB, not the 1.5 asked.
-        fader = server.call("get_track_details", track=j["track"]).get("volume_db") or 0.0
+        details = server.call("get_track_details", track=j["track"]) or {}
+        fader = details.get("volume_db") or 0.0
         pre = audio.astype("float64") * 10 ** (-float(fader) / 20)
         rms = analysis._db(float((pre ** 2).mean()) ** 0.5)
         floor = (rms - server.THRESHOLD_BELOW_RMS_DB
@@ -359,10 +411,15 @@ def _calibrate_group(jobs: list[dict], idx: list[int], span: tuple, passes: int,
                 predicted = max(predicted, floor)
         s = DriveSearch(j, drive, floor, server.MAX_DRIVE_STEP_DB)
         s.where, s.dry, s.predicted = where, audio, predicted
+        s.noise_key = None if j.get("sidechain") else _noise_key(project, j["track"], details)
         if predicted is not None and abs(predicted - drive) > 0.05:
             s.drive = predicted
             server.call("set_fx_parameters", track=j["track"], fx=j["fx"],
                         changes=[{"parameter": profile.drive, "display_value": predicted}])
+        known = _known_noise(s.noise_key) if s.noise_key is not None else None
+        if known is not None:
+            # Already found unreadable: the wet and repeat renders would only say so again.
+            s.noise, s.by_model, s.done, s.remembered = known, True, True, True
         searches[i] = s
     for n_pass in range(passes):
         active = [i for i, s in searches.items() if not s.done]
