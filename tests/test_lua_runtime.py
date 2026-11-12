@@ -4,9 +4,14 @@ hardware session go back; a recording pass leaves the tracks as it found them, a
 nobody comes back to finish it; SysEx never reaches a synth from an imported MIDI file;
 and a closed audio device (Audio_IsRunning() == 0, which is true in Lua) counts as closed."""
 
+import os
+
 import pytest
 
-pytest.importorskip("lupa.lua54", reason="the Lua runtime tests need lupa (pip install -e '.[dev]')")
+if os.environ.get("CI"):
+    import lupa.lua54  # noqa: F401  in CI a missing lupa is a failure, not a quiet skip
+else:
+    pytest.importorskip("lupa.lua54", reason="the Lua runtime tests need lupa (pip install -e '.[dev]')")
 
 from lua_harness import BridgeError, Rig  # noqa: E402
 
