@@ -382,8 +382,13 @@ function reaper.TakeIsMIDI(take) return take.midi end
 function reaper.GetMediaItemTake_Source(take) return take end
 function reaper.GetMediaSourceFileName(source) return source.file end
 function reaper.GetMediaItemTakeInfo_Value(take, key)
+  if key == "D_PLAYRATE" then return take.v[key] or 1.0 end
   if key ~= "D_STARTOFFS" then error("fake reaper has no take value " .. tostring(key), 2) end
   return take.v[key]
+end
+-- A MIDI take's events as REAPER packs them: int32 offset, flags byte, int32 length, bytes.
+function reaper.MIDI_GetAllEvts(take, _)
+  return true, take.evts or ""
 end
 function reaper.SetMediaItemTakeInfo_Value(take, key, value)
   if key ~= "D_STARTOFFS" then error("fake reaper has no take value " .. tostring(key), 2) end

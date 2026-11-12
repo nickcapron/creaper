@@ -603,26 +603,6 @@ def test_section_lifts_raise_choruses_that_dont_lift():
 
 
 
-def test_colour_picks_the_first_amount_that_lifts_the_top_without_losing_punch():
-    from creaper import mix_tools
-    trials = [{"amount": 15, "rise_db": 0.8, "crest_drop_db": 0.1}, {"amount": 30, "rise_db": 2.4, "crest_drop_db": 0.4},
-              {"amount": 45, "rise_db": 3.9, "crest_drop_db": 1.6}]
-    assert mix_tools.choose_colour(trials)["amount"] == 30
-    crushing = [{"amount": 15, "rise_db": 0.9, "crest_drop_db": 0.3}, {"amount": 30, "rise_db": 2.6, "crest_drop_db": 1.4}]
-    assert mix_tools.choose_colour(crushing)["amount"] == 15          # the most it can take with its punch
-    assert mix_tools.choose_colour([{"amount": 15, "rise_db": 0.1, "crest_drop_db": 0.0}]) is None
-
-
-def test_band_db_hears_added_harmonics():
-    import numpy as np
-    from creaper import mix_tools
-    fs = 22050
-    t = np.arange(fs) / fs
-    clean = 0.5 * np.sin(2 * np.pi * 110 * t)
-    driven = np.tanh(3 * clean) / 3 * 1.5
-    assert mix_tools.band_db(driven, fs) > mix_tools.band_db(clean, fs) + 20
-
-
 def _sung_mix(monkeypatch, alone, in_mix):
     """A fake mix with a VocalVST track 'Sung' whose words in the mix follow in_mix(raised dB, how much drier)."""
     from creaper import asr, ear_tools, mix_tools

@@ -1046,131 +1046,6 @@ def _section_moves(start_bar: float | None, end_bar: float | None) -> dict | Non
     return {"sections": table, "how": f"{SECTION_GAIN_FX} on the master before its limiter, stepped at each section start"}
 
 
-SATURATION_FX, SATURATION_PARAM = "JS: Saturation", "Amount (%)"
-COLOUR_RISE_DB = (2.0, 4.0)     # how much the 2-8 kHz band should come up: audible grit, not fizz
-COLOUR_MAX_CREST_DROP_DB = 1.0  # more punch lost than this and it's distortion, not colour
-COLOUR_STEPS = (5, 15, 30, 45, 60, 80)
-COLOUR_HOPELESS_AT, COLOUR_HOPELESS_DB = 30, 0.5   # at 30% with under 0.5 dB of rise, more won't reach 2 dB
-
-
-def band_db(audio, fs: float, lo: float = 2000, hi: float = 8000) -> float:
-    """Energy (dB) in a band of a render."""
-    import numpy as np
-    from scipy import signal as sg
-
-    mono = audio.mean(axis=1) if audio.ndim > 1 else audio
-    freqs, psd = sg.welch(mono, fs=fs, nperseg=min(8192, mono.size))
-    return 10 * float(np.log10(psd[(freqs >= lo) & (freqs < hi)].sum() + 1e-30))
-
-
-def choose_colour(trials: list[dict]) -> dict | None:
-    """The first amount whose 2-8 kHz rise reaches COLOUR_RISE_DB with the crest within
-    COLOUR_MAX_CREST_DROP_DB, else the closest under the crest limit. trials: [{'amount',
-    'rise_db', 'crest_drop_db'}] in rising order."""
-    lo, hi = COLOUR_RISE_DB
-    ok = [t for t in trials if t["crest_drop_db"] <= COLOUR_MAX_CREST_DROP_DB and t["rise_db"] <= hi + 1]
-    inside = [t for t in ok if t["rise_db"] >= lo]
-    if inside:
-        return inside[0]
-    if not ok and trials and trials[0]["crest_drop_db"] <= COLOUR_MAX_CREST_DROP_DB:
-        return trials[0]  # the gentlest setting already overshoots: keep it rather than none
-    return max(ok, key=lambda t: t["rise_db"]) if ok and max(t["rise_db"] for t in ok) >= 0.5 else None
-
-
-def _add_colour(targets: list[tuple[str, object]], start_bar: float | None, end_bar: float | None,
-                spans: dict | None = None) -> list[dict]:
-    """Saturation on the bass and the drum bus, its amount found by measurement: raised
-    until the 2-8 kHz band comes up COLOUR_RISE_DB (harmonics a small speaker can play)
-    while the crest factor drops less than COLOUR_MAX_CREST_DROP_DB. Measured on the
-    loudest 16 bars (spans: {track: (start_bar, end_bar)} when auto_mix already knows
-    them). Targets on the same span share their renders: one pass per trial amount for
-    all of them. targets: [(label, track ref)]."""
-    from . import batch
-    from .server import _loudest_bars, _render_array
-
-    done: dict = {}
-    live = []
-    for label, track in targets:
-        entry: dict = {"track": label}
-        done[label] = entry
-        try:
-            fx = call("get_track_details", track=track).get("fx", [])
-            if any("satur" in f["name"].lower() for f in fx):
-                entry["skipped"] = "it already has a saturator"
-                continue
-            sat = call("add_fx", track=track, name=SATURATION_FX)
-            span = (spans or {}).get(track) if start_bar is None and end_bar is None else None
-            if span is None and start_bar is None and end_bar is None:
-                call("update_fx", track=track, fx=sat["index"], enabled=False)
-                try:
-                    full, fs, render = _render_array(track, None, None)
-                    span = _loudest_bars(track, full, fs, render)
-                finally:
-                    call("update_fx", track=track, fx=sat["index"], enabled=True)
-            live.append({"label": label, "track": track, "sat": sat, "span": span or (start_bar, end_bar),
-                         "entry": entry, "trials": []})
-        except Exception as e:  # noqa: BLE001
-            entry["error"] = str(e)
-    groups: dict = {}
-    for t in live:
-        groups.setdefault(tuple(t["span"]), []).append(t)
-    for (lo_bar, hi_bar), group in groups.items():
-        try:
-            for t in group:
-                call("update_fx", track=t["track"], fx=t["sat"]["index"], enabled=False)
-            try:
-                dry = batch.render_group([t["track"] for t in group], lo_bar, hi_bar)
-            finally:
-                for t in group:
-                    call("update_fx", track=t["track"], fx=t["sat"]["index"], enabled=True)
-            fs = dry["_fs"]
-            for t in group:
-                t["dry"] = dry[t["track"]]
-                t["base_band"] = band_db(t["dry"], fs)
-                t["base_crest"] = analysis.envelope_range(t["dry"], fs) or 0.0
-            for amount in COLOUR_STEPS:
-                searching = [t for t in group if not t.get("finished")]
-                if not searching:
-                    break
-                for t in searching:
-                    call("set_fx_parameters", track=t["track"], fx=t["sat"]["index"],
-                         changes=[{"parameter": SATURATION_PARAM, "display_value": amount}])
-                wet = batch.render_group([t["track"] for t in searching], lo_bar, hi_bar)
-                for t in searching:
-                    w, d = wet[t["track"]], t["dry"]
-                    # Level-matched: the rise is the band's share going up, not the part getting louder.
-                    level_change = 10 * math.log10(float((w ** 2).mean() + 1e-20) / float((d ** 2).mean() + 1e-20))
-                    t["trials"].append({"amount": amount,
-                                        "rise_db": round(band_db(w, fs) - t["base_band"] - level_change, 2),
-                                        "crest_drop_db": round(t["base_crest"] - (analysis.envelope_range(w, fs) or 0.0), 2)})
-                    last = t["trials"][-1]
-                    if last["rise_db"] >= COLOUR_RISE_DB[0] or last["crest_drop_db"] > COLOUR_MAX_CREST_DROP_DB:
-                        t["finished"] = True
-                    elif amount >= COLOUR_HOPELESS_AT and last["rise_db"] < COLOUR_HOPELESS_DB:
-                        t["finished"] = True   # a third of the way up and barely a change: it won't get there
-            for t in group:
-                pick = choose_colour(t["trials"])
-                t["entry"]["trials"] = t["trials"]
-                if pick is None:
-                    call("remove_fx", track=t["track"], fx=t["sat"]["index"])
-                    t["entry"]["skipped"] = "saturation added no useful harmonics here (already rich, or it cost punch)"
-                else:
-                    call("set_fx_parameters", track=t["track"], fx=t["sat"]["index"],
-                         changes=[{"parameter": SATURATION_PARAM, "display_value": pick["amount"]}])
-                    t["entry"].update(amount_pct=pick["amount"], presence_rise_db=pick["rise_db"],
-                                      crest_drop_db=pick["crest_drop_db"])
-        except Exception as e:  # noqa: BLE001
-            for t in group:
-                if "amount_pct" in t["entry"]:
-                    continue
-                t["entry"]["error"] = str(e)
-                try:  # don't leave it driven at a trial setting
-                    call("remove_fx", track=t["track"], fx=t["sat"]["index"])
-                except Exception:  # noqa: BLE001
-                    pass
-    return [done[label] for label, _ in targets]
-
-
 def _loud_spans(channels: list[dict], envelopes: dict, offset_s: float) -> dict:
     """Where each stage calibrates, from auto_mix's first pass: the mix's loudest
     CALIBRATE_BARS bars ('_mix', from the parts' summed power) for every part that plays
@@ -1427,10 +1302,6 @@ def auto_mix(
     dynamics: Annotated[bool, Field(description=(
         "Compress peaky parts before mastering (drums 2-3 dB plus a soft clipper, keys/pads 1-2 dB, parallel "
         "compression on the drum bus) so the master doesn't have to crush them; off for genres that breathe"))] = True,
-    colour: Annotated[bool, Field(description=(
-        "Saturate the bass and the drum bus, by measurement (2-8 kHz up 2-4 dB, punch kept), so they're heard "
-        "on small speakers. Off by default: in every measured song it found no setting that added harmonics "
-        "without costing punch, at 6-8 renders a run; skipped anyway for genres that breathe"))] = False,
     section_moves: Annotated[bool, Field(description=(
         "Ride the mix up in sections that should lift but don't (a chorus or drop under 1 LU over the verse "
         "before it), with a gain plugin first on the master; needs the sections as regions"))] = True,
@@ -1456,16 +1327,14 @@ def auto_mix(
     last peaks) and keys/pads 1-2 dB, calibrated by measuring gain reduction, so the
     master doesn't have to crush them. Then -6 dBFS of headroom, the drums glued on one
     bus (plus parallel compression), gentle compression on the whole mix, and a level
-    ride lifting choruses and drops that don't come out over the section before (with
-    colour=True, saturation on the bass and the drum bus set by measurement). Robot
+    ride lifting choruses and drops that don't come out over the section before. Robot
     vocals covered by other parts are raised and cleared; a sung vocal (VocalVST) is heard
     by the speech recogniser alone and in the mix over the loudest bars and, while the mix
     loses its words, made drier (its reverb and delay sends down 6 dB), then raised 3 dB.
     Reports the mix's peak-to-loudness and its peakiest parts. Genres that should breathe (classical,
     film, jazz...) skip the dynamics stage. Saves a copy of the project first when it has a
     file. Leaves tracks the user already set up (EQ, compression, panning) alone on
-    those points. Then check it: show_spectrogram, check_vocal_clarity,
-    compare_mix_to_style."""
+    those points."""
     profile = None
     if style:
         g = genres.find(style)
@@ -1637,7 +1506,7 @@ def auto_mix(
                 report.setdefault("warnings", []).append(f"delay return: {e}")
     with batch.span_hints(hints):
         report = _mix_stages(report, plan, channels, profile, spans, room, verb, start_bar, end_bar, dynamics,
-                             sidechain, glue, colour, section_moves)
+                             sidechain, glue, section_moves)
     try:   # finish_stage("mix") asks for this run
         from . import song_tools
         song_tools.mark_mixed([a["name"] for a in plan["channels"] if not a.get("skipped")])
@@ -1647,8 +1516,7 @@ def auto_mix(
 
 
 def _mix_stages(report: dict, plan: dict, channels: list[dict], profile: dict | None, spans: dict, room, verb,
-                start_bar, end_bar, dynamics: bool, sidechain: bool, glue: bool, colour: bool,
-                section_moves: bool) -> dict:
+                start_bar, end_bar, dynamics: bool, sidechain: bool, glue: bool, section_moves: bool) -> dict:
     """auto_mix after the levels, EQ and sends: the measured stages, with the loud
     spans from its first pass. The master is rendered for the headroom and once at the
     end; the stages in between measure their own tracks."""
@@ -1715,20 +1583,6 @@ def _mix_stages(report: dict, plan: dict, channels: list[dict], profile: dict | 
                 changed = True
         except Exception as e:  # noqa: BLE001
             report.setdefault("warnings", []).append(f"mix bus glue: {e}")
-    if colour and (profile or {}).get("family") not in GENTLE_FAMILIES:
-        targets = [(c["name"], c["ref"]) for c in channels if c.get("role") == "bass" and c.get("level") is not None]
-        glue_track = (report.get("drum_glue") or {}).get("_track")
-        if glue_track:
-            targets.append(("drum bus", glue_track))
-        colour_spans = {ref: spans[ref] for _, ref in targets if ref in spans}
-        if glue_track and spans.get("_drums"):
-            colour_spans[glue_track] = spans["_drums"]
-        if targets:
-            try:
-                report["colour"] = _add_colour(targets, start_bar, end_bar, colour_spans)
-                changed = True
-            except Exception as e:  # noqa: BLE001
-                report.setdefault("warnings", []).append(f"saturation: {e}")
     if report.get("drum_glue"):
         report["drum_glue"].pop("_track", None)
     if room:
@@ -1762,8 +1616,8 @@ def _mix_stages(report: dict, plan: dict, channels: list[dict], profile: dict | 
     peak = master.get("levels", {}).get("sample_peak_dbfs")
     lufs = master.get("loudness", {}).get("integrated_lufs")
     report["result"] = {"peak_dbfs": peak, "integrated_lufs": lufs,
-                        "next": "Look and measure: show_spectrogram, check_vocal_clarity on vocals, "
-                                "compare_mix_to_style; then master_to_target."}
+                        "next": "measure_tracks(per_section=True) once and fix what it flags in one batch; then "
+                                "finish_stage('mix') when the song has a plan, and master_to_target."}
     if peak is not None and lufs is not None:
         # Peak-to-loudness: how far the hits stand over the mix. Over about 12 dB the
         # master's limiter has to crush them to reach a modern level.

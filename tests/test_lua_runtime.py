@@ -249,6 +249,22 @@ def test_a_print_take_mutes_the_synths_other_tracks_and_puts_everything_back(rig
     assert names(rig) == ["Vocals", "Same synth", "Other synth", "MK Lead (MIDI)", "MK Lead"]
 
 
+def test_a_print_reads_as_printed_until_the_part_changes(rig, bridge):
+    hardware_part(rig, bridge)
+    midi, audio = rig.f.track("MK Lead (MIDI)"), rig.f.track("MK Lead")
+    part = rig.f.new_midi_item(midi, 4.0, 4.0)
+    sound = rig.f.new_midi_item(midi, 3.5, 0.5, rig.table({"sysex": 1}))
+    assert bridge.hws.printed(midi, audio) == "never"
+    bridge.call("hardware_take_start", track="MK Lead", start_seconds=4, end_seconds=8, mute_items=[sound.guid])
+    rig.f.play_position = 8.0
+    bridge.call("hardware_take_finish", mute_midi=True, take_name="MK Lead print")
+    # The sound item was muted for the pass and unmuted after; the print still counts.
+    assert sound.v["B_MUTE"] == 0
+    assert bridge.hws.printed(midi, audio) == "yes"
+    part.takes[1].evts = "\x00\x00\x00\x00\x00\x03\x00\x00\x00\x90\x3c\x64"   # a note added
+    assert bridge.hws.printed(midi, audio) == "stale"
+
+
 def test_a_print_take_leaves_the_midi_track_as_it_was_unless_asked(rig, bridge):
     hardware_part(rig, bridge)
     rig.f.track("Same synth").v["B_MUTE"] = 1            # the user's own mute

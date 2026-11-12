@@ -1,8 +1,8 @@
 """A song as a whole: how it's laid out before it's written (plan_song: which parts play
 in each section, at what energy, with which seeds), what each section actually plays
 once it is (song_map: per section and track, density, distinct bars, register and
-copies), and the scorecard that rolls every check into pass / warn / fail with a score
-out of 10 and the change since the last run. Pure functions; the tools are in
+copies), and the scorecard that lists every check as pass / warn / fail with the
+change since the last run. Pure functions; the tools are in
 song_tools.py."""
 
 from __future__ import annotations
@@ -438,19 +438,15 @@ def _song_distinct(notes: list[dict], bar_qn: float) -> float | None:
 # ---------------------------------------------------------------- scorecard
 
 def scorecard(rows: list[dict], previous: dict | None = None) -> dict:
-    """Pass / warn / fail rows rolled into a score out of 10 (a pass counts 1, a warn
-    half, a fail nothing), with each row's change since the previous run."""
+    """Pass / warn / fail rows counted, with each row's change since the previous run.
+    No score: a number out of 10 from these counts didn't follow the owner's ratings
+    (Spearman -0.03 over the rated songs), and the model reported it as quality."""
     if not rows:
-        return {"score": None, "checks": []}
-    points = sum(1.0 if r["status"] == "pass" else 0.5 if r["status"] == "warn" else 0.0 for r in rows)
-    score = round(10 * points / len(rows), 1)
-    out = {"score": score, "passed": sum(r["status"] == "pass" for r in rows),
+        return {"checks": []}
+    out = {"passed": sum(r["status"] == "pass" for r in rows),
            "warnings": sum(r["status"] == "warn" for r in rows), "failed": sum(r["status"] == "fail" for r in rows),
            "checks": rows}
     if previous:
-        out["previous_score"] = previous.get("score")
-        if previous.get("score") is not None:
-            out["score_change"] = round(score - previous["score"], 1)
         before = dict(zip(_keys(previous.get("checks", [])), previous.get("checks", [])))
         for r, key in zip(rows, _keys(rows)):
             p = before.get(key)
