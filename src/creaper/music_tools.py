@@ -1217,6 +1217,8 @@ def _listen(track: str | int, pitches: list[int], channel: int | list[int], note
     project), renders it, measures every note, and removes the item again. With chord,
     a held chord is played after them in the same render and the context gets
     'chord_motion' (does the patch hold it, or play its notes as a pattern)."""
+    import numpy as np
+
     from . import listen
 
     overview = call("get_project_overview")
@@ -1238,11 +1240,21 @@ def _listen(track: str | int, pitches: list[int], channel: int | list[int], note
         call("add_midi_notes", item_id=item["id"], notes=notes, replace=True)
         context = call("get_instrument_notes", item_id=item["id"], channel=channels[0])
         both, fs = _render_track(track, start_bar, start_bar + length_bars, stereo=True)
-        audio = both.mean(axis=1)
     finally:
         call("delete_item", item_id=item["id"])
-    results = []
     slot = int(slot_s * fs)
+    if not both.size:
+        # REAPER wrote a file with no audio in it. Measuring it raised numpy's "zero-size
+        # array to reduction operation maximum" straight at Claude (twice, 2026-11-02).
+        raise ValueError("REAPER rendered no audio for the test notes (an empty file), so there was nothing to "
+                         "listen to. Nothing was changed. Try once more; if it's empty again, check that the "
+                         "track isn't frozen or offline and that its instrument's window isn't waiting for an answer")
+    if len(both) < slot * slots:
+        # A render that stops early (REAPER trims one that runs past what it holds): the
+        # notes it didn't reach read as silent, instead of slices too short to measure.
+        both = np.concatenate([both, np.zeros((slot * slots - len(both), both.shape[1]), dtype=both.dtype)])
+    audio = both.mean(axis=1)
+    results = []
     for i, p in enumerate(pitches):
         f = listen.features(audio[i * slot: (i + 1) * slot], fs, note_off=None if one_shots else note_seconds,
                             expected_hz=None if one_shots else listen.note_freq(p))

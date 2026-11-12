@@ -5,6 +5,7 @@ from __future__ import annotations
 import atexit
 import copy
 import functools
+import hashlib
 import json
 import math
 import os
@@ -19,7 +20,7 @@ from typing import Annotated, Any, Literal
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
 
-from . import analysis, composer, harmony, plugin_profiles, styles, theory
+from . import analysis, composer, convstate, harmony, plugin_profiles, styles, theory, timing
 from . import feel as perform  # `feel` is also a tool argument
 from .bridge import Bridge, BridgeError
 from .knowledge import MAX_NOTE_CHARS, Knowledge, recent, staleness
@@ -229,6 +230,7 @@ before deleting things or making large changes they didn't ask for.
 
 mcp = MCPServer("creaper", instructions=INSTRUCTIONS)
 bridge = Bridge()
+bridge.observer = timing.bridge_call   # every bridge command gets a line in the timing log
 drum_maps = DrumMaps(bridge.directory / "drum_maps.json")
 sound_library = SoundLibrary(bridge.directory / "sounds")
 knowledge = Knowledge(bridge.directory / "knowledge.json")
@@ -247,10 +249,23 @@ def tool(annotations: ToolAnnotations | None = None):
     def decorator(fn):
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
+            record = timing.begin(fn.__name__)   # a line in the timing log, whatever happens
             try:
                 result = fn(*args, **kwargs)
+            except Unanswered as e:
+                # Nobody was at the panel. Not an error: the step is skipped and said so, and
+                # the model carries on with what doesn't depend on it.
+                timing.finish(record, False, e, skipped=True)
+                if fn.__annotations__.get("return") in (dict, "dict"):
+                    return {"skipped": "nobody answered", "not_done": e.action, "message": str(e)}
+                raise ToolError(str(e)) from e
             except (BridgeError, ValueError) as e:
+                timing.finish(record, False, e)
                 raise ToolError(str(e) + _pending_notices(" ")) from e
+            except BaseException as e:
+                timing.finish(record, False, f"{type(e).__name__}: {e}")
+                raise
+            timing.finish(record, True)
             if _notices and isinstance(result, dict):
                 result = {**result, "notice": _pending_notices().strip()}
             return result
@@ -283,9 +298,16 @@ _notice_lock = threading.Lock()  # tools run in threads, several at once
 def notice(text: str) -> None:
     """Something the user should hear once a session; it rides on the next tool result as 'notice'."""
     with _notice_lock:
-        if text not in _noticed:
-            _noticed.add(text)
-            _notices.append(text)
+        if text in _noticed:
+            return
+        _noticed.add(text)
+        # In the panel every message starts a new server: what this conversation has
+        # heard already is on disk, so it isn't said again on the next message.
+        key = hashlib.sha1(text.encode("utf-8")).hexdigest()[:16]
+        if convstate.value("noticed", key) is not None:
+            return
+        convstate.put("noticed", key)
+        _notices.append(text)
 
 
 def _pending_notices(prefix: str = "") -> str:
@@ -335,8 +357,10 @@ def call(cmd: str, timeout: float = 30.0, **params: Any) -> Any:
         if state is not None:
             hit = _render_cache.lookup(cmd, params, state)
             if hit is not None:
+                timing.cache_hit()
                 return hit
         epoch = _render_cache.epoch
+        timing.render_starting()   # counted for the timing log, and said in the panel
     result = bridge.call(cmd, params, timeout=timeout)
     if cmd in RENDERS and time.time() - _media_tried[0] > MEDIA_RETRY_S and _all_silent(result):
         _media_tried[0] = time.time()
@@ -349,13 +373,41 @@ def call(cmd: str, timeout: float = 30.0, **params: Any) -> Any:
         if state is not None:
             state = _render_cache.state()   # the action moved the count: the second render is of this state
         epoch = _render_cache.epoch
+        timing.render_starting()
         result = bridge.call(cmd, params, timeout=timeout)
     if cmd in RENDERS:
         if state is not None:
             _render_cache.store(cmd, params, result, state, epoch)
     elif cmd not in READ_ONLY_COMMANDS:
         _render_cache.changed()
+    if cmd in TRACK_MAKERS:
+        _remember_made(result)
     return result
+
+
+# Tracks creaper made in this conversation, by GUID. Deleting one of them takes back
+# creaper's own work (and is undoable), so it isn't worth a question: a song once sat 30
+# minutes on "delete track?" for a track creaper had made a few minutes before.
+TRACK_MAKERS = frozenset({"create_track", "create_bus", "create_folder"})
+_made_tracks: set[str] = set()
+
+
+def _remember_made(result: Any) -> None:
+    if not isinstance(result, dict):
+        return
+    for part in result.values():
+        guid = part.get("guid") if isinstance(part, dict) else None
+        if isinstance(guid, str) and guid:
+            _made_tracks.add(guid)
+            convstate.put("tracks", guid)
+
+
+def made_here(guid: Any) -> bool:
+    """Whether creaper created this track in this conversation (outside the panel: in
+    this server's lifetime)."""
+    if not isinstance(guid, str) or not guid:
+        return False
+    return guid in _made_tracks or convstate.value("tracks", guid) is not None
 
 
 def _render_files(result: Any) -> list[str]:
@@ -596,7 +648,57 @@ _render_cache = RenderCache()
 # Set by the REAPER chat panel, which runs Claude without per-tool prompts.
 CONFIRM_FILE_ENV = "CREAPER_CONFIRM_FILE"
 CONFIRM_TIMEOUT = 1800.0  # the user may have stepped away; a refusal after 5 minutes cost whole steps
+# Once a question has gone unanswered that long, nobody is at the panel: the turn's later
+# questions wait this long, not another half hour each, until one is answered again.
+AWAY_TIMEOUT = 120.0
+ALERT_EVERY_S = 300.0     # the sound and the taskbar flash again while a question waits
+QUESTION_SOUND_ENV = "CREAPER_QUESTION_SOUND"   # "0": no sound (the panel's "Sound" tick box)
+QUESTION_ALERT_ENV = "CREAPER_QUESTION_ALERT"   # "0": no sound and no taskbar flash (the tests)
 _confirm_lock = threading.Lock()
+_nobody_there = [False]
+
+
+class Unanswered(ValueError):
+    """A question in the panel that nobody answered in time. The tool wrapper turns it
+    into a "skipped" result, so the rest of the work goes on and the step is reported."""
+
+    def __init__(self, action: str, waited: float) -> None:
+        self.action = action
+        minutes = max(1, round(waited / 60))
+        super().__init__(
+            f"Skipped: nobody answered in the panel within {minutes} minute{'s' if minutes != 1 else ''}, so "
+            f"creaper did not {action}. Nothing was changed by this call. Carry on with whatever doesn't depend "
+            "on it, don't work around it, and tell the user at the end that this step is still to do.")
+
+
+def _alert_user() -> None:
+    """A question is waiting and the user may be in another window or across the room:
+    REAPER's taskbar button flashes until they come back to it, and Windows plays its
+    question sound (unless turned off in the panel). Windows only; elsewhere the panel's
+    own flashing question is the cue."""
+    if os.name != "nt" or os.environ.get(QUESTION_ALERT_ENV, "").strip() == "0":
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class FlashInfo(ctypes.Structure):
+            _fields_ = [("cbSize", wintypes.UINT), ("hwnd", wintypes.HWND), ("dwFlags", wintypes.DWORD),
+                        ("uCount", wintypes.UINT), ("dwTimeout", wintypes.DWORD)]
+
+        user32 = ctypes.windll.user32
+        user32.FindWindowW.restype = wintypes.HWND
+        user32.FindWindowW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR]
+        hwnd = user32.FindWindowW("REAPERwnd", None)
+        if hwnd:
+            info = FlashInfo(ctypes.sizeof(FlashInfo), hwnd, 0x2 | 0xC, 0, 0)   # the taskbar button, until it's in front
+            user32.FlashWindowEx(ctypes.byref(info))
+        if os.environ.get(QUESTION_SOUND_ENV, "").strip() != "0":
+            import winsound
+
+            winsound.MessageBeep(winsound.MB_ICONQUESTION)
+    except Exception:  # noqa: BLE001 - a cue, never a reason to fail
+        pass
 
 
 # Outside the panel creaper has no way to ask. Things that can't be taken back are then
@@ -642,19 +744,26 @@ def confirm_with_user(action: str, irreversible: bool = False) -> None:
         tmp = request.with_suffix(".tmp")
         tmp.write_text(json.dumps({"id": confirm_id, "action": action}), encoding="utf-8")
         os.replace(tmp, request)
-        deadline = time.monotonic() + CONFIRM_TIMEOUT
+        wait = AWAY_TIMEOUT if _nobody_there[0] else CONFIRM_TIMEOUT
+        deadline = time.monotonic() + wait
+        next_alert = 0.0
         try:
             while time.monotonic() < deadline:
+                if time.monotonic() >= next_alert:
+                    next_alert = time.monotonic() + ALERT_EVERY_S
+                    _alert_user()
                 try:
                     reply = json.loads(answer.read_text(encoding="utf-8"))
                 except (OSError, ValueError):
                     reply = None
                 if reply and reply.get("id") == confirm_id:
+                    _nobody_there[0] = False
                     if reply.get("allow"):
                         return
                     raise ValueError(f"The user declined to {action}. Don't retry it unless they ask.")
                 time.sleep(0.1)
-            raise ValueError(f"The user didn't confirm in time, so nothing was done (wanted to {action}).")
+            _nobody_there[0] = True
+            raise Unanswered(action, wait)
         finally:
             request.unlink(missing_ok=True)
             answer.unlink(missing_ok=True)
@@ -854,10 +963,11 @@ def set_track_properties(
 @tool(annotations=DESTRUCTIVE)
 def delete_track(track: Annotated[str | int, Field(description="Track number, or its exact name")]) -> dict:
     """Deletes a track and everything on it (undoable). Asks the user first in the chat
-    panel, unless the track is empty (no items, no effects)."""
+    panel, unless the track is empty (no items, no effects) or creaper made it in this
+    conversation."""
     info = call("describe_track", track=track)
     fx = f", FX: {', '.join(info['fx'])}" if info.get("fx") else ""
-    if info.get("item_count", 0) or info.get("fx"):
+    if (info.get("item_count", 0) or info.get("fx")) and not made_here(info.get("guid")):
         # An empty track holds nothing to lose: asking stalled a song for 30 minutes per track.
         confirm_with_user(f"delete track {info['number']} \"{info['name']}\" ({info.get('item_count', 0)} items{fx})")
     # By GUID: tracks can be added or moved while the user decides, and deleting by

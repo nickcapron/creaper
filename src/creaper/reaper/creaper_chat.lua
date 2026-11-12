@@ -128,6 +128,7 @@ local function answer_path(confirm_path) return (confirm_path:gsub("%.json$", ".
 
 local function cleanup_turn(t)
   for _, path in ipairs({ t.request, t.events, t.cancel }) do os.remove(path) end
+  if t.status then os.remove(t.status) end
   if t.confirm then
     os.remove(t.confirm)
     os.remove(answer_path(t.confirm))
@@ -145,16 +146,27 @@ local function start_turn(prompt)
     events = join(CHAT_DIR, "turn_" .. id .. ".jsonl"),
     cancel = join(CHAT_DIR, "turn_" .. id .. ".cancel"),
     confirm = join(CHAT_DIR, "turn_" .. id .. ".confirm.json"),
+    status = join(CHAT_DIR, "turn_" .. id .. ".status.json"),
     offset = 0,
     started = os.time(),
     got_event = false,
   }
+  -- Every message starts a new Claude and a new creaper server. This id names the
+  -- conversation to them, so what the user allowed earlier in it isn't asked again.
+  -- The panel makes it: Claude's own id (session_id) only exists after the first reply.
+  if not state.conversation then
+    state.conversation = string.format("%08x-%04x-%04x-%04x", os.time(), math.random(0, 0xFFFF),
+      math.random(0, 0xFFFF), math.random(0, 0xFFFF))
+  end
   local written = write_file(t.request, json.encode({
     prompt = prompt,
     session_id = state.session_id,
+    conversation = state.conversation,
     events = t.events,
     cancel = t.cancel,
     confirm = t.confirm,
+    status = t.status,
+    question_sound = not state.quiet_questions,
     resource_path = reaper.GetResourcePath(),
     claude = config.claude,
     model = config.model,
@@ -257,6 +269,7 @@ local function poll_turn()
     os.remove(turn.request)
     os.remove(turn.events)
     if turn.confirm then os.remove(turn.confirm) end
+    if turn.status then os.remove(turn.status) end
     turn = nil
     save_state()
   end
@@ -264,6 +277,25 @@ end
 
 local function stop_turn()
   if turn then write_file(turn.cancel, "stop") end
+end
+
+-- Where a long tool is ("auto_mix: compressors, render 9 of about 14"): the server
+-- writes the line to the turn's status file before each render, and takes it away when
+-- the tool is done. Read a few times a second; a file caught mid-write keeps the last line.
+local progress = { text = nil, read_at = 0, path = nil }
+
+local function turn_progress()
+  if not turn or not turn.status then return nil end
+  if progress.path ~= turn.status then progress.path, progress.text, progress.read_at = turn.status, nil, 0 end
+  local now = reaper.time_precise()
+  if now - progress.read_at >= 0.2 then
+    progress.read_at = now
+    local status = read_json(turn.status)
+    if type(status) == "table" and type(status.text) == "string" then
+      progress.text = status.text ~= "" and status.text or nil
+    end
+  end
+  return progress.text
 end
 
 -- A risky tool (running an arbitrary action, deleting a track) waiting for the user.
@@ -283,6 +315,7 @@ end
 local function new_chat()
   if turn then return end
   state.session_id = nil
+  state.conversation = nil -- a new conversation: what was allowed in the last one is asked again
   state.messages = {}
   save_state()
 end
@@ -490,15 +523,39 @@ local function draw_messages(ctx)
   end
   local confirmation = pending_confirmation()
   if confirmation then
+    -- Work stops until this is answered, and the user may be looking elsewhere: the
+    -- question flashes (a frame around it, its heading and the Allow button), and the
+    -- server flashes REAPER's taskbar button and plays a sound when it asks.
+    local beat = 0.5 + 0.5 * math.sin(reaper.time_precise() * 6)
     ImGui.Spacing(ctx)
+    ImGui.BeginGroup(ctx)
+    ImGui.TextColored(ctx, rgba(mix(PINK, { 255, 255, 255 }, beat)), "QUESTION WAITING")
     wrapped(ctx, COLOR.info, "Claude wants to " .. confirmation.action .. ". Allow it?")
-    if ImGui.Button(ctx, "Allow") then answer_confirmation(confirmation, true) end
+    ImGui.PushStyleColor(ctx, ImGui.Col_Button, rgba(mix(VIOLET, PINK, beat), 0.9))
+    local allow = ImGui.Button(ctx, "Allow")
+    ImGui.PopStyleColor(ctx)
     ImGui.SameLine(ctx)
-    if ImGui.Button(ctx, "Deny") then answer_confirmation(confirmation, false) end
+    local deny = ImGui.Button(ctx, "Deny")
+    ImGui.SameLine(ctx, 0, 18)
+    local changed, sound = ImGui.Checkbox(ctx, "Sound", not state.quiet_questions)
+    if changed then
+      state.quiet_questions = not sound
+      save_state()
+    end
+    if ImGui.IsItemHovered(ctx) then
+      ImGui.SetTooltip(ctx, "Play a sound when a question is waiting (from the next message on)")
+    end
+    ImGui.EndGroup(ctx)
+    local x0, y0 = ImGui.GetItemRectMin(ctx)
+    local x1, y1 = ImGui.GetItemRectMax(ctx)
+    ImGui.DrawList_AddRect(ImGui.GetWindowDrawList(ctx), x0 - 4, y0 - 3, x1 + 4, y1 + 3,
+      rgba(PINK, 0.25 + 0.75 * beat), 5, 0, 2)
+    if allow then answer_confirmation(confirmation, true) elseif deny then answer_confirmation(confirmation, false) end
     scroll_to_bottom = true
   elseif turn then
     local dots = string.rep(".", math.floor(reaper.time_precise() * 2) % 4)
-    wrapped(ctx, COLOR.muted, "Claude is working" .. dots)
+    local where = turn_progress()
+    wrapped(ctx, COLOR.muted, where and (where .. dots) or ("Claude is working" .. dots))
   end
 end
 

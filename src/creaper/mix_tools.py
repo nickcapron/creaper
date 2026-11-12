@@ -18,7 +18,7 @@ from typing import Annotated, Literal
 import numpy as np
 from pydantic import Field
 
-from . import analysis, genres, plugin_profiles
+from . import analysis, genres, plugin_profiles, timing
 from .server import DESTRUCTIVE, Bar, analyze_audio, call, drop_renders, setup_sidechain, tool
 
 # Loudness of each role while it plays (max short-term LUFS), relative to the drums. The
@@ -1481,6 +1481,7 @@ def auto_mix(
                          f"(the tracks: "
                          f"{', '.join(c['name'] for c in channels)})")
     ADDED_COMPRESSORS.clear()
+    timing.stage("measuring every track")   # the panel shows where a long mix is, stage by stage
     stems = call("render_stems", timeout=900.0, tracks=[c["track"] for c in channels],
                  start_bar=start_bar, end_bar=end_bar)
     by_track = {s["track"]["number"]: s["file"] for s in stems.get("stems", [])}
@@ -1650,6 +1651,7 @@ def _mix_stages(report: dict, plan: dict, channels: list[dict], profile: dict | 
     # Before the sidechain: the soft clipper's boost changes the kick's level into the
     # sidechain send, which is calibrated next.
     if dynamics:
+        timing.stage("compressors")
         try:
             shaped = _shape_dynamics(channels, plan["channels"], (profile or {}).get("family"), start_bar, end_bar)
             if shaped:
@@ -1657,6 +1659,7 @@ def _mix_stages(report: dict, plan: dict, channels: list[dict], profile: dict | 
         except Exception as e:  # noqa: BLE001
             report.setdefault("warnings", []).append(f"dynamics: {e}")
     if sidechain:
+        timing.stage("sidechain")
         for d in plan["sidechains"]:
             try:
                 done_sc = setup_sidechain(source=d.get("source_ref", d["source"]), target=d.get("target_ref", d["target"]),
@@ -1669,6 +1672,7 @@ def _mix_stages(report: dict, plan: dict, channels: list[dict], profile: dict | 
     # Headroom: move every fader together so the mix peaks around -6 dBFS. No master
     # effects yet and post-fader sends, so the mix moves by exactly the shift: no second
     # render to confirm it.
+    timing.stage("headroom")
     master = analyze_audio(track="master", start_bar=start_bar, end_bar=end_bar)
     peak = master.get("levels", {}).get("sample_peak_dbfs")
     if peak is not None and abs(peak - HEADROOM_PEAK_DB) > 1.0:
@@ -1683,6 +1687,7 @@ def _mix_stages(report: dict, plan: dict, channels: list[dict], profile: dict | 
     if glue:
         # The drums compressed together as a kit. After the headroom move: the drum bus
         # is fed after the drum faders, so moving them later would undo the calibration.
+        timing.stage("drum bus")
         try:
             drum_glue = _glue_drums(channels, start_bar, end_bar, spans.get("_drums"))
             if drum_glue:
@@ -1698,6 +1703,7 @@ def _mix_stages(report: dict, plan: dict, channels: list[dict], profile: dict | 
                         report.setdefault("warnings", []).append(f"drum parallel compression: {e}")
         except Exception as e:  # noqa: BLE001
             report.setdefault("warnings", []).append(f"drum bus: {e}")
+        timing.stage("mix bus")
         try:
             mix_glue = _mix_bus_glue(start_bar, end_bar, spans.get("_mix"))
             if mix_glue:
@@ -1723,6 +1729,7 @@ def _mix_stages(report: dict, plan: dict, channels: list[dict], profile: dict | 
         report["drum_glue"].pop("_track", None)
     if room:
         report["drum_room"] = room
+    timing.stage("balance")
     try:
         balance = _rebalance(channels, plan, start_bar, end_bar)
         if balance:
@@ -1731,6 +1738,7 @@ def _mix_stages(report: dict, plan: dict, channels: list[dict], profile: dict | 
     except Exception as e:  # noqa: BLE001
         report.setdefault("warnings", []).append(f"balance check: {e}")
     if section_moves:
+        timing.stage("section moves")
         try:
             moves = _section_moves(start_bar, end_bar)
             if moves:
@@ -1738,12 +1746,14 @@ def _mix_stages(report: dict, plan: dict, channels: list[dict], profile: dict | 
                 changed = True
         except Exception as e:  # noqa: BLE001
             report.setdefault("warnings", []).append(f"section moves: {e}")
+    timing.stage("vocal clarity")
     vocal_fixes = _clear_robot_vocals(plan["channels"], start_bar, end_bar, spans.get("_mix"))
     if vocal_fixes:
         report["vocal_clarity"] = vocal_fixes
         if any(k in v for v in vocal_fixes for k in ("raised_db", "ducked_under_vocal", "drier_sends_db")):
             changed = True
     if changed or "headroom_shift_db" in report or dynamics or sidechain:
+        timing.stage("the finished mix")
         master = analyze_audio(track="master", start_bar=start_bar, end_bar=end_bar)   # the mix as it now stands
     peak = master.get("levels", {}).get("sample_peak_dbfs")
     lufs = master.get("loudness", {}).get("integrated_lufs")

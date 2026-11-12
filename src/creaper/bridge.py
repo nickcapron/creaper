@@ -116,6 +116,9 @@ class Bridge:
     def __init__(self, directory: Path | None = None) -> None:
         self.directory = Path(directory) if directory else default_bridge_dir()
         self._lock = threading.Lock()
+        # Told about every command once it's answered or has failed: (cmd, seconds, ok).
+        # The server's timing log listens here, so no bridge call goes unrecorded.
+        self.observer: Callable[[str, float, bool], None] | None = None
 
     @property
     def request_path(self) -> Path:
@@ -175,6 +178,20 @@ class Bridge:
         """Runs a bridge command. While REAPER waits for the user to answer its
         end-of-recording prompt, keeps waiting (up to STOP_PROMPT_WAIT) instead of
         timing out, calling on_user_wait when that starts."""
+        started, ok = time.monotonic(), False
+        try:
+            result = self._call(cmd, params, timeout, on_user_wait)
+            ok = True
+            return result
+        finally:
+            if self.observer is not None:
+                try:
+                    self.observer(cmd, time.monotonic() - started, ok)
+                except Exception:  # noqa: BLE001 - a log line is never worth a failed command
+                    pass
+
+    def _call(self, cmd: str, params: dict[str, Any] | None, timeout: float,
+              on_user_wait: Callable[[], None] | None) -> Any:
         params = {k: v for k, v in (params or {}).items() if v is not None}
         if self.stop_prompt_open():
             if on_user_wait:

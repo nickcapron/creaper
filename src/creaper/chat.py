@@ -389,6 +389,24 @@ def run_turn(request_path: Path) -> int:
     return 0 if ok else 1
 
 
+def conversation_env(request: dict) -> dict[str, str]:
+    """What the server needs to know about the panel conversation it works for. Every
+    message starts a new server, so what must outlast one (the user's answers to standing
+    questions, the tracks creaper made) is kept on disk under the conversation's id. The
+    panel makes that id itself: Claude's own session id only exists after the first
+    reply (a panel script from before this sends none: then Claude's id serves from the
+    second message on)."""
+    env: dict[str, str] = {}
+    conversation = request.get("conversation") or request.get("session_id")
+    if isinstance(conversation, str) and _SESSION_ID.match(conversation):
+        env["CREAPER_CONVERSATION"] = conversation
+    if request.get("status"):
+        env["CREAPER_STATUS_FILE"] = str(request["status"])   # long tools say where they are; the panel shows it
+    if request.get("question_sound") is False:
+        env["CREAPER_QUESTION_SOUND"] = "0"                    # the user unticked the question sound
+    return env
+
+
 def _turn(request: dict, workdir: Path, cancel_path: Path | None, emit: Callable[..., None]) -> tuple[bool, bool]:
     claude = find_claude(request.get("claude"))
     if not claude:
@@ -405,6 +423,7 @@ def _turn(request: dict, workdir: Path, cancel_path: Path | None, emit: Callable
         env["CREAPER_REAPER_RESOURCE_PATH"] = request["resource_path"]
     if request.get("confirm"):
         env["CREAPER_CONFIRM_FILE"] = request["confirm"]  # risky tools ask in the panel
+    env.update(conversation_env(request))
     # A whole-song mix or master renders for many minutes without a word to Claude Code,
     # which gives up on a silent tool after 30 minutes by default: allow three hours.
     server: dict[str, Any] = {"command": str(python), "args": ["-I", "-m", "creaper"], "env": env,
