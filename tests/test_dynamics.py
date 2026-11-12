@@ -208,8 +208,8 @@ def test_dynamics_stage_compresses_peaky_parts_and_clips_drums(monkeypatch):
     done = mix_tools._shape_dynamics(channels, actions, "electronic dance", None, None)
     assert [d["track"] for d in done] == ["Drums", "Pad", "Guitar"]
     drums = done[0]
-    # Pre-fader peak -6 (-9 at a -3 fader): a 8.5 dB boost puts it 2.5 over the knee; the fader takes it back.
-    assert drums["soft_clip"] == {"boost_db": 8.5, "peaks_rounded_db": 2.5, "fader_db": -11.5}
+    # Pre-fader peak -6 (-9 at a -3 fader): a 3.7 dB boost has the clipper take 1 dB off it (its knee is at -9); the fader takes it back.
+    assert drums["soft_clip"] == {"boost_db": 3.7, "peaks_rounded_db": 1.0, "fader_db": -6.7}
     assert drums["compressor"]["ratio"] == 4 and done[1]["compressor"]["ratio"] == 2
     assert "soft_clip" not in done[1]
 
@@ -330,7 +330,7 @@ def test_a_kit_already_over_the_knee_is_still_rounded():
         out = mix_tools._soft_clip("Drums", None, None, peak=-9.1)
     finally:
         mix_tools.call = saved
-    assert out == {"boost_db": 0.0, "peaks_rounded_db": 2.3, "fader_db": -11.4}
+    assert out == {"boost_db": 0.0, "peaks_rounded_db": 3.0, "fader_db": -11.4}
     assert [c for c, _ in calls if c == "add_fx"] and not [c for c, _ in calls if c == "set_track_properties"]
     assert {c["parameter"]: c["display_value"] for c in next(kw for c, kw in calls if c == "set_fx_parameters")["changes"]}["Boost (dB)"] == 0.0
 
@@ -342,3 +342,81 @@ def test_mastering_a_range_forgets_the_whole_song_check_from_before(monkeypatch)
     monkeypatch.setattr(server, "_master_check", {"lufs": -21.7, "seconds": 224.9})
     server.master_to_target(style="pop", start_bar=85, end_bar=101, glue=False, force=True)
     assert server.master_mismatch({"loudness": {"integrated_lufs": -12.3}, "duration_seconds": 226.9}, 2.0) is None
+
+
+def test_the_drum_clipper_shaves_what_it_says_by_the_real_knee():
+    """The clipper's knee is 9 dB under its brickwall: the old calibration pushed kit
+    peaks 2.5 dB over 0 dBFS, 3.1 dB shaved at about 10 % distortion ("crunchy")."""
+    from creaper import batch, mix_tools
+    level = batch.soft_clip_level_for_shave(mix_tools.DRUM_SHAVE_DB)
+    assert abs(batch.soft_clip_shave_db(level) - mix_tools.DRUM_SHAVE_DB) < 1e-6
+    x = np.array([10 ** (level / 20)])
+    shaved = level - 20 * np.log10(abs(batch.soft_clip(x, 0.0)[0]))
+    assert abs(shaved - mix_tools.DRUM_SHAVE_DB) < 0.01
+    assert batch.soft_clip_shave_db(2.5) > 3.0     # what the old setting really did
+
+
+def test_a_kit_that_already_runs_through_a_clipper_gets_no_glue_on_top(monkeypatch):
+    """11-03: a template kit with a clipper and saturation got a second bus compressor and
+    a parallel bus, then the master's clipper: "too crunchy and overpowering"."""
+    from creaper import mix_tools
+    calls = []
+    monkeypatch.setattr(mix_tools, "call", lambda cmd, **kw: calls.append(cmd) or {})
+    drums = [{"name": "Kick", "ref": "K", "role": "kick", "level": -18, "driven": True},
+             {"name": "Snare", "ref": "S", "role": "snare", "level": -20, "driven": True}]
+    out = mix_tools._glue_drums(drums, None, None)
+    assert "already runs through a clipper" in out["skipped"] and not calls
+    # One undriven drum (Strike Unit's kind: a compressor, no clipper): glued as before.
+    drums[1]["driven"] = False
+    monkeypatch.setattr(mix_tools, "call", lambda cmd, **kw: calls.append(cmd) or {"tracks": []})
+    with pytest.raises(KeyError):   # the fake has no bus to make: it got past the skip
+        mix_tools._glue_drums(drums, None, None)
+    assert "get_project_overview" in calls and "create_bus" in calls
+
+
+def test_an_inherited_clipper_is_set_for_this_song(monkeypatch):
+    from creaper import mix_tools
+    state = {"boost": 6.1, "fader": -9.0}
+    sets = []
+
+    def fake_call(cmd, **kw):
+        if cmd == "get_track_details":
+            return {"volume_db": state["fader"], "fx": [{"index": 0, "name": "ReaComp"},
+                                                         {"index": 1, "name": "JS: Soft Clipper/Limiter"}]}
+        if cmd == "get_fx_parameters":
+            return {"parameters": [{"name": "Boost (dB)", "display": f"{state['boost']}"}]}
+        if cmd == "set_fx_parameters":
+            sets.append(kw["changes"])
+            for c in kw["changes"]:
+                if c["parameter"] == "Boost (dB)":
+                    state["boost"] = c["display_value"]
+        if cmd == "set_track_properties":
+            state["fader"] = kw["volume_db"]
+        return {}
+
+    monkeypatch.setattr(mix_tools, "call", fake_call)
+    monkeypatch.setattr(server, "analyze_audio", lambda **kw: {"levels": {"sample_peak_dbfs": -9.0}})
+    out = mix_tools._recalibrate_clipper({"name": "Kick", "ref": "K"}, None, None)
+    clip = out["existing_clipper"]
+    assert clip["was_boost_db"] == 6.1 and clip["peaks_rounded_db"] == 1.0
+    # Undone first (fader up by the old boost), then set for this song's peaks.
+    assert sets[0] == [{"parameter": "Boost (dB)", "display_value": 0}]
+    assert state["boost"] == clip["boost_db"] and clip["fader_db"] == round(-9.0 + 6.1 - clip["boost_db"], 1)
+
+
+def test_parallel_compression_threshold_follows_the_signal(monkeypatch):
+    sets = []
+
+    def fake_call(cmd, **kw):
+        if cmd == "describe_track":
+            return {"name": "Drum Bus", "number": 4}
+        if cmd == "create_bus":
+            return {"bus": {"number": 9}}
+        if cmd == "set_fx_parameters":
+            sets.append({c["parameter"]: c["display_value"] for c in kw["changes"]})
+        return {}
+
+    monkeypatch.setattr(server, "call", fake_call)
+    monkeypatch.setattr(server, "analyze_audio", lambda **kw: {"levels": {"sample_peak_dbfs": -7.5}})
+    out = server.add_parallel_compression(track="Drum Bus")
+    assert sets[0]["Threshold"] == -19.5 and out["blend_db"] == -14

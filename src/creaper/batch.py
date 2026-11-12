@@ -617,6 +617,24 @@ def soft_clip(audio: np.ndarray, boost_db: float, brickwall_db: float = 0.0) -> 
     return np.exp(out / SOFT_CLIP_AMP) * np.sign(x)
 
 
+def soft_clip_shave_db(level_db: float, brickwall_db: float = 0.0) -> float:
+    """How far soft_clip brings down a sample at level_db (its level after Boost)."""
+    knee = SOFT_CLIP_KNEE_DB + brickwall_db
+    over = level_db - knee
+    if over <= 0:
+        return 0.0
+    return level_db - min(knee + SOFT_CLIP_A * over + SOFT_CLIP_B * over * over, brickwall_db)
+
+
+def soft_clip_level_for_shave(shave_db: float, brickwall_db: float = 0.0) -> float:
+    """The level (after Boost) at which soft_clip takes shave_db off a sample: the inverse
+    of soft_clip_shave_db below the brickwall. The bend is a*x + b*x^2, so the shave over
+    the knee is (1 - a)*x - b*x^2."""
+    a, b = 1.0 - SOFT_CLIP_A, -SOFT_CLIP_B
+    over = (-a + (a * a + 4 * b * shave_db) ** 0.5) / (2 * b)
+    return SOFT_CLIP_KNEE_DB + brickwall_db + over
+
+
 def plan_master_clip(audio: np.ndarray, fs: int, target_lufs: float, ceiling_db: float, cap_db: float,
                      fader_db: float = 0.0, max_over_db: float = MASTER_CLIP_OVER_DB) -> dict | None:
     """When the limiter alone (its gain reduction capped at cap_db) can't reach

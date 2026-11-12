@@ -97,8 +97,9 @@ PROFILES: tuple[Profile, ...] = (
     ),
     Profile(
         "Soft Clipper/Limiter", "clipper",
-        "REAPER's JS soft clipper: Boost drives the signal into a soft knee at 0 dBFS that rounds the "
-        "peaks over it; Output Brickwall caps the result. Turn the track down by the boost to keep its "
+        "REAPER's JS soft clipper: Boost drives the signal into a soft knee that starts 9 dB under "
+        "Output Brickwall and bends harder the further it goes; the brickwall caps the result. Each dB "
+        "pushed past the knee distorts: push the peaks only a few dB into it. Turn the track down by the boost to keep its "
         "loudness: only the peaks change.",
         controls={"drive": "Boost (dB)", "ceiling": "Output Brickwall (dB)"},
     ),

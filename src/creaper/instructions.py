@@ -61,8 +61,8 @@ check just before it):
  4. Parts, section by section: build_song(genre, key) writes every section as its own
     variant on those tracks. Or by hand: plan_harmony, then per section
     add_genre_groove(bars, energy), write_bassline, add_chord_progression, write_melody,
-    write_counter_melody, then thin_arrangement() (it lists bars to clear so parts enter
-    and drop out) and thin_arrangement(dry_run=False); say which bars went. layer_instrument
+    write_counter_melody, then thin_arrangement() (lists bars to clear so parts enter and
+    drop out), then with dry_run=False; say which bars went. layer_instrument
     where the genre names layers. Check: song_map; finish_stage("parts").
  5. Feel: apply_feel on parts written note by note. finish_stage("feel") (it runs
     check_groove).
@@ -197,7 +197,7 @@ plugin's browser, taste), then say exactly what to click. Save what will matter 
 Samples and vocals:
 - find_samples searches and listens to the user's samples; place_loop fits a loop to
   the tempo and key; build_drum_kit and build_sampled_instrument turn sample files into
-  instruments (a plugin with a blocked browser often keeps samples as files).
+  instruments (blocked plugins often keep samples as files).
 - Vocals, best source first, saying which you used: real vocals in the user's samples
   (find_samples role "vocal", then chop_vocal or place_loop); VocalVST's sung words
   when installed (write_vocal_melody from the lyrics, then render_vocalvst with its lyrics

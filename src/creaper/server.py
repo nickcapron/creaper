@@ -1860,23 +1860,31 @@ def create_bus(
 @tool()
 def add_parallel_compression(
     track: TrackRef,
-    blend_db: Annotated[float, Field(le=0, description="Level of the crushed copy under the original")] = -10,
+    blend_db: Annotated[float, Field(le=0, description="Level of the crushed copy under the original")] = -14,
     compressor: Annotated[str | None, Field(description="Default: ReaComp, set up to squash hard")] = None,
+    threshold_db: Annotated[float | None, Field(description="ReaComp's threshold; default about 12 dB under the "
+                                                            "track's measured peak")] = None,
 ) -> dict:
     """Sets up New York-style parallel compression on a track in one call: a new bus
     with a heavily compressed copy of the track, blended underneath the untouched
     original (adds punch and density without squashing the transients). For plain
     compression add a compressor with add_fx instead. Returns the bus and its level."""
     info = call("describe_track", track=track)
+    if threshold_db is None and not compressor:
+        # From the signal, not a fixed -30 dBFS: with that, how hard it squashed depended
+        # on where the fader happened to be.
+        peak = (analyze_audio(track=track).get("levels") or {}).get("sample_peak_dbfs")
+        threshold_db = round(max(-60.0, peak - 12.0), 1) if peak is not None else -30.0
     bus = call("create_bus", name=f"{info['name']} Parallel", tracks=[info["number"]], keep_main_send=True,
                fx=[compressor or "ReaComp"])
     bus_number = bus["bus"]["number"]
     if not compressor:
         call("set_fx_parameters", track=bus_number, fx=1, changes=[
-            {"parameter": "Threshold", "display_value": -30}, {"parameter": "Ratio", "display_value": 10},
+            {"parameter": "Threshold", "display_value": threshold_db}, {"parameter": "Ratio", "display_value": 10},
             {"parameter": "Attack", "display_value": 1}, {"parameter": "Release", "display_value": 60}])
     call("set_track_properties", track=bus_number, volume_db=blend_db)
     return {"bus": {"number": bus_number, "name": f"{info['name']} Parallel"}, "blend_db": blend_db,
+            **({"threshold_db": threshold_db} if threshold_db is not None else {}),
             "note": "raise the bus fader for more punch, lower it for subtler"}
 
 
@@ -2615,7 +2623,9 @@ def save_note(
     mix lesson. Save lasting lessons only, not one-off details of this song. A fix
     names the sound, style and problem it fixed ("a wide-open saw lead at drum level
     in darksynth was whiney: ..."), never "by default": a one-patch fix saved as
-    "start leads darker by default" made later songs' leads soft. About
+    "start leads darker by default" made later songs' leads soft. A sample or kit that
+    fixed one song names that song's genre, and is read as that genre's: a new jack swing
+    fix ("use the Pearl kicks") put an acoustic kick in a synthwave song. About
     creaper's own tools, save what you saw, not a guess at a limit ("captured 100 of
     209 notes once", not "captures at most 100 notes"): guesses saved as facts steered
     later songs into workarounds long after the tool was fixed."""

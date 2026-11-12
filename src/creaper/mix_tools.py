@@ -57,6 +57,7 @@ VOCAL_HIGHPASS_MIN_HZ = 80   # a singer's rumble and breath noise aren't "lowest
 # so the master's limiter worked on its sub while the hats stayed dull.
 DRUM_SUB_HIGH_PCT, DRUM_SUB_TRIM_DB, DRUM_SUB_HZ = 25.0, -3.0, 60
 DRUM_PRESENCE_LOW_PCT, DRUM_AIR_LOW_PCT, DRUM_TONE_MAX_DB = 6.0, 4.0, 4.0
+DRUM_TONE_CLIPPED_MAX_DB = 2.0   # the lift when the kit goes into the dynamics stage's clipper
 
 
 def tone_lift_db(share_pct: float, low_pct: float) -> float:
@@ -533,6 +534,7 @@ def _channels() -> list[dict]:
         out.append({"name": name, "track": t["number"], "ref": t.get("guid") or t["number"],
                     "pan": t.get("pan", 0), "volume_db": t.get("volume_db", 0),
                     "has_eq": "eq" in fx, "has_comp": "comp" in fx or "limit" in fx,
+                    "has_clipper": "soft clipper" in fx, "driven": bool(re.search(DRIVEN_FX, fx)),
                     "ducked": source is not None or (by_name.get(f"{name} Duck") is not None),
                     "kit": is_kit(t.get("fx", []))})
     return out
@@ -683,6 +685,16 @@ DRUM_GLUE_DB = 1.5           # loud-vs-average drop on the drum bus (its 10 ms a
 DELAY_DB = {"vocal": -26, "lead": -18}   # send levels to the shared delay
 
 
+# FX that already drive a part (clip, saturate, distort): a kit carrying one has had its
+# peaks and its crunch seen to. Stacking a bus compressor, a parallel bus and the master's
+# clipper on top made the 11-03 kit "too crunchy and overpowering".
+DRIVEN_FX = r"clip|satur|distort|tape|tube|overdrive|decapitator|trash"
+# A kit whose peaks stand less than this over its loudness is already dense: a parallel
+# bus only brings its room and hat tails forward. (At -10 dB under a fixed -30 dBFS
+# threshold it was turned down both times drums were called crunchy or overpowering.)
+PARALLEL_MIN_PLR_DB = 10.0
+
+
 def _glue_drums(channels: list[dict], start_bar: float | None, end_bar: float | None,
                 span: tuple[float, float] | None = None) -> dict | None:
     """Puts the drums through one compressor so they hit as a kit, calibrated by
@@ -700,6 +712,10 @@ def _glue_drums(channels: list[dict], start_bar: float | None, end_bar: float | 
              and not c["name"].endswith(" Duck")]
     if not drums:
         return None
+    if all(c.get("driven") for c in drums):
+        names = ", ".join(c["name"] for c in drums)
+        return {"skipped": f"the kit already runs through a clipper or saturator ({names}): no bus compressor or "
+                           "parallel bus on top of it"}
     overview = call("get_project_overview")
     tracks = {t.get("guid"): t for t in overview["tracks"]}
     by_name = {t["name"]: t for t in overview["tracks"]}
@@ -768,11 +784,14 @@ GENTLE_FAMILIES = {"classical", "film and games", "jazz", "blues", "ambient and 
 # Peak-to-loudness (peak minus max short-term LUFS) over which a part is compressed: the
 # number the master's limiter has to deal with. (Crest factor against the whole file's RMS
 # read a steady four-on-the-floor kit with 17 dB of it as under 14.)
-DRUM_PLR_DB, DRUM_COMP_DB, DRUM_SHAVE_DB = 12.0, 2.5, 2.5
+# DRUM_SHAVE_DB: what the soft clipper takes off the kit's peaks. 2.5, with the knee
+# wrongly taken to be at 0 dBFS, really shaved 3.1 dB at about 10 % distortion: the
+# "crunchy" drums of three songs (notes/drums-diagnosis-2026-11-12.md).
+DRUM_PLR_DB, DRUM_COMP_DB, DRUM_SHAVE_DB = 12.0, 2.5, 1.0
 TONAL_PLR_DB, TONAL_COMP_DB = 10.0, 1.5
 # A strummed guitar too: one left out (15 dB peak-to-loudness) stopped a pop master at -13 LUFS.
 TONAL_ROLES = ("keys", "pad", "arp", "lead", "guitar", "other")
-SOFT_CLIPPER = "JS: Soft Clipper/Limiter"   # Boost (dB) into a soft knee that rounds peaks over 0 dBFS
+SOFT_CLIPPER = "JS: Soft Clipper/Limiter"   # Boost (dB) into a soft knee 9 dB under its brickwall
 
 
 def _shape_dynamics(channels: list[dict], actions: list[dict], family: str | None, start_bar: float | None,
@@ -789,6 +808,15 @@ def _shape_dynamics(channels: list[dict], actions: list[dict], family: str | Non
     if family in GENTLE_FAMILIES:
         return [{"skipped": f"{family} keeps its dynamics: no extra compression"}]
     planned = {a["ref"] for a in actions if "compress" in a or a.get("skipped")}
+    recalibrated = []
+    for c in channels:
+        if c.get("has_clipper") and c.get("role") in DRUM_ROLES and c.get("level") is not None:
+            try:
+                r = _recalibrate_clipper(c, start_bar, end_bar)
+            except Exception as e:  # noqa: BLE001
+                r = {"track": c["name"], "error": f"its clipper wasn't recalibrated: {e}"}
+            if r:
+                recalibrated.append(r)
     work = []
     for c in channels:
         if c.get("level") is None or c.get("has_comp") or c["ref"] in planned:
@@ -842,7 +870,7 @@ def _shape_dynamics(channels: list[dict], actions: list[dict], family: str | Non
             w["entry"]["soft_clip"] = _soft_clip(w["c"]["ref"], start_bar, end_bar, peaks.get(w["c"]["ref"]))
         except Exception as e:  # noqa: BLE001
             w["entry"]["error"] = str(e)
-    done = []
+    done = list(recalibrated)
     for w in work:
         if w.get("comp"):
             ADDED_COMPRESSORS.add(str(w["c"]["ref"]))
@@ -872,14 +900,41 @@ def _peaks_now(tracks: list, start_bar: float | None, end_bar: float | None) -> 
     return out
 
 
+def _recalibrate_clipper(c: dict, start_bar: float | None, end_bar: float | None) -> dict | None:
+    """A drum track that came with a soft clipper (a track template's, set for another
+    song: the 11-03 kit's was): its boost undone (the fader back up by it), then set for
+    this song's peaks as the dynamics stage sets its own."""
+    from .server import _number
+
+    fx = call("get_track_details", track=c["ref"]).get("fx", [])
+    clip = next((f for f in fx if "soft clipper" in f.get("name", "").lower()), None)
+    if clip is None:
+        return None
+    params = call("get_fx_parameters", track=c["ref"], fx=clip["index"], search="Boost").get("parameters", [])
+    boost = next((_number(p.get("display", "")) for p in params if p.get("name") == "Boost (dB)"), None)
+    if boost is None:
+        return None
+    if boost:
+        call("set_fx_parameters", track=c["ref"], fx=clip["index"],
+             changes=[{"parameter": "Boost (dB)", "display_value": 0}])
+        fader = call("get_track_details", track=c["ref"]).get("volume_db") or 0.0
+        call("set_track_properties", track=c["ref"], volume_db=round(fader + boost, 1))
+    out = _soft_clip(c["ref"], start_bar, end_bar, index=clip["index"])
+    return {"track": c["name"], "existing_clipper": {"was_boost_db": boost, **out}}
+
+
 # Tracks whose compressor this run's dynamics stage added: the drum glue may reuse it.
 ADDED_COMPRESSORS: set[str] = set()
 
 
-def _soft_clip(track, start_bar: float | None, end_bar: float | None, peak: float | None = None) -> dict:
-    """The soft clipper after the track's compressor, its boost set so the peaks reach
-    DRUM_SHAVE_DB over its knee at 0 dBFS, and the fader down by the same boost. peak:
-    the track's sample peak if it was just measured (else it's rendered here)."""
+def _soft_clip(track, start_bar: float | None, end_bar: float | None, peak: float | None = None,
+               index: int | None = None) -> dict:
+    """The soft clipper after the track's compressor, its boost set so the clipper takes
+    DRUM_SHAVE_DB off the peaks (by batch's model of it: the knee is 9 dB under the
+    brickwall, so peaks pushed over 0 dBFS were bent hard, about 10 % distortion on a
+    kick), and the fader down by the same boost. peak: the track's sample peak if it was
+    just measured (else it's rendered here)."""
+    from . import batch
     from .server import analyze_audio
 
     if peak is None:
@@ -890,20 +945,22 @@ def _soft_clip(track, start_bar: float | None, end_bar: float | None, peak: floa
     if peak is None:
         return {"skipped": "silent in that range"}
     pre_fader_peak = peak - fader
-    boost = round(max(0.0, min(9.0, DRUM_SHAVE_DB - pre_fader_peak)), 1)
-    if pre_fader_peak + boost <= 0.5:
-        return {"skipped": f"its peaks sit {-pre_fader_peak:g} dB under the clipper's knee: too far to round"}
+    target = batch.soft_clip_level_for_shave(DRUM_SHAVE_DB)
+    boost = round(max(0.0, min(batch.SOFT_CLIP_MAX_BOOST_DB, target - pre_fader_peak)), 1)
+    if batch.soft_clip_shave_db(pre_fader_peak + boost) < 0.5:
+        return {"skipped": f"its peaks sit {target - pre_fader_peak:.1f} dB under where the clipper would round "
+                           "them: too far to round"}
     if boost < 0.5:
         # Peaks already over the knee (after the headroom move the faders are down and the
         # pre-fader signal hot): the clipper rounds them with no boost. Skipping here left
         # a 90s pop kit's 18 dB of peaks for the master's limiter to flatten.
         boost = 0.0
-    clip = call("add_fx", track=track, name=SOFT_CLIPPER)
+    clip = {"index": index} if index is not None else call("add_fx", track=track, name=SOFT_CLIPPER)
     call("set_fx_parameters", track=track, fx=clip["index"], changes=[
         {"parameter": "Boost (dB)", "display_value": boost}, {"parameter": "Output Brickwall (dB)", "display_value": 0}])
     if boost:
         call("set_track_properties", track=track, volume_db=round(fader - boost, 1))
-    shaved = round(min(DRUM_SHAVE_DB, pre_fader_peak + boost), 1)
+    shaved = round(batch.soft_clip_shave_db(pre_fader_peak + boost), 1)
     return {"boost_db": boost, "peaks_rounded_db": shaved, "fader_db": round(fader - boost, 1)}
 
 
@@ -1386,6 +1443,16 @@ def auto_mix(
     spans = _loud_spans(channels, envelopes, stems.get("start", {}).get("seconds", 0.0)) \
         if start_bar is None and end_bar is None else {}
     plan = plan_mix(channels, profile)
+    if dynamics and (profile or {}).get("family") not in GENTLE_FAMILIES:
+        # The kit's tone EQ plays into the soft clipper: 4 dB of air ahead of it put the
+        # hats through the waveshaper with the kick (10-29, "crunchy"). Gentle families
+        # skip the clipper and keep the full lift (Holdouts' snare kit had +4).
+        drum_refs = {c["ref"] for c in channels if c.get("role") in DRUM_ROLES}
+        for a in plan["channels"]:
+            if a.get("ref") in drum_refs:
+                for key in ("presence_db", "air_db"):
+                    if (a.get(key) or 0) > DRUM_TONE_CLIPPED_MAX_DB:
+                        a[key] = DRUM_TONE_CLIPPED_MAX_DB
     report = {"style": (profile or {}).get("name"),
               "roles": {c["name"]: c["role"] + ("" if c["name"].lower() in given else " (guessed)") for c in channels},
               "roles_note": ("levels follow the roles: if a guess is wrong (the featured melody not 'lead', an "
@@ -1566,11 +1633,16 @@ def _mix_stages(report: dict, plan: dict, channels: list[dict], profile: dict | 
                 changed = True
                 report["drum_glue"] = drum_glue
                 drum_glue["_track"] = drum_glue.pop("track", None)
-                if dynamics and drum_glue.get("_track") and (profile or {}).get("family") not in GENTLE_FAMILIES:
+                kit_plr = [c["peak_db"] - c["level"] for c in channels if c.get("role") in DRUM_ROLES
+                           and c.get("level") is not None and c.get("peak_db") is not None]
+                if dynamics and drum_glue.get("_track") and kit_plr and max(kit_plr) < PARALLEL_MIN_PLR_DB:
+                    drum_glue["parallel"] = {"skipped": f"the kit's peaks stand only {max(kit_plr):.1f} dB over its "
+                                                        "loudness: already dense, no parallel bus"}
+                elif dynamics and drum_glue.get("_track") and (profile or {}).get("family") not in GENTLE_FAMILIES:
                     from .server import add_parallel_compression
 
                     try:
-                        drum_glue["parallel"] = add_parallel_compression(track=drum_glue["_track"], blend_db=-10)
+                        drum_glue["parallel"] = add_parallel_compression(track=drum_glue["_track"], blend_db=-14)
                     except Exception as e:  # noqa: BLE001
                         report.setdefault("warnings", []).append(f"drum parallel compression: {e}")
         except Exception as e:  # noqa: BLE001

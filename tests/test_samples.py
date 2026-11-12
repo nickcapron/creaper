@@ -290,13 +290,13 @@ def test_drum_fit_scores_against_a_genre_target():
     from creaper import genres
     from creaper.genres import palettes
     house_kick = palettes.palette(genres.find("house")).drums["kick"]
-    good = {"sub_share": 0.9, "decay_s": 0.3, "punch_db": 2}
-    thin = {"sub_share": 0.05, "decay_s": 0.3, "punch_db": 2}
+    good = {"sub_share": 0.9, "decay_s": 0.3, "punch_db": 5}
+    thin = {"sub_share": 0.05, "decay_s": 0.3, "punch_db": 5}
     assert samplelib.drum_fit(good, house_kick) == (0.0, [])
     score, why = samplelib.drum_fit(thin, house_kick)
     assert score > 2 and "sub share" in why[0]
     # A waveform with no tail to read ranked as a perfect kick: now it costs.
-    score, why = samplelib.drum_fit({"sub_share": 0.9, "decay_s": None, "punch_db": 2}, house_kick)
+    score, why = samplelib.drum_fit({"sub_share": 0.9, "decay_s": None, "punch_db": 5}, house_kick)
     assert score == samplelib.UNMEASURED_DECAY_COST and "decay unmeasured" in why[0]
 
 
@@ -561,3 +561,16 @@ def test_kit_levels_balance_the_lanes_and_trim_the_kit(tmp_path):
                                     setup[1:] + [{"lane": "gong", "layer": False, "gain_db": 0.0}])
     assert other["gong"]["target_db"] == sample_tools.OTHER_LANE_DB and "kick" not in other
     assert sample_tools.kit_levels([], []) == {}
+
+
+def test_a_kick_from_a_bass_folder_or_with_no_punch_is_marked_down():
+    """Night Patrol's Linn 'Pitched' kick came from '21. Bass - Sub' and scored as a
+    perfect synthwave kick (punch floor 0); it was rejected in two songs."""
+    from creaper import genres, sample_tools
+    from creaper.genres import palettes
+    kick = palettes.palette(genres.find("synthwave")).drums["kick"]
+    score, why = samplelib.drum_fit({"sub_share": 0.9, "decay_s": 0.3, "punch_db": 0.5}, kick)
+    assert score > 0 and any("punch" in w for w in why)
+    assert sample_tools._other_role_folder(r"D:\Samples\LinnDrum\21. Bass - Sub", "kick") == "bass"
+    assert sample_tools._other_role_folder(r"D:\Samples\LinnDrum\01. Kicks", "kick") is None
+    assert sample_tools._other_role_folder(r"D:\Samples\CMI\Toms", "kick") == "toms"

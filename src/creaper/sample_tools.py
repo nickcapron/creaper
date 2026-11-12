@@ -60,6 +60,29 @@ def sample_folders(
     return out
 
 
+# Folder words that name another drum, for a role search: a "Pitched" Linn kick from
+# "21. Bass - Sub" scored as a perfect kick in two songs and was rejected in both.
+_OTHER_ROLE_WORDS = {
+    "kick": r"\b(bass|sub|808s?|toms?|snares?|claps?|hats?|cymbals?|perc)\b",
+    "snare": r"\b(kicks?|bass|sub|toms?|hats?|cymbals?)\b",
+    "hat": r"\b(kicks?|bass|sub|toms?|snares?|claps?)\b",
+}
+
+
+def _other_role_folder(folder: str, lane: str) -> str | None:
+    """The word in a sample's folder that says it's something other than lane."""
+    import re
+
+    pattern = _OTHER_ROLE_WORDS.get(lane)
+    if not pattern:
+        return None
+    leaf = re.split(r"[\\/]", folder.rstrip("\\/"))[-1].lower()
+    if re.search(rf"\b{lane}s?\b", leaf):
+        return None
+    m = re.search(pattern, leaf)
+    return m.group(0) if m else None
+
+
 @tool(annotations=READ_ONLY)
 def find_samples(
     search: Annotated[str | None, Field(description="Words in the file or folder name, e.g. '808 kick', 'vinyl', 'amen'")] = None,
@@ -102,7 +125,12 @@ def find_samples(
                       for w in ("lo-fi", "lofi", "chiptune", "boom bap", "8-bit", "vaporwave"))
     if target is not None and listen:
         # Rank by fit: listen to a wider pool first (results are remembered).
-        pool = hits[: max(max_results * 3, 30)]
+        # Every hit already listened to, plus the first ones not yet: taking only the first
+        # 30 index hits offered CMI toms as synthwave kicks while better kicks sat further down.
+        wide = max(max_results * 3, 30)
+        cached = [f for f in hits[wide:] if (f.get("analysis") or {}).get("v") == samplelib.ANALYSIS_VERSION]
+        pool = hits[:wide] + cached
+        rest = [f for f in hits[wide:] if (f.get("analysis") or {}).get("v") != samplelib.ANALYSIS_VERSION]
         fresh = {}
         for f in pool:
             if (f.get("analysis") or {}).get("v") != samplelib.ANALYSIS_VERSION:
@@ -120,8 +148,12 @@ def find_samples(
             if f["analysis"].get("lofi") and not lofi_ok:
                 fit += 2.0
                 why = why + ["lo-fi file (8-bit, or recorded under 32 kHz): sounds dated for this style"]
+            other = _other_role_folder(f.get("folder") or "", lane)
+            if other:
+                fit += 3.0
+                why = why + [f"its folder says {other}"]
             f["_fit"], f["_why"] = fit, why
-        hits = sorted(pool, key=lambda f: f["_fit"]) + hits[len(pool):]
+        hits = sorted(pool, key=lambda f: f["_fit"]) + rest
     shown = []
     for f in hits[:max_results]:
         entry = {"path": f["path"], "name": f["name"], "folder": f["folder"], "duration_s": f.get("duration_s"),
@@ -244,7 +276,7 @@ def velocity_bands(n: int) -> list[tuple[int, int]]:
 
 # A kick whose first 10 ms sit under its body: weight with no hit (every kick measures
 # sub-heavy, an acoustic one included, so the sub share can't tell them apart).
-KICK_PUNCH_MIN_DB = 0.0
+KICK_PUNCH_MIN_DB = 3.0   # the Linn "Pitched" kicks (rejected in two songs) measured just over 0
 
 
 PUNCH_LAYER_MIN_DB, PUNCH_LAYER_MAX_DECAY_S, PUNCH_LAYER_GAIN_DB = 3.0, 0.35, -3.0   # a click, not a second boom
