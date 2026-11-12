@@ -998,8 +998,11 @@ def finish_stage(
     left = [s for s in STAGES if not data["stages"].get(s, {}).get("done")]
     static = sorted({r["section"] for r in rows if r["check"] in THIN_SUGGESTS and r["status"] == "warn"
                      and r.get("section")}) if stage == "parts" else []
+    from . import hardware_tools
+    # From the parts stage on, the song is about to be measured and mixed from offline renders.
+    unprinted = hardware_tools.unprinted_warning(call) if stage not in ("form", "sounds") else None
     return {"stage": stage, "done": True, **({"forced_past": [r["check"] for r in fails]} if fails else {}),
-            "checks": rows,
+            "checks": rows, **({"hardware_warning": unprinted} if unprinted else {}),
             **({"suggest": f"thin_arrangement() lists the bars it would clear so parts come in and drop out "
                            f"inside sections ({', '.join(static)} sit{'s' if len(static) == 1 else ''} unchanged); "
                            "thin_arrangement(dry_run=False) clears them. A section with no moving part needs a line "

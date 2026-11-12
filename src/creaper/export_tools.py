@@ -377,6 +377,10 @@ def export_mix(
             out.setdefault("notes", []).append("exported with force=True despite: " + "; ".join(skipped))
     if render.get("warning"):
         out.setdefault("notes", []).append(render["warning"])
+    from . import hardware_tools
+    unprinted = hardware_tools.unprinted_warning(call)   # a hardware part that isn't printed isn't in this file
+    if unprinted:
+        out.setdefault("notes", []).append(unprinted)
     return out
 
 

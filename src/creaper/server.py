@@ -803,7 +803,10 @@ def _with_note_names(notes: list[dict]) -> list[dict]:
 def get_project_overview() -> dict:
     """Start here. Returns tempo, time signature, length, edit cursor, time selection,
     transport state, markers and regions, the master track, every track (volume, pan,
-    mute/solo, FX chain, item count) and the user's selected items."""
+    mute/solo, FX chain, item count) and the user's selected items. A track that is
+    half of a hardware synth part says so under 'hardware', with printed = yes, stale
+    (notes or sound changed since: print_hardware again) or never; until it's printed,
+    no render, mix or export hears that part."""
     return call("get_project_overview")
 
 

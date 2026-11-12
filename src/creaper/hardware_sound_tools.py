@@ -2,9 +2,11 @@
 set parameters by name, audition (play a phrase, record it, measure it), keep sounds in
 the sound library, write them into the song, and print hardware parts to audio.
 
-Each device model has a profile module (microkorg.py is the first) that knows its patch
-format and parameters; everything here goes through the profile, so another synth is
-another profile.
+A device model can have a profile module (microkorg.py is the first) that knows its
+patch format and parameters. Everything device-specific here goes through the profile,
+by the interface written down in hardware_profiles.Profile, so another synth is another
+profile. A device without a profile still gets a track pair, auditions, prints and a
+latency measurement: only reading, loading and editing its sound need the profile.
 
 Safety: only the device's EDIT BUFFER is changed, and the sound it held is kept as a
 backup first. A stored program is written by one tool only, after asking the user, every
@@ -22,14 +24,14 @@ import numpy as np
 import soundfile as sf
 from pydantic import BaseModel, Field
 
+from . import convstate, hardware_profiles, jsonstore, listen, server
 from . import hardware_setup as setup
 from . import hardware_tools as hw
-from . import convstate, jsonstore, listen, microkorg, server
-from .bridge import STOP_PROMPT_WAIT
+from .bridge import STOP_PROMPT_WAIT, BridgeError
 from .server import DESTRUCTIVE, READ_ONLY, call, confirm_with_user, tool
 from .theory import midi_to_note
 
-PROFILES = {microkorg.MODEL: microkorg}
+PROFILES = hardware_profiles.PROFILES
 REPLY_WAIT_S = 2.5        # a patch is ~300 bytes: 0.1 s on a MIDI cable, plus the synth's own time
 POLL_S = 0.1
 BACKUPS_KEPT = 30
@@ -64,24 +66,37 @@ class Link:
     out: int
     inp: int | None
     channel: int
-    profile: Any
+    profile: Any            # a hardware_profiles.Profile, or None: the device is played and recorded only
 
 
 def _link(name: str) -> Link:
     key, device = hw._device(name)
-    profile = PROFILES.get(device.get("model") or "")
-    if profile is None:
-        raise ValueError(f"creaper has no sound-design profile for {key} ({device.get('model') or 'model unknown'}) "
-                         f"yet; it has: {', '.join(PROFILES)}. Its notes can still be played and recorded.")
     ports = hw._ports()
     out = hw._port_number(ports["outputs"], device["midi_output"], "output", ports["disabled_outputs"])[0]
     inp = (hw._port_number(ports["inputs"], device["midi_input"], "input", ports["disabled_inputs"])[0]
            if device.get("midi_input") else None)
-    return Link(key, device, out, inp, hw.midi_channel(key, device), profile)
+    return Link(key, device, out, inp, hw.midi_channel(key, device), PROFILES.get(device.get("model") or ""))
 
 
-def _ask(link: Link, messages: list[str], want: set[int], what: str, wait: float = REPLY_WAIT_S) -> tuple[int, bytes]:
-    """Sends SysEx and returns the device's answer (function code, payload)."""
+def _profile(link: Link, to: str) -> Any:
+    """The device's profile, for a tool that can't work without one (`to` = what it does)."""
+    if link.profile is None:
+        raise ValueError(
+            f"creaper has no sound-design profile for {link.name} ({link.device.get('model') or 'model unknown'}), "
+            f"so it can't {to}; it has profiles for: {', '.join(PROFILES)}. The user sets the sound on the synth "
+            "itself. Everything else works: create_hardware_track, audition_hardware (hear and measure it), "
+            "print_hardware, calibrate_hardware_latency.")
+    return link.profile
+
+
+def _reads(link: Link) -> bool:
+    """Whether creaper can ask this device for its current sound."""
+    return link.profile is not None and link.profile.READS_PATCH
+
+
+def _ask(link: Link, request: tuple[list[str], set[int]], what: str, wait: float = REPLY_WAIT_S) -> tuple[int, bytes]:
+    """Sends a profile's request and returns the device's answer (reply code, payload)."""
+    messages, want = request
     if link.inp is None:
         raise ValueError(f"{link.name} can't answer creaper: no MIDI input is saved for it. Cable its MIDI OUT to the "
                          "interface's MIDI IN and save_hardware it again with midi_input.")
@@ -104,10 +119,12 @@ def _ask(link: Link, messages: list[str], want: set[int], what: str, wait: float
 
 
 def _read_program(link: Link) -> bytes:
-    p = link.profile
-    function, payload = _ask(link, [p.message(link.channel, p.F_CURRENT_REQUEST)], {p.F_CURRENT_DUMP, p.F_LOAD_ERROR},
-                             "asked for its current sound")
-    data = p.unpack(payload) if function == p.F_CURRENT_DUMP else b""
+    p = _profile(link, "read its sound")
+    if not p.READS_PATCH:
+        raise ValueError(f"a {p.MODEL} can't send its current sound over MIDI, so creaper can't read it from "
+                         f"{link.name}")
+    function, payload = _ask(link, p.read_request(link.channel), "asked for its current sound")
+    data = p.patch_reply(function, payload) or b""
     if len(data) != p.PROGRAM_BYTES:
         raise ValueError(f"{link.name} answered, but not with a whole patch; try again")
     return data
@@ -115,9 +132,9 @@ def _read_program(link: Link) -> bytes:
 
 def _read_setup(link: Link) -> dict:
     """The device's global MIDI settings, read now and remembered in the hardware map."""
-    p = link.profile
-    _, payload = _ask(link, [p.message(link.channel, p.F_GLOBAL_REQUEST)], {p.F_GLOBAL_DUMP}, "asked for its settings")
-    setup = p.decode_global(p.unpack(payload))
+    p = _profile(link, "read its MIDI settings")
+    function, payload = _ask(link, p.setup_request(link.channel), "asked for its settings")
+    setup = p.setup_reply(function, payload)
     with jsonstore.updating(hw._store_path(), lambda: {"version": 1, "devices": {}}, indent=2) as data:
         if link.name in data.get("devices", {}):
             data["devices"][link.name]["midi_setup"] = setup
@@ -148,30 +165,93 @@ def _load(link: Link, data: bytes, label: str, current: bytes | None = None, kee
     """Loads a patch into the device's edit buffer, keeping what was there (keep=False
     only for a sound creaper put there itself a moment ago). ask=False only for putting
     back a sound the synth itself held a moment ago."""
-    p = link.profile
+    p = _profile(link, "load a sound into it")
     # Whatever the source (the library, a backup, a project someone else made), only a
     # whole patch is sent: these files can be edited, and a short one is a malformed dump.
     if not isinstance(data, (bytes, bytearray)) or len(data) != p.PROGRAM_BYTES:
         raise ValueError(f"'{label}' isn't a whole {p.MODEL} patch ({len(data) if hasattr(data, '__len__') else 0} "
                          f"bytes, a patch is {p.PROGRAM_BYTES}), so it wasn't sent to {link.name}")
-    if current is None:
+    if current is None and p.READS_PATCH:
         current = _read_program(link)   # no backup, no load
     if ask and not _was_asked(link.name):
         confirm_with_user(f"load sounds into the {link.name}'s edit buffer during this session (its stored programs "
                           "aren't changed, and the sound it has now is kept as a backup)")
         _mark_asked(link.name)
-    if keep and current != data:
+    if keep and current is not None and current != data:
         _backup(link, current, f"before loading {label}")
-    function, _ = _ask(link, [p.program_dump(link.channel, data)], {p.F_LOAD_OK, p.F_LOAD_ERROR, p.F_FORMAT_ERROR},
-                       "sent it a sound", wait=4.0)
-    if function != p.F_LOAD_OK:
-        raise ValueError(f"{link.name} refused the sound ({'data format' if function == p.F_FORMAT_ERROR else 'load'} "
-                         "error); its edit buffer is as it was")
+    request = p.load_request(link.channel, data)
+    if not p.ACKS_LOAD:
+        # A device that confirms nothing: the sound is sent, and audition_hardware is the check.
+        call("send_midi", device=link.out, messages=request[0], open_audio=True)
+        return
+    function, _ = _ask(link, request, "sent it a sound", wait=4.0)
+    error = p.load_error(function)
+    if error:
+        raise ValueError(f"{link.name} refused the sound ({error}); its edit buffer is as it was")
 
 
 def _summary(link: Link, data: bytes) -> dict:
     prog = link.profile.decode_program(data)
     return {"device": link.name, **prog}
+
+
+def _project_tempo(bar: float | None) -> tuple[float, bool] | None:
+    """(the project's tempo at a bar, whether the tempo changes during the project); the
+    opening tempo when no bar is given. None when REAPER can't be asked."""
+    try:
+        tempo_map = call("get_tempo_map")
+        bpm = opening = float(tempo_map["start_tempo_bpm"])
+        tempos = {round(opening, 3)}
+        for change in tempo_map.get("changes") or []:
+            at = change.get("position") or {}
+            tempos.add(round(float(change["bpm"]), 3))
+            # A change counts from its bar on; one inside a bar, for a part that starts inside that bar too.
+            before = at.get("bar", 1) < int(bar or 1) or (at.get("bar", 1) == int(bar or 1) and (
+                at.get("beat", 1) <= 1.001 or (bar or 1) > int(bar or 1)))
+            if bar is not None and before:
+                bpm = float(change["bpm"])
+    except (BridgeError, KeyError, TypeError, ValueError):
+        return None
+    return bpm, len(tempos) > 1
+
+
+def _match_tempo(link: Link, data: bytes, bar: float | None) -> tuple[bytes, dict | None]:
+    """A patch that runs at a tempo of the synth's own (an arpeggiator, a synced delay or
+    LFO) set to the project's tempo, and what to tell about it. The patch comes back
+    unchanged, with nothing to tell, when nothing in it runs at the tempo."""
+    p = link.profile
+    uses = p.tempo_features(data)
+    if not uses:
+        return data, None
+    told: dict[str, Any] = {"runs_at_the_tempo": uses, "patch_tempo_bpm": p.tempo(data)}
+    found = _project_tempo(bar)
+    if found is None:
+        told["note"] = "REAPER's tempo couldn't be read, so the patch's tempo was left as it was."
+    else:
+        bpm, varies = found
+        was = p.tempo(data)
+        data, now = p.with_tempo(data, bpm)
+        told["patch_tempo_bpm"] = now
+        said = [f"The patch's tempo was set to {now} BPM (it was {was}) to match the project"
+                + (f" at bar {bar:g}" if bar is not None else "") + "." if now != was else
+                f"The patch's tempo already matches the project ({now} BPM)."]
+        if abs(now - bpm) > 0.01:
+            lo, hi = p.TEMPO_RANGE
+            said.append(f"The project runs at {bpm:g} BPM and the synth's tempo is a whole number from {lo} to {hi}, "
+                        "so the two drift apart over a long part: keep such parts short, or sync the synth to MIDI "
+                        "clock.")
+        if varies:
+            said.append("The project's tempo changes"
+                        + (": this is the tempo at that bar, so write the sound again (load_hardware_sound with "
+                           "track and bar) where a part starts at another tempo." if bar is not None else
+                           ": this is its opening tempo."))
+        told["note"] = " ".join(said)
+    try:
+        settings = _read_setup(link)       # the Clock setting is the user's to change on the synth: read now
+    except ValueError:
+        settings = link.device.get("midi_setup")
+    told["clock"] = p.clock_note(settings)
+    return data, told
 
 
 # ------------------------------------------------------------ profile, patches
@@ -181,7 +261,7 @@ def hardware_profile(
     name: Annotated[str, Field(description="Name in the hardware map (list_hardware)")],
     show: Annotated[Literal["parameters", "recipes", "setup"], Field(description=(
         "parameters = every sound parameter by name with its values; recipes = ready starting points (artist-style "
-        "sounds, game sound effects) and the Korg presets worth knowing; setup = the synth's MIDI settings, read "
+        "sounds, game sound effects) and the maker's presets worth knowing; setup = the synth's MIDI settings, read "
         "from it now"))] = "parameters",
     kind: Annotated[Literal["artist", "sfx"] | None, Field(description="With show='recipes': only this kind")] = None,
 ) -> dict:
@@ -193,24 +273,17 @@ def hardware_profile(
     asks the synth which MIDI messages it accepts, whether its memory is protected,
     and which control change each knob uses (for add_midi_cc sweeps in a part)."""
     link = _link(name)
-    p = link.profile
+    p = _profile(link, "list its parameters, recipes or MIDI settings")
     if show == "recipes":
         return {"device": link.name, "recipes": p.describe_recipes(kind),
                 "factory_programs": p.FACTORY_NOTES,
                 "note": "Recipes are creaper's own starting points, written from published descriptions, not heard "
                         "on this synth yet: load one, audition_hardware, and tune it by ear with the user. A "
-                        "factory_program is selected with load_hardware_sound program=...; it's Korg's preset only "
-                        "if that slot was never overwritten."}
+                        "factory_program is selected with load_hardware_sound program=...; it's the maker's preset "
+                        "only if that slot was never overwritten."}
     if show == "setup":
         setup = _read_setup(link)
-        problems = []
-        if not setup["control_change_enabled"]:
-            problems.append("it ignores control changes (knob moves over MIDI): " + p.SETUP_HELP)
-        if not setup["program_change_enabled"]:
-            problems.append("it ignores program changes, so creaper can't select its stored programs")
-        if setup["memory_protect"]:
-            problems.append("memory protect is on: write_hardware_program will be refused until the user turns it off "
-                            "(SHIFT + the program key labelled WRITE PROTECT)")
+        problems = p.setup_problems(setup)
         return {"device": link.name, **setup, **({"to_fix": problems} if problems else {})}
     return {"device": link.name, **p.describe(), "live_control": (
         "set_hardware_params live=true moves knob parameters with control changes (no gap in the sound); everything "
@@ -256,26 +329,18 @@ def set_hardware_params(
     set again. Change a few things at a time so the measurement shows what each did.
     live=true is for small moves while the user listens to a held note."""
     link = _link(name)
-    p = link.profile
+    p = _profile(link, "set its parameters by name")
     if not params:
         raise ValueError("give at least one parameter to set")
     if live:
         setup = link.device.get("midi_setup") or _read_setup(link)
-        if not setup.get("control_change_enabled"):
-            raise ValueError(f"{link.name} ignores control changes. {p.SETUP_HELP} Or leave live off.")
-        messages, cant = [], []
-        for key, value in params.items():
-            made = p.live_messages(key, value, link.channel, setup.get("knob_ccs", {}))
-            if made is None:
-                cant.append(key)
-            else:
-                messages += made
+        blocked = p.live_blocked(setup)
+        if blocked:
+            raise ValueError(f"{link.name} {blocked} Or leave live off.")
+        messages, cant = p.live(params, timbre, link.channel, setup)
         if cant:
             raise ValueError(f"these can't be set live on the {link.name} (no knob or NRPN reaches them): "
                              f"{', '.join(cant)}. Set them with live=false.")
-        select = setup.get("timbre_select_cc")
-        if select is not None and timbre in (1, 2):
-            messages.insert(0, f"{0xB0 | (link.channel - 1):02X} {select:02X} {0 if timbre == 1 else 0x7F:02X}")
         call("send_midi", device=link.out, messages=messages, open_audio=True)
         return {"device": link.name, "sent_live": sorted(params), "note": (
             "Sent as control changes; the synth doesn't confirm them. read_hardware_patch shows the result.")}
@@ -283,19 +348,11 @@ def set_hardware_params(
     base = p.init_program(current) if start_from == "init" else current
     new = p.apply(base, params, timbre=timbre)
     _load(link, new, "new parameter values", current=current)
-    before, after = p.decode_program(base), p.decode_program(new)
-    return {"device": link.name, "loaded": True, "voice_mode": after["voice_mode"],
-            "set": {k: v for k, v in _flat(after).items() if k.split(".")[-1] in params and k != "name"},
+    before, after = p.flat(p.decode_program(base)), p.flat(p.decode_program(new))
+    return {"device": link.name, "loaded": True, **p.brief(new),
+            "set": {k: v for k, v in after.items() if k.split(".")[-1] in params and k != "name"},
             **({"started_from": "creaper's plain sound"} if start_from == "init" else
-               {"was": {k: v for k, v in _flat(before).items() if k.split(".")[-1] in params and _flat(after).get(k) != v}})}
-
-
-def _flat(prog: dict) -> dict:
-    out = {"voice_mode": prog["voice_mode"]}
-    for block in ("common", "timbre1", "timbre2", "vocoder"):
-        for key, value in (prog.get(block) or {}).items():
-            out[key if block in ("common", "timbre1", "vocoder") else f"timbre2.{key}"] = value
-    return out
+               {"was": {k: v for k, v in before.items() if k.split(".")[-1] in params and after.get(k) != v}})}
 
 
 Tags = Annotated[list[str] | None, Field(description="Role and character, e.g. ['lead', 'glide'] or ['sfx', 'laser']")]
@@ -341,23 +398,38 @@ def load_hardware_sound(
     half a second before that bar: do this for EVERY hardware part, because the synth
     holds one sound at a time and the project doesn't store it otherwise. Leave room
     before a part that starts at bar 1. Give exactly one of sound, recipe, program,
-    backup."""
+    backup.
+    A sound with an arpeggiator, a tempo-synced delay or a tempo-synced LFO runs at a
+    tempo stored in the patch: it's set to the project's tempo (at that bar, when the
+    sound is written into the song) and the result says so under 'tempo', with what
+    the synth's clock setting means for it. A recipe that names its own tempo (an
+    effect's speed) and a backup loaded without a track keep theirs."""
     if sum(x is not None for x in (sound, recipe, program, backup)) != 1:
         raise ValueError("give exactly one of sound, recipe, program or backup")
     if (track is None) != (bar is None):
         raise ValueError("to write the sound into the song give both track and bar")
     link = _link(name)
-    p = link.profile
-    current = _read_program(link)
+    p = _profile(link, "load sounds into it or write them into the song")
+    current = _read_program(link) if p.READS_PATCH else None   # a synth that can't send its sound: nothing to keep
     out: dict[str, Any] = {"device": link.name}
+    own_tempo = backup is not None and track is None      # an undo brings back exactly what was there
     if program is not None:
         number = p.program_number(program)
         if not _was_asked(link.name):
             confirm_with_user(f"change the sound on the {link.name} during this session (its stored programs aren't "
                               "changed, and the sound it has now is kept as a backup)")
             _mark_asked(link.name)
+        if not p.READS_PATCH:
+            # It can be told to change program, but not asked what the program holds.
+            if track is not None:
+                raise ValueError(f"a {p.MODEL} can't send its sounds over MIDI, so creaper can't write one of its "
+                                 "stored programs into the song; the user selects it on the synth before printing")
+            call("send_midi", device=link.out, messages=p.select_program(link.channel, number), open_audio=True)
+            return {"device": link.name, "loaded": f"program {p.program_name(number)}",
+                    "note": "Sent as a program change; this synth can't confirm it or send back what it holds. "
+                            "audition_hardware hears the result."}
         _backup(link, current, f"before selecting program {p.program_name(number)}")
-        call("send_midi", device=link.out, messages=[f"{0xC0 | (link.channel - 1):02X} {number:02X}"], open_audio=True)
+        call("send_midi", device=link.out, messages=p.select_program(link.channel, number), open_audio=True)
         hw._sleep(0.3)
         data = _read_program(link)
         label = f"program {p.program_name(number)}"
@@ -366,6 +438,11 @@ def load_hardware_sound(
                            "synth ignores program changes (hardware_profile show='setup' tells).")
         if p.FACTORY_NOTES.get(p.program_name(number)):
             out["factory_preset"] = p.FACTORY_NOTES[p.program_name(number)] + " (if the slot was never overwritten)"
+        stored = data
+        data, tempo = _match_tempo(link, data, bar)
+        if data != stored:
+            # The stored program stays as it is; the edit buffer gets it at the project's tempo.
+            _load(link, data, label, current=stored, keep=False, ask=False)
     else:
         if sound is not None:
             _, entry = server.sound_library.find(sound)
@@ -382,15 +459,28 @@ def load_hardware_sound(
                     out[field] = made[field]
             if made.get("factory"):
                 out["factory_program"] = f"{made['factory']} (load_hardware_sound program='{made['factory']}')"
+            own_tempo = p.TEMPO_PARAM in made.get("params", {})   # an effect whose speed is the recipe
         else:
             kept = _backups(link)
             if backup > len(kept):
                 raise ValueError(f"there {'is' if len(kept) == 1 else 'are'} {len(kept)} backup(s) for {link.name}"
                                  " (read_hardware_patch backups=true lists them)")
             data, label = bytes.fromhex(kept[backup - 1]["patch"]), f"backup {backup} ({kept[backup - 1]['time']})"
+        tempo = None
+        if len(data) == p.PROGRAM_BYTES:      # anything else is refused by _load, by name
+            if own_tempo and p.tempo_features(data):
+                tempo = {"runs_at_the_tempo": p.tempo_features(data), "patch_tempo_bpm": p.tempo(data),
+                         "note": ("Kept at its own tempo, not the project's: " + (
+                             "the recipe's speed is part of the effect." if recipe is not None else
+                             "a backup comes back exactly as it was.")
+                             + f" set_hardware_params {p.TEMPO_PARAM}=... changes it."),
+                         "clock": p.clock_note(link.device.get("midi_setup"))}
+            elif not own_tempo:
+                data, tempo = _match_tempo(link, data, bar)
         _load(link, data, label, current=current)
-    out.update({"loaded": label, "voice_mode": p.voice_mode(data),
-                "undo": "load_hardware_sound backup=1 brings back the sound it replaced" if data != current else None})
+    out.update({"loaded": label, **p.brief(data), "tempo": tempo,
+                "undo": ("load_hardware_sound backup=1 brings back the sound it replaced"
+                         if current is not None and data != current else None)})
     if track is not None:
         written = call("hardware_patch_item", track=track, start_bar=bar, name=label, lead_seconds=PATCH_LEAD_S,
                        sysex=p.program_dump(link.channel, data))
@@ -417,7 +507,7 @@ def write_hardware_program(
     when the synth lets it. Sounds are safe in the sound library without this
     (save_hardware_sound)."""
     link = _link(name)
-    p = link.profile
+    p = _profile(link, "write its stored programs")
     number = p.program_number(program)
     slot = p.program_name(number)
     # Before anything is sent to the synth: where creaper can't ask, nothing is touched.
@@ -425,12 +515,12 @@ def write_hardware_program(
     setup = _read_setup(link)
     if setup["memory_protect"]:
         raise ValueError(f"{link.name}'s memory protect is on, so it would refuse. The user turns it off on the synth "
-                         "(SHIFT + the program key labelled WRITE PROTECT, then OFF), then try again.")
+                         f"({p.PROTECT_HELP}), then try again.")
     wanted = _read_program(link)
     kept = False
     if setup["program_change_enabled"]:
         # Look at what's in the slot (select it, read it), then put the sound back in the buffer.
-        call("send_midi", device=link.out, messages=[f"{0xC0 | (link.channel - 1):02X} {number:02X}"], open_audio=True)
+        call("send_midi", device=link.out, messages=p.select_program(link.channel, number), open_audio=True)
         hw._sleep(0.3)
         stored = _read_program(link)
         _backup(link, stored, f"program {slot} before it was overwritten")
@@ -441,10 +531,9 @@ def write_hardware_program(
                          "the program that's there now can't be backed up and will be lost") + ")",
                       irreversible=True)
     _mark_asked(link.name)   # only now: a Deny above leaves later loads still to be asked
-    function, _ = _ask(link, [p.message(link.channel, p.F_WRITE_REQUEST, [0, number])], {p.F_WRITE_OK, p.F_WRITE_ERROR},
-                       f"asked it to write program {slot}", wait=4.0)
-    if function != p.F_WRITE_OK:
-        raise ValueError(f"{link.name} reported a write error: program {slot} was not changed")
+    function, _ = _ask(link, p.write_request(link.channel, number), f"asked it to write program {slot}", wait=4.0)
+    if p.write_error(function):
+        raise ValueError(f"{link.name} reported a {p.write_error(function)}: program {slot} was not changed")
     return {"device": link.name, "written": slot, "program_change_number": number,
             "previous_program": "kept: read_hardware_patch backups=true lists it" if kept else "not backed up"}
 
@@ -499,8 +588,9 @@ def _discard(path: str) -> None:
 
 
 def _answers(link: Link) -> bool | None:
-    """Whether the synth answers over MIDI right now; None when it has no way to (no MIDI input saved)."""
-    if link.inp is None:
+    """Whether the synth answers over MIDI right now; None when it has no way to (no MIDI
+    input saved, or no profile that knows a question it answers)."""
+    if link.inp is None or not _reads(link):
         return None
     try:
         _read_program(link)
@@ -678,9 +768,8 @@ def audition_hardware(
     return out
 
 
-CALIBRATION_SOUND = {"osc1_wave": "pulse", "osc1_ctrl1": 0, "cutoff": 127, "eg2_attack": 0, "eg2_decay": 40,
-                     "eg2_sustain": 0, "eg2_release": 0, "assign_mode": "mono"}
 CLICKS = 5
+CLICK_NOTE_S = 0.1        # short, so a sound the user chose (no profile to set a click) can't smear into the next
 
 
 @tool()
@@ -693,22 +782,34 @@ def calibrate_hardware_latency(name: Annotated[str, Field(description="Name in t
     buffer size or interface. It plays five short clicks: for those few seconds it
     puts a click sound in the synth's edit buffer, then puts the user's sound back.
     It records, so in creaper's chat panel the user is asked (and REAPER's save/delete
-    window may appear)."""
+    window may appear).
+    On a synth creaper has no profile for (hardware_profile refuses it), creaper can't
+    set the click: FIRST ask the user to put a short, percussive sound on the synth
+    (instant attack, no delay or reverb), then call this. It plays five short notes
+    with whatever sound is there; a slow attack would be measured as latency."""
     link = _link(name)
     p = link.profile
+    own_click = _reads(link)   # creaper can set a click and put the user's sound back; else the user sets one
     checked = setup.preflight(link.name, link.device)
-    confirm_with_user(f"play five test clicks on the {link.name} and record them to measure its latency (its current "
-                      "sound is put back afterwards)")
-    current = _read_program(link)
-    notes = [{"pitch": 72, "at": 0.5 + 0.5 * i, "length": 0.1, "velocity": 127} for i in range(CLICKS)]
-    click = p.apply(p.init_program(current, name="click"), CALIBRATION_SOUND)
-    # ask=False: the question above covers the click and putting the sound back, and only
-    # those. It isn't a yes to loading sounds from then on, which stays its own question.
-    _load(link, click, "the calibration click", current=current, ask=False)
+    if own_click:
+        confirm_with_user(f"play five test clicks on the {link.name} and record them to measure its latency (its current "
+                          "sound is put back afterwards)")
+    else:
+        confirm_with_user(f"play five short test notes on the {link.name} and record them to measure its latency. "
+                          "creaper can't set a sound on this synth, so put a short, percussive one on it first "
+                          "(instant attack, no delay or reverb)")
+    current = _read_program(link) if own_click else None
+    notes = [{"pitch": 72, "at": 0.5 + 0.5 * i, "length": CLICK_NOTE_S, "velocity": 127} for i in range(CLICKS)]
+    if own_click:
+        click = p.click_patch(current)
+        # ask=False: the question above covers the click and putting the sound back, and only
+        # those. It isn't a yes to loading sounds from then on, which stays its own question.
+        _load(link, click, "the calibration click", current=current, ask=False)
     try:
         items, _ = _take(_scratch(link, notes, notes[-1]["at"] + 1.0), {})
     finally:
-        _load(link, current, "the sound from before the calibration", current=click, keep=False, ask=False)
+        if own_click:
+            _load(link, current, "the sound from before the calibration", current=click, keep=False, ask=False)
     audio, fs, offset, path = _audio_of(items, link)
     try:
         problem = _level_problem(audio, link)
@@ -745,6 +846,10 @@ def calibrate_hardware_latency(name: Annotated[str, Field(description="Name in t
     if spread > 8:
         out["note"] = ("The clicks arrived unevenly (MIDI timing jitter): the saved value is the middle one. A "
                        "smaller audio buffer in REAPER usually tightens it.")
+    if not own_click:
+        out["measured_with"] = ("the sound the synth had (creaper has no profile to set a click on it). The value is "
+                                "right only if that sound starts at once: a slow attack is measured as latency. If "
+                                "it looks high, have the user set a sharper sound and measure again.")
     return out
 
 
@@ -762,9 +867,14 @@ def _sound_patch(link: Link, sysex: Any, label: str) -> bytes:
     someone else can hold anything here (a write request stores the edit buffer over
     a program)."""
     p = link.profile
+    if p is None:
+        # creaper never writes a sound for a device it has no profile for, so it can't vouch for this one.
+        raise ValueError(f"not recorded: the sound item {label} on this part holds SysEx that would be sent to "
+                         f"{link.name}, and creaper has no profile for that synth to check it with (SysEx can "
+                         "overwrite a synth's stored programs). Delete that item; the user sets the sound on the "
+                         "synth itself.")
     try:
-        parsed = p.parse_message(sysex) if isinstance(sysex, str) else None
-        data = p.unpack(parsed[1]) if parsed and parsed[0] == p.F_CURRENT_DUMP else None
+        data = p.patch_in_message(sysex) if isinstance(sysex, str) else None
     except (ValueError, TypeError, IndexError):
         data = None
     if data is None or len(data) != p.PROGRAM_BYTES:
@@ -804,6 +914,7 @@ def _check_part_sysex(link: Link, part: dict) -> None:
         if item.get("sysex"):
             _sound_patch(link, item["sysex"], label)
 
+
 @tool()
 def create_hardware_track(
     name: Annotated[str, Field(description="Name in the hardware map")],
@@ -821,7 +932,8 @@ def create_hardware_track(
     One pair per part (lead, bass, each sound effect): the synth plays one sound at a
     time, so parts are printed one after another. (Two tracks rather than ReaInsert:
     ReaInsert forces every render to run in real time, and creaper measures and mixes
-    with offline renders.)"""
+    with offline renders.) Any saved MIDI device gets a pair; on one creaper has no
+    profile for, the user sets the sound on the synth before the print."""
     link = _link(name)
     if not link.device.get("audio_input"):
         raise ValueError(f"creaper doesn't know which interface inputs {link.name}'s audio comes back on: "
@@ -831,7 +943,10 @@ def create_hardware_track(
                 channel=link.channel, audio_input=link.device["audio_input"], stereo=bool(link.device.get("stereo")),
                 monitor=monitor)
     made["next"] = ("Write the part on the MIDI track, then load_hardware_sound with track and bar, then "
-                    "print_hardware.")
+                    "print_hardware." if link.profile is not None else
+                    f"Write the part on the MIDI track. creaper has no profile for {link.name}, so it can't load or "
+                    "store its sound: the user sets the sound on the synth, audition_hardware hears it, then "
+                    "print_hardware records the part with it.")
     if not link.device.get("latency_ms"):
         made["note"] = (f"{link.name}'s latency hasn't been measured: calibrate_hardware_latency once, so prints "
                         "line up with the other tracks.")
@@ -882,6 +997,10 @@ def print_hardware(
         out["sound"] = sound["sound"]
         if sound["end_seconds"] > start:
             mute_items.append(sound["id"])
+    elif link.profile is None:
+        out["warning"] = (f"creaper has no profile for {link.name}, so the song doesn't hold this part's sound: it "
+                          "was recorded with whatever the synth had. Before printing it again, the user puts the "
+                          "right sound on the synth.")
     else:
         out["warning"] = ("No sound is written into the song for this part, so it was recorded with whatever the "
                           "synth had. load_hardware_sound with track and bar fixes that for good.")

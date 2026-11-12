@@ -18,9 +18,10 @@ from creaper.sounds import SoundLibrary
 
 
 
-def global_data(protect=True, sysex=True, cc=True, pc=True):
+def global_data(protect=True, sysex=True, cc=True, pc=True, clock="internal"):
     g = bytearray(200)
     g[5] = 0x04 | (1 if protect else 0)
+    g[8] = ("internal", "external", "auto").index(clock)
     g[11] = 95                                   # timbre select CC
     g[16] = 0x80 if sysex else 0
     g[17] = 0x40 | (0x04 if cc else 0) | (0x01 if pc else 0)
@@ -54,6 +55,10 @@ class FakeKorg:
         self.sound_sysex_count = None
         self.parts = [{"id": "{P1}", "start_seconds": 4.0, "end_seconds": 8.0, "start": {"bar": 3, "beat": 1},
                        "sysex_count": 0, "sysex_events": []}]
+        self.part_device = "microKORG"  # the device the hardware part in the project plays
+        self.printed = "never"         # what the bridge says of the part's print: yes, stale, never
+        self.tempo = 120.0             # the project's opening tempo
+        self.tempo_changes: list[dict] = []
 
     def _reply(self, function, payload=b""):
         self.history.append({"seq": self.history[-1]["seq"] + 1, "device": 0,
@@ -139,9 +144,12 @@ class FakeKorg:
             self.patch_items.append(params)
             return {"item_id": "{S1}", "loads_before_the_part": params["start_bar"] > 1}
         if cmd == "hardware_tracks":
-            return {"hardware_tracks": [{"device": "microKORG", "midi_track": {"number": 5, "name": "MK Lead (MIDI)"},
+            return {"hardware_tracks": [{"device": self.part_device, "midi_track": {"number": 5, "name": "MK Lead (MIDI)"},
                                          "audio_track": {"number": 6, "name": "MK Lead"}, "parts": self.parts,
+                                         "printed": self.printed,
                                          "sounds": [self._sound_item(i) for i in self.patch_items]}]}
+        if cmd == "get_tempo_map":
+            return {"start_tempo_bpm": self.tempo, "start_time_signature": "4/4", "changes": self.tempo_changes}
         raise AssertionError(f"unexpected bridge command {cmd}")
 
 
