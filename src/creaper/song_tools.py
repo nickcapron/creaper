@@ -872,8 +872,12 @@ def finish_stage(
                                                 "forced": bool(fails), "checks": rows,
                                                 **({"tracks": _mix_snapshot(ctx.overview)} if stage == "mix" else {})}
     left = [s for s in STAGES if not data["stages"].get(s, {}).get("done")]
+    from . import hardware_tools
+    # From the parts stage on, the song is about to be measured and mixed from offline renders.
+    unprinted = hardware_tools.unprinted_warning(call) if stage not in ("form", "sounds") else None
     return {"stage": stage, "done": True, **({"forced_past": [r["check"] for r in fails]} if fails else {}),
-            "checks": rows, "next": left[0] if left else "all stages done: check_song for the scorecard"}
+            "checks": rows, **({"hardware_warning": unprinted} if unprinted else {}),
+            "next": left[0] if left else "all stages done: check_song for the scorecard"}
 
 
 @tool(annotations=READ_ONLY)

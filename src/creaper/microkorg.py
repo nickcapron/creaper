@@ -809,3 +809,176 @@ def describe_recipes(kind: str | None = None) -> list[dict]:
                 entry[{"factory": "factory_program"}.get(key, key)] = r[key]
         out.append(entry)
     return out
+
+
+# ------------------------------------- what hardware_sound_tools asks of a profile
+# (the interface is written down in hardware_profiles.Profile)
+
+READS_PATCH = True      # it answers a request for its current sound
+ACKS_LOAD = True        # it confirms, or refuses, a sound sent to it
+PARTS = 1               # one sound at a time, on one MIDI channel
+TEMPO_RANGE = (20, 300)
+TEMPO_PARAM = "arp_tempo"   # the parameter that holds a patch's tempo
+
+# How the synth answers the MIDI identity request, for scan_hardware.
+IDENTITY = {
+    "maker": "42", "family": 0x0058, "member": 0x0011, "kind": "synth", "device_id_is_channel": True,
+    "setup": ("Its audio comes from the L/MONO and R outputs on the back: plug them into two interface inputs "
+              "(L/MONO alone gives mono). On the microKORG's MIDI settings: 'CtrlChg' filter ENA lets creaper "
+              "turn its knobs over MIDI, and 'SystemEx' filter ENA lets it read and load patches. "
+              "It's 4-voice, one patch at a time (two timbres in a layer or split patch)."),
+}
+
+PROTECT_HELP = "SHIFT + the program key labelled WRITE PROTECT, then OFF"
+
+
+def read_request(channel: int) -> tuple[list[str], set[int]]:
+    """(messages that ask for the current sound, the function codes that answer them)."""
+    return [message(channel, F_CURRENT_REQUEST)], {F_CURRENT_DUMP, F_LOAD_ERROR}
+
+
+def patch_reply(function: int, payload: bytes) -> bytes | None:
+    """The patch in the answer to read_request; None when the synth answered with an error."""
+    return unpack(payload) if function == F_CURRENT_DUMP else None
+
+
+def load_request(channel: int, data: bytes) -> tuple[list[str], set[int]]:
+    return [program_dump(channel, data)], {F_LOAD_OK, F_LOAD_ERROR, F_FORMAT_ERROR}
+
+
+def load_error(function: int) -> str | None:
+    """None when the synth took the sound, else what it reported."""
+    return None if function == F_LOAD_OK else "data format error" if function == F_FORMAT_ERROR else "load error"
+
+
+def setup_request(channel: int) -> tuple[list[str], set[int]]:
+    return [message(channel, F_GLOBAL_REQUEST)], {F_GLOBAL_DUMP}
+
+
+def setup_reply(function: int, payload: bytes) -> dict:
+    return decode_global(unpack(payload))
+
+
+def write_request(channel: int, number: int) -> tuple[list[str], set[int]]:
+    """Stores the edit buffer in program `number` (0-127). Korg's payload: a zero, then the program."""
+    return [message(channel, F_WRITE_REQUEST, [0, number])], {F_WRITE_OK, F_WRITE_ERROR}
+
+
+def write_error(function: int) -> str | None:
+    return None if function == F_WRITE_OK else "write error"
+
+
+def select_program(channel: int, number: int) -> list[str]:
+    """Selects a stored program: one program change (128 programs, so no bank select)."""
+    return [f"{0xC0 | (channel - 1):02X} {number:02X}"]
+
+
+def patch_in_message(hexstr: str) -> bytes | None:
+    """The patch a sound message carries (what program_dump wrote), or None for anything else."""
+    parsed = parse_message(hexstr)
+    return unpack(parsed[1]) if parsed and parsed[0] == F_CURRENT_DUMP else None
+
+
+def click_patch(current: bytes | None) -> bytes:
+    """A short click with an instant attack, for measuring latency."""
+    return apply(init_program(current, name="click"),
+                 {"osc1_wave": "pulse", "osc1_ctrl1": 0, "cutoff": 127, "eg2_attack": 0, "eg2_decay": 40,
+                  "eg2_sustain": 0, "eg2_release": 0, "assign_mode": "mono"})
+
+
+def brief(data: bytes) -> dict:
+    """The few facts about a patch that every result carries."""
+    return {"voice_mode": voice_mode(data)}
+
+
+def flat(prog: dict) -> dict:
+    """A decoded program as one level of names (timbre 2's prefixed), to show what a change did."""
+    out = {"voice_mode": prog["voice_mode"]}
+    for block in ("common", "timbre1", "timbre2", "vocoder"):
+        for key, value in (prog.get(block) or {}).items():
+            out[key if block in ("common", "timbre1", "vocoder") else f"timbre2.{key}"] = value
+    return out
+
+
+def setup_problems(setup: dict) -> list[str]:
+    """What in the synth's own MIDI settings stands in creaper's way."""
+    problems = []
+    if not setup["control_change_enabled"]:
+        problems.append("it ignores control changes (knob moves over MIDI): " + SETUP_HELP)
+    if not setup["program_change_enabled"]:
+        problems.append("it ignores program changes, so creaper can't select its stored programs")
+    if setup["memory_protect"]:
+        problems.append("memory protect is on: write_hardware_program will be refused until the user turns it off "
+                        "(SHIFT + the program key labelled WRITE PROTECT)")
+    return problems
+
+
+def live_blocked(setup: dict) -> str | None:
+    """Why parameters can't be set live with these MIDI settings (follows the device's name), or None."""
+    return None if setup.get("control_change_enabled") else f"ignores control changes. {SETUP_HELP}"
+
+
+def live(params: dict[str, Any], timbre: int | str, channel: int, setup: dict) -> tuple[list[str], list[str]]:
+    """(the messages that set these parameters while the synth plays, the names that can't be set live)."""
+    messages, cant = [], []
+    for key, value in params.items():
+        made = live_messages(key, value, channel, setup.get("knob_ccs", {}))
+        if made is None:
+            cant.append(key)
+        else:
+            messages += made
+    select = setup.get("timbre_select_cc")
+    if select is not None and timbre in (1, 2):
+        messages.insert(0, f"{0xB0 | (channel - 1):02X} {select:02X} {0 if timbre == 1 else 0x7F:02X}")
+    return messages, cant
+
+
+# ------------------------------------------------------------------ tempo
+# The synth has one tempo per program ("arp_tempo"): the arpeggiator, a synced delay and
+# tempo-synced LFOs all run at it while the synth is on its own clock. With its Clock
+# setting on External (or Auto, while MIDI clock arrives) they follow the MIDI clock
+# instead and the program's tempo is ignored.
+
+def tempo_features(data: bytes) -> list[str]:
+    """What in this patch runs at the tempo; empty when nothing does."""
+    prog = decode_program(data)
+    uses = []
+    if prog["common"]["arp_on"] == "on":
+        uses.append("arpeggiator")
+    if prog["common"]["delay_sync"] == "on" and prog["common"]["delay_depth"] > 0:
+        uses.append("synced delay")
+    blocks = [prog[b] for b in ("timbre1", "timbre2", "vocoder") if prog.get(b)]
+    if any(b.get(f"lfo{n}_tempo_sync") == "on" for b in blocks for n in (1, 2)):
+        uses.append("tempo-synced LFO")
+    return uses
+
+
+def tempo(data: bytes) -> int:
+    return int(COMMON_BY_NAME["arp_tempo"].read(data))
+
+
+def with_tempo(data: bytes, bpm: float) -> tuple[bytes, int]:
+    """(the patch at this tempo, the tempo it got): whole BPM, inside the synth's range."""
+    lo, hi = TEMPO_RANGE
+    whole = int(min(hi, max(lo, round(bpm))))
+    return apply(data, {"arp_tempo": whole}), whole
+
+
+def clock_note(setup: dict | None) -> str:
+    """What the synth's Clock setting means for a patch that runs at the tempo."""
+    clock = (setup or {}).get("clock")
+    change = "CLOCK on the microKORG's MIDI edit page"
+    if clock == "external":
+        return ("The microKORG's Clock is set to External: it ignores the patch's tempo and waits for MIDI clock, so "
+                "the arpeggiator, a synced delay and synced LFOs only run right if REAPER sends clock to its MIDI "
+                "output (Preferences > MIDI Devices > the output > 'Send clock/SPP to this device'). creaper doesn't "
+                f"check or send clock: have the user set {change} to Internal, or turn that REAPER option on.")
+    if clock == "auto":
+        return ("The microKORG's Clock is set to Auto: it uses the patch's tempo unless MIDI clock arrives, and then "
+                "follows the clock instead.")
+    if clock == "internal":
+        return ("The microKORG is on its own clock (Internal), so it runs at the patch's tempo. It keeps that speed "
+                "but isn't locked to REAPER's bar lines: each arpeggio starts when its note does.")
+    return ("The patch's tempo only counts while the microKORG is on its own clock: with its Clock setting on "
+            f"External (or Auto with MIDI clock arriving) it follows MIDI clock instead ({change}; hardware_profile "
+            "show='setup' reads the setting).")

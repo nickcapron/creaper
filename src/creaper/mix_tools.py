@@ -1521,6 +1521,10 @@ def auto_mix(
               "roles_note": ("levels follow the roles: if a guess is wrong (the featured melody not 'lead', an "
                              "ambience as 'bass'), set those tracks' levels by hand, or pass roles= next time"),
               "plan": plan["channels"], "sidechains": plan["sidechains"]}
+    from . import hardware_tools
+    unprinted = hardware_tools.unprinted_warning(call)   # a hardware part that isn't printed isn't in this mix
+    if unprinted:
+        report.setdefault("warnings", []).append(unprinted)
     if dry_run:
         return report
     # No question first: the mix is the job the user asked for, a copy of the project is

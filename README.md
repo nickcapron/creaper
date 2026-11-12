@@ -147,8 +147,10 @@ plugins unless you say the device is connected.
 ## Hardware synths
 
 creaper can play, program and record a synth on your desk. The first one it knows in
-depth is the original **Korg microKORG**. Any MIDI device can be found, saved, played and
-recorded.
+depth is the original **Korg microKORG**. Any other MIDI device can be found, saved,
+played, heard and measured, recorded into the song and have its latency measured: you
+set its sound on the synth itself. Reading, changing and storing sounds from creaper
+needs a profile for the model, and the microKORG's is the only one so far.
 
 - **Finds what's connected.** `scan_hardware` asks each MIDI port "what are you?" (the
   standard MIDI identity request) and names the maker, model and MIDI channel of every
@@ -161,7 +163,9 @@ recorded.
   If something's wrong, it opens the right Preferences page, says what to pick, and
   carries on when you've changed it. While it works with the synth it turns off
   "close audio device when inactive" and the save-files prompt after recording, and
-  puts both back when it's done (REAPER 7.74 or newer).
+  puts both back when it's done (REAPER 7.74 or newer). Working out which interface
+  and driver a synth is on is Windows-only for now: on macOS and Linux creaper asks you
+  which interface it is and checks REAPER against your answer.
 - **Sound design on the synth.** On a microKORG, creaper reads the current patch as named
   settings, changes them by name (as a whole patch into the edit buffer, or live as knob
   moves over MIDI), and keeps a backup of the sound it replaced. Writing to a program slot
@@ -174,7 +178,13 @@ recorded.
   an audio track that records it. A part's sound is written into the song just before
   the part, so the synth is on the right patch whenever it plays. `print_hardware`
   records the part to audio in real time, after which mixing, mastering and export work
-  as with any other track.
+  as with any other track. creaper remembers what each print was made from: if the
+  notes or the sound change afterwards, the project overview shows the part as stale,
+  and mixing and exporting say which parts need printing again (they don't refuse).
+- **In time.** A microKORG sound with an arpeggiator, a tempo-synced delay or a synced
+  LFO is set to the project's tempo when it's loaded or written into the song (whole
+  BPM, 20-300). creaper doesn't send MIDI clock: it tells you what the synth's Clock
+  setting means for the sound.
 - **Recipes.** Starting patches for game sound effects (laser, power-up, alarm, explosion,
   UI blip, drones, a vocoder robot voice) and for sounds in the style of well-known
   microKORG users, with the sources for each and the factory program when that's what a

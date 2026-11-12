@@ -15,8 +15,8 @@ from typing import Annotated, Any, Literal
 
 from pydantic import Field
 
+from . import hardware_profiles, jsonstore
 from . import hardware_setup as setup
-from . import jsonstore
 from .server import DESTRUCTIVE, READ_ONLY, bridge, call, confirm_with_user, tool
 
 IDENTITY_REQUEST = "F0 7E 7F 06 01 F7"   # Universal Non-Realtime, General Information, Identity Request, any device
@@ -30,17 +30,10 @@ MAKERS = {
     "002029": "Novation", "002032": "Behringer", "002033": "Access", "00203C": "Elektron", "00206B": "Arturia",
 }
 
-# Models identified from their identity reply, from each maker's MIDI implementation.
+# Models identified from their identity reply, from each maker's MIDI implementation:
+# each device profile says how its synth answers (hardware_profiles).
 # Key: (manufacturer hex, family code, member code); codes are LSB-first 14-bit numbers.
-KNOWN_MODELS: dict[tuple[str, int, int], dict[str, Any]] = {
-    ("42", 0x0058, 0x0011): {
-        "model": "Korg microKORG", "kind": "synth", "device_id_is_channel": True,
-        "setup": ("Its audio comes from the L/MONO and R outputs on the back: plug them into two interface inputs "
-                  "(L/MONO alone gives mono). On the microKORG's MIDI settings: 'CtrlChg' filter ENA lets creaper "
-                  "turn its knobs over MIDI, and 'SystemEx' filter ENA lets it read and load patches. "
-                  "It's 4-voice, one patch at a time (two timbres in a layer or split patch)."),
-    },
-}
+KNOWN_MODELS: dict[tuple[str, int, int], dict[str, Any]] = hardware_profiles.known_models()
 
 
 def _store_path() -> Path:
@@ -334,6 +327,38 @@ def _output_of(device: dict) -> int:
     ports = _ports()
     found = _port_number(ports["outputs"], device["midi_output"], "output", ports["disabled_outputs"])
     return found[0]
+
+
+def unprinted_warning(ask: Any = None) -> str | None:
+    """One sentence naming the hardware parts an offline render won't hear as written:
+    never printed, or changed (notes or sound) since their print. None when there are
+    none, when the project has no hardware parts, or when the bridge can't tell. For
+    the tools that mix and export: they say it and carry on. `ask` = the calling
+    module's own `call`, so the question goes the way that tool's other commands go."""
+    try:
+        pairs = (ask or call)("hardware_tracks").get("hardware_tracks") or []
+    except Exception:  # noqa: BLE001  (a warning never stops a mix: an older bridge, a project without hardware)
+        return None
+    if not isinstance(pairs, list):
+        return None
+
+    def named(state: str) -> list[str]:
+        # A pair with no MIDI items yet has nothing to print.
+        return [one_line((p.get("audio_track") or {}).get("name") or "a hardware part", 60)
+                for p in pairs if isinstance(p, dict) and p.get("printed") == state and p.get("parts")]
+
+    stale, never = named("stale"), named("never")
+    if not stale and not never:
+        return None
+    said = []
+    if stale:
+        said.append(f"{', '.join(stale)} changed after {'it was' if len(stale) == 1 else 'they were'} printed")
+    if never:
+        said.append(f"{', '.join(never)} {'has' if len(never) == 1 else 'have'} never been printed")
+    several = len(stale) + len(never) > 1
+    return ("Hardware: " + "; ".join(said) + ". A hardware synth isn't heard in a mix or an export until its part is "
+            f"recorded: print_hardware {'each' if several else 'it'} before mixing, or the mix won't hear "
+            f"{'them' if several else 'it'} as written.")
 
 
 @tool()

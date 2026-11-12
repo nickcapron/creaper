@@ -284,6 +284,7 @@ local function track_summary(t)
   return summary
 end
 
+-- Used by send_info here and by get_routing further down: one table, declared once.
 local SEND_MODES = { [0] = "post-fader", [1] = "pre-fx", [2] = "post-fx", [3] = "post-fx" }
 local SEND_MODE_IDS = { ["post-fader"] = 0, ["pre-fx"] = 1, ["post-fx"] = 3 }
 
@@ -2097,12 +2098,23 @@ function hws.ports(masks, kind)
   return list
 end
 
--- The MIDI output a message is about to go to: it must be there and enabled.
+-- A track's hardware MIDI output (I_MIDIHWOUT) keeps the device number in five bits, so
+-- only outputs 0-31 can be given to a track: a higher number would spill into the bits
+-- above and play some other device, or none.
+hws.MAX_MIDI_OUTPUT = 31
+
+-- The MIDI output a message is about to go to: it must be there, enabled, and one a track can use.
 function hws.check_output(device)
   device = int(device or -1)
   local present, name = false, ""
   if device >= 0 then present, name = reaper.GetMIDIOutputName(device, "") end
   if not present then fail("there's no MIDI output " .. tostring(device)) end
+  if device > hws.MAX_MIDI_OUTPUT then
+    fail("MIDI output '" .. tostring(name) .. "' is REAPER's output number " .. device .. ", and a track can only "
+      .. "play outputs 0 to " .. hws.MAX_MIDI_OUTPUT .. ", so creaper can't use it. REAPER keeps a number for every "
+      .. "MIDI device it has seen: removing outputs that are no longer used (Options > Preferences > Audio > MIDI "
+      .. "Devices) may give this one a lower number after REAPER restarts.")
+  end
   if hws.enabled(hws.midi_masks(), "out", device) == false then
     fail("MIDI output '" .. tostring(name) .. "' is plugged in but not enabled in REAPER, so nothing sent to it "
       .. "would arrive. Options > Preferences > Audio > MIDI Devices: double-click it under MIDI outputs and "
@@ -2316,6 +2328,16 @@ function commands.hardware_status(p)
   return out
 end
 
+hws.AUDIO_PAGE = 118         -- Preferences > Audio > Device, as ViewPrefs numbers it ...
+hws.AUDIO_PAGE_SINCE = 7.85  -- ... from this REAPER version on (the only one it was checked on)
+
+-- Whether this REAPER is at least a version, given as a number (7.85). GetAppVersion
+-- answers like "7.85/win64" or "7.85+dev0101/x64"; minor versions always have two digits.
+function hws.version_at_least(wanted)
+  local version = tonumber((tostring(reaper.GetAppVersion() or ""):match("^(%d+%.%d+)")))
+  return version ~= nil and version >= wanted
+end
+
 -- Opens REAPER's settings at the page the user has to change something on: "audio" =
 -- the audio device page (action 40099), "midi" = MIDI Devices. Whether the window holds
 -- scripts while it's open isn't known for every REAPER: the heartbeat says the bridge
@@ -2336,11 +2358,13 @@ function commands.hardware_open_prefs(p)
       reaper.Main_OnCommand(40016, 0) -- Options: Preferences...
       how = "preferences"
     end
-  elseif reaper.ViewPrefs then
+  elseif reaper.ViewPrefs and hws.version_at_least(hws.AUDIO_PAGE_SINCE) then
     -- Preferences > Audio > Device (page 118 in REAPER 7.85, read from reaper.ini's prefspage
     -- after the user saved that page). Not the separate "Audio device configuration" window
-    -- (action 40099): on 7.85 a user couldn't save the device from it.
-    reaper.ViewPrefs(118, "")
+    -- (action 40099): on 7.85 a user couldn't save the device from it. Page numbers move
+    -- between REAPER versions and 118 was only seen on 7.85: an older REAPER gets the
+    -- window, which is at least the right subject, rather than whatever its page 118 is.
+    reaper.ViewPrefs(hws.AUDIO_PAGE, "")
     how = "audio device page"
   else
     reaper.Main_OnCommand(40099, 0) -- Audio device configuration...
@@ -2398,7 +2422,11 @@ local function hw_new_track(name)
 end
 
 local function hw_set_output(t, device, channel)
-  reaper.SetMediaTrackInfo_Value(t, "I_MIDIHWOUT", (int(device) << 5) | int(channel or 0))
+  device, channel = int(device), int(channel or 0)
+  -- Five bits each: anything larger would be written into the other field (hws.check_output says it in words).
+  if device < 0 or device > hws.MAX_MIDI_OUTPUT then fail("a track can't play MIDI output " .. device .. " (0 to 31 only)") end
+  if channel < 0 or channel > 16 then fail("MIDI channel " .. channel .. " isn't a channel (1 to 16)") end
+  reaper.SetMediaTrackInfo_Value(t, "I_MIDIHWOUT", (device << 5) | channel)
 end
 
 local function hw_check_input(audio_input, stereo)
@@ -2493,6 +2521,52 @@ function hws.strip_sysex(item)
   return removed, left
 end
 
+-- What a print of a hardware part was made from, as a short hash: every item on its MIDI
+-- track (where it sits, whether it's muted, every MIDI event in it: notes, controllers,
+-- and a sound item's SysEx) and the copy of each sound that print_hardware sends. Kept on
+-- the MIDI track at print time (P_EXT, saved with the project); a different hash later
+-- means the part was edited and the audio no longer matches it. Whether an event is
+-- selected is left out: clicking a note in the MIDI editor changes nothing that plays.
+function hws.part_hash(midi)
+  local h = 5381
+  local function add(s)
+    for i = 1, #s do h = (h * 33 + s:byte(i)) & 0xFFFFFFFF end
+  end
+  for i = 0, reaper.CountTrackMediaItems(midi) - 1 do
+    local item = reaper.GetTrackMediaItem(midi, i)
+    add(string.format("%.4f|%.4f|%d|", reaper.GetMediaItemInfo_Value(item, "D_POSITION"),
+      reaper.GetMediaItemInfo_Value(item, "D_LENGTH"), int(reaper.GetMediaItemInfo_Value(item, "B_MUTE"))))
+    add(hw_item_ext(item, "sysex"))
+    local take = reaper.GetActiveTake(item)
+    if take and reaper.TakeIsMIDI(take) then
+      add(string.format("%.4f|%.4f|", reaper.GetMediaItemTakeInfo_Value(take, "D_STARTOFFS"),
+        reaper.GetMediaItemTakeInfo_Value(take, "D_PLAYRATE")))
+      local ok, buf = reaper.MIDI_GetAllEvts(take, "")
+      local pos = 1
+      -- Each event: int32 ticks since the one before, a flags byte, int32 length, the message.
+      while ok and buf and pos + 8 <= #buf do
+        local read, offset, flags, msg, after = pcall(string.unpack, "<i4Bs4", buf, pos)
+        if not read then
+          add(buf:sub(pos))
+          break
+        end
+        add(offset .. "," .. (flags & ~1) .. ",")
+        add(msg)
+        pos = after
+      end
+    end
+  end
+  return string.format("%08x", h)
+end
+
+-- Whether a hardware part's audio is a print of the part as it stands: "yes", "stale"
+-- (the notes or the sound changed since) or "never".
+function hws.printed(midi, audio)
+  local stored = hw_ext(midi, "printed")
+  if stored == "" or not audio or reaper.CountTrackMediaItems(audio) == 0 then return "never" end
+  return stored == hws.part_hash(midi) and "yes" or "stale"
+end
+
 local function hw_items(t)
   local parts, sounds = {}, {}
   for i = 0, reaper.CountTrackMediaItems(t) - 1 do
@@ -2527,7 +2601,8 @@ function commands.hardware_tracks(p)
     local parts, sounds = hw_items(midi)
     out[#out + 1] = { device = hw_ext(midi, "device"), midi_track = track_ref(midi), audio_track = track_ref(audio),
                       midi_muted = reaper.GetMediaTrackInfo_Value(midi, "B_MUTE") == 1,
-                      printed_items = reaper.CountTrackMediaItems(audio), parts = parts, sounds = sounds }
+                      printed_items = reaper.CountTrackMediaItems(audio), printed = hws.printed(midi, audio),
+                      parts = parts, sounds = sounds }
   end
   if p.track then
     describe(hw_pair(p.track))
@@ -2543,6 +2618,33 @@ function commands.hardware_tracks(p)
   -- A bar range, when given, comes back in seconds (what hardware_take_start takes).
   local s, e = resolve_qn(p, "start"), resolve_qn(p, "end")
   return { hardware_tracks = out, start_seconds = s and qn_to_time(s) or nil, end_seconds = e and qn_to_time(e) or nil }
+end
+
+-- The project overview says which tracks are a hardware part's, and whether the part's
+-- audio is up to date: an unprinted hardware part is silent in every offline render, and
+-- nothing else in the overview would show it. (Wrapped here, where the hardware helpers
+-- are in scope; the overview itself is defined long before them.)
+hws.plain_overview = commands.get_project_overview
+
+function commands.get_project_overview()
+  local out = hws.plain_overview()
+  for i = 0, reaper.CountTracks(0) - 1 do
+    local t = reaper.GetTrack(0, i)
+    local role = hw_ext(t, "role")
+    local summary = out.tracks[i + 1]
+    if role ~= "" and summary then
+      local other = hw_track_by_guid(hw_ext(t, "pair"))
+      local midi, audio = t, other
+      if role ~= "midi" then midi, audio = other, t end
+      summary.hardware = {
+        device = hw_ext(t, "device"),
+        role = role == "midi" and "plays the synth (MIDI)" or "records the synth (audio)",
+        pair = other and track_name(other) or nil,
+        printed = midi and hws.printed(midi, audio) or nil,
+      }
+    end
+  end
+  return out
 end
 
 -- Writes a sound into the song: a short MIDI item on the part's MIDI track that sends the
@@ -2743,6 +2845,9 @@ function commands.hardware_take_finish(p)
           if item_guid(item) == m[1] then reaper.SetMediaItemInfo_Value(item, "B_MUTE", m[2]) end
         end
       end
+      -- A print that was collected (not a pass the bridge had to tidy up after a stopped turn)
+      -- is remembered by what it was made from, so a later edit shows as a stale print.
+      if midi and #items > 0 and p.mute_midi then hw_ext(midi, "printed", hws.part_hash(midi)) end
     end
     for _, guid in ipairs(take.arms) do
       local t = hw_track_by_guid(guid)
@@ -3254,8 +3359,6 @@ function commands.delete_midi_cc(p)
 end
 
 -------------------------------------------------------------- routing
-
-local SEND_MODES = { [0] = "post-fader", [1] = "pre-fx", [2] = "post-fx", [3] = "post-fx" }
 
 local function channel_text(v)
   if v < 0 then return nil end
