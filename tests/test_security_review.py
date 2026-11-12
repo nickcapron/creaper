@@ -8,7 +8,7 @@ import base64
 import os
 import re
 import sys
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import pytest
 
@@ -244,12 +244,15 @@ def test_windows_helpers_are_started_by_full_path(monkeypatch):
     monkeypatch.setattr(speech.subprocess, "run", lambda argv, **kw: ran.append(argv) or type(
         "Done", (), {"returncode": 0, "stdout": "", "stderr": ""})())
     speech._powershell("Write-Output 1")
-    assert Path(ran[0][0]).is_absolute() and ran[0][0].lower().endswith(r"windowspowershell\v1.0\powershell.exe".replace("\\", os.sep))
+    # Windows paths, read as Windows paths on every OS the tests run on (CI runs macOS and Linux too).
+    powershell = PureWindowsPath(ran[0][0])
+    assert powershell.is_absolute() and powershell.parts[-3:] == ("WindowsPowerShell", "v1.0", "powershell.exe")
     monkeypatch.setattr(chat.sys, "platform", "win32")
     monkeypatch.setattr(chat.subprocess, "CREATE_NO_WINDOW", 0, raising=False)
     monkeypatch.setattr(chat.subprocess, "run", lambda argv, **kw: ran.append(argv))
     chat._kill_tree(type("Proc", (), {"pid": 4242})())
-    assert Path(ran[1][0]).is_absolute() and Path(ran[1][0]).name == "taskkill.exe" and ran[1][-1] == "4242"
+    taskkill = PureWindowsPath(ran[1][0])
+    assert taskkill.is_absolute() and taskkill.name == "taskkill.exe" and ran[1][-1] == "4242"
 
 
 # --------------------------------------------------------------- 7. the bridge folder
