@@ -64,7 +64,7 @@ def _link(name: str) -> Link:
     out = hw._port_number(ports["outputs"], device["midi_output"], "output", ports["disabled_outputs"])[0]
     inp = (hw._port_number(ports["inputs"], device["midi_input"], "input", ports["disabled_inputs"])[0]
            if device.get("midi_input") else None)
-    return Link(key, device, out, inp, int(device.get("channel", 1)), profile)
+    return Link(key, device, out, inp, hw.midi_channel(key, device), profile)
 
 
 def _ask(link: Link, messages: list[str], want: set[int], what: str, wait: float = REPLY_WAIT_S) -> tuple[int, bytes]:
@@ -130,13 +130,20 @@ def _backup(link: Link, data: bytes, why: str) -> None:
         del kept[BACKUPS_KEPT:]
 
 
-def _load(link: Link, data: bytes, label: str, current: bytes | None = None, keep: bool = True) -> None:
+def _load(link: Link, data: bytes, label: str, current: bytes | None = None, keep: bool = True,
+          ask: bool = True) -> None:
     """Loads a patch into the device's edit buffer, keeping what was there (keep=False
-    only for a sound creaper put there itself a moment ago)."""
+    only for a sound creaper put there itself a moment ago). ask=False only for putting
+    back a sound the synth itself held a moment ago."""
     p = link.profile
+    # Whatever the source (the library, a backup, a project someone else made), only a
+    # whole patch is sent: these files can be edited, and a short one is a malformed dump.
+    if not isinstance(data, (bytes, bytearray)) or len(data) != p.PROGRAM_BYTES:
+        raise ValueError(f"'{label}' isn't a whole {p.MODEL} patch ({len(data) if hasattr(data, '__len__') else 0} "
+                         f"bytes, a patch is {p.PROGRAM_BYTES}), so it wasn't sent to {link.name}")
     if current is None:
         current = _read_program(link)   # no backup, no load
-    if link.name not in _asked:
+    if ask and link.name not in _asked:
         confirm_with_user(f"load sounds into the {link.name}'s edit buffer during this session (its stored programs "
                           "aren't changed, and the sound it has now is kept as a backup)")
         _asked.add(link.name)
@@ -286,7 +293,8 @@ def save_hardware_sound(
     name: Annotated[str, Field(description="Name in the hardware map")],
     sound: Annotated[str, Field(min_length=1, max_length=60, description="What to call the sound, e.g. 'Plasma Rifle'")],
     tags: Tags = None,
-    description: Annotated[str | None, Field(description="What it sounds like, what it's for and how to play it")] = None,
+    description: Annotated[str | None, Field(max_length=server.MAX_DESCRIPTION_CHARS, description=(
+        "What it sounds like, what it's for and how to play it, in a sentence or two"))] = None,
     overwrite: Annotated[bool, Field(description="Replace a saved sound with the same name")] = False,
 ) -> dict:
     """Saves the sound a hardware synth has right now to the user's sound library (the
@@ -388,14 +396,19 @@ def write_hardware_program(
 ) -> dict:
     """Stores the sound in a hardware synth's edit buffer into one of its programs,
     OVERWRITING what's stored there. Only when the user asks for a sound to live on
-    the synth itself, and names the slot (or agrees to one). It asks the user every
-    time, naming the slot. creaper first keeps a copy of the program being replaced
-    (as a backup) when the synth lets it. Sounds are safe in the sound library
-    without this (save_hardware_sound)."""
+    the synth itself, and names the slot (or agrees to one). In creaper's chat panel
+    it asks the user every time, naming the slot. In other apps (Claude Desktop,
+    Claude Code) creaper can't ask, so it refuses, unless the user has set
+    CREAPER_ALLOW_UNCONFIRMED=1: then confirm the slot with the user in the chat
+    yourself first. creaper keeps a copy of the program being replaced (as a backup)
+    when the synth lets it. Sounds are safe in the sound library without this
+    (save_hardware_sound)."""
     link = _link(name)
     p = link.profile
     number = p.program_number(program)
     slot = p.program_name(number)
+    # Before anything is sent to the synth: where creaper can't ask, nothing is touched.
+    server.require_asking(f"OVERWRITE program {slot} on the {link.name}")
     setup = _read_setup(link)
     if setup["memory_protect"]:
         raise ValueError(f"{link.name}'s memory protect is on, so it would refuse. The user turns it off on the synth "
@@ -409,11 +422,12 @@ def write_hardware_program(
         stored = _read_program(link)
         _backup(link, stored, f"program {slot} before it was overwritten")
         kept = True
-        _asked.add(link.name)
-        _load(link, wanted, f"the sound to store in {slot}", current=stored)
+        _load(link, wanted, f"the sound to store in {slot}", current=stored, ask=False)
     confirm_with_user(f"OVERWRITE program {slot} on the {link.name} with the sound in its edit buffer ("
                       + ("creaper has kept a copy of the program that's there now" if kept else
-                         "the program that's there now can't be backed up and will be lost") + ")")
+                         "the program that's there now can't be backed up and will be lost") + ")",
+                      irreversible=True)
+    _asked.add(link.name)   # only now: a Deny above leaves later loads still to be asked
     function, _ = _ask(link, [p.message(link.channel, p.F_WRITE_REQUEST, [0, number])], {p.F_WRITE_OK, p.F_WRITE_ERROR},
                        f"asked it to write program {slot}", wait=4.0)
     if function != p.F_WRITE_OK:
@@ -608,7 +622,8 @@ def audition_hardware(
     release, brightness, pitch and tuning per note, and the pitch over time. This is
     creaper's only ear for hardware, so use it after every change in a sound-design
     loop instead of guessing, and tell the user what was measured. It takes real
-    time (the phrase plus the tail). It asks the user once per session. REAPER's
+    time (the phrase plus the tail). In creaper's chat panel it asks the user once per
+    session (elsewhere the app's own approval of the tool call is the question). REAPER's
     'save or delete new files' window is turned off for the session where REAPER
     allows (7.74 and later); on older REAPER it appears after every recording and the
     user must click Save: setup_warnings says where to turn it off. The synth plays
@@ -664,7 +679,8 @@ def calibrate_hardware_latency(name: Annotated[str, Field(description="Name in t
     the right moment. Run it once per device, and again after changing the audio
     buffer size or interface. It plays five short clicks: for those few seconds it
     puts a click sound in the synth's edit buffer, then puts the user's sound back.
-    It records, so the user is asked (and REAPER's save/delete window may appear)."""
+    It records, so in creaper's chat panel the user is asked (and REAPER's save/delete
+    window may appear)."""
     link = _link(name)
     p = link.profile
     checked = setup.preflight(link.name, link.device)
@@ -720,6 +736,60 @@ def calibrate_hardware_latency(name: Annotated[str, Field(description="Name in t
 
 # ------------------------------------------------------- tracks and printing
 
+def _item_label(item: dict) -> str:
+    name = hw.one_line(item.get("sound") or item.get("name") or "", 60)
+    where = (item.get("start") or {}).get("bar")
+    return (f"'{name}' " if name else "") + (f"at bar {where}" if where else f"at {item.get('start_seconds', 0):.1f} s")
+
+
+def _sound_patch(link: Link, sysex: Any, label: str) -> bytes:
+    """The patch in a sound item's SysEx, or a refusal: only the device's own
+    current-program dump of a whole patch is ever played or sent. A project from
+    someone else can hold anything here (a write request stores the edit buffer over
+    a program)."""
+    p = link.profile
+    try:
+        parsed = p.parse_message(sysex) if isinstance(sysex, str) else None
+        data = p.unpack(parsed[1]) if parsed and parsed[0] == p.F_CURRENT_DUMP else None
+    except (ValueError, TypeError, IndexError):
+        data = None
+    if data is None or len(data) != p.PROGRAM_BYTES:
+        raise ValueError(f"not recorded: the sound item {label} on this part doesn't hold a {p.MODEL} sound as "
+                         f"creaper writes them (a current-program dump of {p.PROGRAM_BYTES} bytes), and it would be "
+                         f"sent to {link.name}. Delete that item and write the sound again with load_hardware_sound "
+                         "track=..., bar=....")
+    return data
+
+
+def _check_part_sysex(link: Link, part: dict) -> None:
+    """Refuses to play a hardware part whose MIDI track would send SysEx creaper didn't
+    write: notes and control changes can't hurt a synth, SysEx can rewrite its memory.
+    Allowed: creaper's sound items, each holding only whole current-program dumps."""
+    items = [(i, False) for i in part.get("parts") or []] + [(i, True) for i in part.get("sounds") or []]
+    if any("sysex_count" not in i for i, _ in items):
+        raise ValueError("not recorded: the creaper bridge in REAPER is older than this server and can't show what "
+                         "the part would send to the synth. The user updates it with `creaper install-bridge` and "
+                         "restarts the bridge script in REAPER.")
+    for item, is_sound in items:
+        count, events = int(item.get("sysex_count") or 0), list(item.get("sysex_events") or [])
+        if not is_sound:
+            if count:
+                raise ValueError(f"not recorded: the MIDI item {_item_label(item)} on {part['midi_track']['name']} "
+                                 f"holds {count} SysEx message(s) that creaper didn't write, and playing it would "
+                                 f"send them to {link.name} (SysEx can overwrite a synth's stored programs). The "
+                                 "user removes them in REAPER's MIDI editor (the event list shows them), or the "
+                                 "item is deleted and the part written again.")
+            continue
+        label = _item_label(item)
+        if count > len(events):
+            raise ValueError(f"not recorded: the sound item {label} holds {count} SysEx messages, more than a sound "
+                             f"creaper wrote has, and they would be sent to {link.name}. Delete that item and write "
+                             "the sound again with load_hardware_sound track=..., bar=....")
+        for event in events:
+            _sound_patch(link, event, label)
+        if item.get("sysex"):
+            _sound_patch(link, item["sysex"], label)
+
 @tool()
 def create_hardware_track(
     name: Annotated[str, Field(description="Name in the hardware map")],
@@ -769,8 +839,11 @@ def print_hardware(
     own recording, and an older print over the same bars is replaced. Then the part is
     ordinary audio: measure_tracks, auto_mix, mastering, export_mix and export_regions
     (sound effects) all work on it. Print again after changing the notes or the
-    sound. It takes as long as the part lasts; the user is asked first, and REAPER's
-    save/delete window may appear when it stops (they choose Save)."""
+    sound. It takes as long as the part lasts; in creaper's chat panel the user is
+    asked first, and REAPER's save/delete window may appear when it stops (they choose
+    Save). It refuses a part whose MIDI track holds SysEx creaper didn't write (only a
+    sound from load_hardware_sound track=... may be there): SysEx can overwrite the
+    synth's stored programs."""
     found = call("hardware_tracks", track=track, start_bar=start_bar, end_bar=end_bar)
     part = found["hardware_tracks"][0]
     link = _link(part["device"])
@@ -783,15 +856,15 @@ def print_hardware(
     if end <= start:
         raise ValueError("end_bar must be after start_bar")
     length = end - start + tail_seconds
+    _check_part_sysex(link, part)   # before the user is asked: nothing foreign is played to the synth
     confirm_with_user(f"record '{part['audio_track']['name']}' from the {link.name} in real time ({length:.0f} seconds)")
     earlier = [s for s in part.get("sounds") or [] if s["start_seconds"] <= start + 0.01 and s.get("sysex")]
     out: dict[str, Any] = {"device": link.name}
     mute_items = []
     if earlier:
         sound = max(earlier, key=lambda s: s["start_seconds"])
-        parsed = link.profile.parse_message(sound["sysex"])
         _asked.add(link.name)
-        _load(link, link.profile.unpack(parsed[1]), sound["sound"])
+        _load(link, _sound_patch(link, sound["sysex"], _item_label(sound)), sound["sound"])
         out["sound"] = sound["sound"]
         if sound["end_seconds"] > start:
             mute_items.append(sound["id"])

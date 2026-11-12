@@ -50,7 +50,10 @@ class FakeKorg:
         self.noise_dbfs = None
         self.reaper = Reaper()
         self.patch_items: list[dict] = []
-        self.parts = [{"id": "{P1}", "start_seconds": 4.0, "end_seconds": 8.0, "start": {"bar": 3, "beat": 1}}]
+        self.sound_events = None       # the SysEx REAPER finds in a sound item; None = what creaper wrote there
+        self.sound_sysex_count = None
+        self.parts = [{"id": "{P1}", "start_seconds": 4.0, "end_seconds": 8.0, "start": {"bar": 3, "beat": 1},
+                       "sysex_count": 0, "sysex_events": []}]
 
     def _reply(self, function, payload=b""):
         self.history.append({"seq": self.history[-1]["seq"] + 1, "device": 0,
@@ -80,6 +83,12 @@ class FakeKorg:
         elif function == mk.F_WRITE_REQUEST:
             self.programs[payload[1]] = self.buffer
             self._reply(mk.F_WRITE_OK)
+
+    def _sound_item(self, written):
+        events = self.sound_events if self.sound_events is not None else [written["sysex"].replace(" ", "")]
+        count = self.sound_sysex_count if self.sound_sysex_count is not None else len(events)
+        return {"id": "{S1}", "sound": written["name"], "sysex": written["sysex"], "start_seconds": 3.5,
+                "end_seconds": 4.0, "start": {"bar": 2, "beat": 4}, "sysex_count": count, "sysex_events": events}
 
     def _record(self, params):
         """A wav of what the 'synth' played: a decaying tone per note, late by tone_delay."""
@@ -132,9 +141,7 @@ class FakeKorg:
         if cmd == "hardware_tracks":
             return {"hardware_tracks": [{"device": "microKORG", "midi_track": {"number": 5, "name": "MK Lead (MIDI)"},
                                          "audio_track": {"number": 6, "name": "MK Lead"}, "parts": self.parts,
-                                         "sounds": [{"id": "{S1}", "sound": i["name"], "sysex": i["sysex"],
-                                                     "start_seconds": 3.5, "end_seconds": 4.0}
-                                                    for i in self.patch_items]}]}
+                                         "sounds": [self._sound_item(i) for i in self.patch_items]}]}
         raise AssertionError(f"unexpected bridge command {cmd}")
 
 
@@ -148,7 +155,9 @@ def korg(tmp_path, monkeypatch):
     monkeypatch.setattr(server, "sound_library", SoundLibrary(tmp_path / "sounds"))
     monkeypatch.setattr(hst, "_asked", set())
     asked = []
-    monkeypatch.setattr(hst, "confirm_with_user", asked.append)
+    monkeypatch.setattr(hst, "confirm_with_user", lambda action, irreversible=False: asked.append(action))
+    monkeypatch.setenv(server.CONFIRM_FILE_ENV, "in the panel")     # where creaper can ask
+    monkeypatch.delenv(server.ALLOW_UNCONFIRMED_ENV, raising=False)
     bridge.asked = asked
     hw.save_hardware("microKORG", midi_output="UM-ONE", midi_input="UM-ONE", channel=1, audio_input=1, stereo=True,
                      model="Korg microKORG")
@@ -381,7 +390,7 @@ def test_a_declined_write_leaves_the_program_alone(korg, monkeypatch):
     korg.globals = global_data(protect=False)
     stored = korg.programs[0]
 
-    def decline(action):
+    def decline(action, irreversible=False):
         if "OVERWRITE" in action:
             raise ValueError("The user declined")
     monkeypatch.setattr(hst, "confirm_with_user", decline)
@@ -563,3 +572,114 @@ def test_the_interface_is_worked_out_for_a_device_saved_before_creaper_did_that(
     with pytest.raises(ValueError, match="ASIO driver: SSL ASIO Driver 1"):
         hst.audition_hardware("microKORG")
     assert hw._devices()["microKORG"]["interface"]["name"] == "SSL 2+"
+
+
+# --------------------------------------- the security review of 2026-11-11
+
+WRITE_REQUEST = mk.message(1, mk.F_WRITE_REQUEST, [0, 5]).replace(" ", "")   # "store the edit buffer in A.16"
+
+
+def _dumps_sent(korg):
+    return [mk.unpack(mk.parse_message(m)[1]) for m in korg.sent
+            if mk.parse_message(m) and mk.parse_message(m)[0] == mk.F_CURRENT_DUMP]
+
+
+def test_a_program_write_is_refused_outside_the_panel_before_the_synth_is_touched(korg, monkeypatch):
+    korg.globals = global_data(protect=False)
+    monkeypatch.delenv(server.CONFIRM_FILE_ENV)                  # Claude Desktop, Claude Code: nobody to ask
+    stored = dict(korg.programs)
+    with pytest.raises(ValueError, match="chat panel.*CREAPER_ALLOW_UNCONFIRMED=1"):
+        hst.write_hardware_program("microKORG", "A.22")
+    assert korg.sent == [] and korg.programs == stored and korg.asked == []
+    monkeypatch.setenv(server.ALLOW_UNCONFIRMED_ENV, "1")        # the user's own opt-in
+    assert hst.write_hardware_program("microKORG", "A.22")["written"] == "A.22"
+
+
+def test_the_overwrite_question_is_the_irreversible_kind(korg, monkeypatch):
+    korg.globals = global_data(protect=False)
+    kinds = {}
+    monkeypatch.setattr(hst, "confirm_with_user", lambda action, irreversible=False: kinds.update({action: irreversible}))
+    hst.write_hardware_program("microKORG", "A.22")
+    assert [k for a, k in kinds.items() if "OVERWRITE" in a] == [True]
+
+
+def test_a_declined_write_does_not_allow_later_loads(korg, monkeypatch):
+    korg.globals = global_data(protect=False)
+
+    def decline(action, irreversible=False):
+        korg.asked.append(action)
+        if "OVERWRITE" in action:
+            raise ValueError("The user declined")
+    monkeypatch.setattr(hst, "confirm_with_user", decline)
+    with pytest.raises(ValueError, match="declined"):
+        hst.write_hardware_program("microKORG", "A.11")
+    assert "microKORG" not in hst._asked
+    assert not [a for a in korg.asked if "load sounds" in a]     # putting the user's own sound back isn't asked
+    hst.load_hardware_sound("microKORG", recipe="glide distortion lead")
+    assert len([a for a in korg.asked if "load sounds" in a]) == 1
+
+
+def test_printing_refuses_sysex_creaper_did_not_write(korg):
+    korg.parts[0].update(sysex_count=1, sysex_events=[WRITE_REQUEST], name="imported.mid")
+    with pytest.raises(ValueError, match=r"'imported.mid' at bar 3.*1 SysEx message\(s\) that creaper didn't write"):
+        hst.print_hardware("MK Lead")
+    assert not any(c == "hardware_take_start" for c, _ in korg.commands)
+    assert korg.sent == [] and korg.asked == []                  # refused before the user is asked or anything is sent
+
+
+@pytest.mark.parametrize("bad", ["a write request", "a short dump", "another maker's message", "an extra message",
+                                 "more than listed", "a tampered copy"])
+def test_printing_refuses_a_sound_item_that_is_not_one_whole_patch(korg, bad):
+    hst.load_hardware_sound("microKORG", recipe="glide distortion lead", track="MK Lead", bar=3)
+    good = korg.patch_items[0]["sysex"].replace(" ", "")
+    short = mk.message(1, mk.F_CURRENT_DUMP, mk.pack(bytes([1, 2]))).replace(" ", "")
+    if bad == "a write request":
+        korg.sound_events = [WRITE_REQUEST]
+    elif bad == "a short dump":
+        korg.sound_events = [short]
+    elif bad == "another maker's message":
+        korg.sound_events = ["F07E7F0601F7"]
+    elif bad == "an extra message":
+        korg.sound_events = [good, WRITE_REQUEST]
+    elif bad == "more than listed":
+        korg.sound_events, korg.sound_sysex_count = [good] * 8, 20
+    else:
+        korg.patch_items[0]["sysex"], korg.sound_events = WRITE_REQUEST, [good]    # the copy creaper would load from
+    sent, asked = len(korg.sent), len(korg.asked)
+    with pytest.raises(ValueError, match="not recorded: the sound item 'glide distortion lead' at bar 2"):
+        hst.print_hardware("MK Lead")
+    assert not any(c == "hardware_take_start" for c, _ in korg.commands)
+    assert len(korg.sent) == sent and len(korg.asked) == asked
+
+
+def test_printing_needs_a_bridge_that_shows_the_sysex(korg):
+    del korg.parts[0]["sysex_count"]                             # a bridge from before this check
+    with pytest.raises(ValueError, match="install-bridge"):
+        hst.print_hardware("MK Lead")
+    assert not any(c == "hardware_take_start" for c, _ in korg.commands)
+
+
+def test_a_patch_of_the_wrong_length_is_never_sent(korg):
+    from creaper import jsonstore
+
+    server.sound_library.save_hardware("Cut Short", mk.MODEL, "0102", {})      # a library file someone edited
+    with pytest.raises(ValueError, match="isn't a whole Korg microKORG patch"):
+        hst.load_hardware_sound("microKORG", sound="Cut Short")
+    hst.set_hardware_params("microKORG", {"cutoff": 50})                        # keeps a backup
+    with jsonstore.updating(hst._backups_path(), dict, indent=None) as store:
+        store["devices"]["microKORG"][0]["patch"] = "00" * 10
+    with pytest.raises(ValueError, match="isn't a whole Korg microKORG patch"):
+        hst.load_hardware_sound("microKORG", backup=1)
+    assert all(len(d) == mk.PROGRAM_BYTES for d in _dumps_sent(korg)) and len(_dumps_sent(korg)) == 1
+
+
+def test_a_channel_that_is_not_one_stops_every_hardware_sound_tool(korg):
+    from creaper import jsonstore
+
+    with jsonstore.updating(hw._store_path(), dict, indent=2) as data:
+        data["devices"]["microKORG"]["channel"] = 97             # 0x90 | 96 is 0xF0, the start of a SysEx
+    for tool in (lambda: hst.read_hardware_patch("microKORG"), lambda: hst.audition_hardware("microKORG"),
+                 lambda: hst.write_hardware_program("microKORG", "A.11")):
+        with pytest.raises(ValueError, match="isn't a channel"):
+            tool()
+    assert korg.sent == []

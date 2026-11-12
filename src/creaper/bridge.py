@@ -45,6 +45,13 @@ STOP_PROMPT_HELP = (
 )
 
 
+def system32(*parts: str) -> str:
+    """A Windows system program by its full path. Started by bare name, Windows looks in
+    the working directory first, which may be a folder someone else filled."""
+    root = os.environ.get("SystemRoot") or os.environ.get("windir") or "C:/Windows"
+    return str(Path(root, "System32", *parts))
+
+
 class BridgeError(RuntimeError):
     """REAPER reported an error, or couldn't be reached."""
 
@@ -64,6 +71,45 @@ def default_bridge_dir() -> Path:
         return Path(override)
     resource = os.environ.get("CREAPER_REAPER_RESOURCE_PATH")
     return (Path(resource) if resource else default_resource_dir()) / "creaper"
+
+
+def folder_warnings(directory: Path) -> list[str]:
+    """What's unsafe about where the bridge folder is. Whoever can write to it can make
+    REAPER run bridge commands, and whoever can read it sees the chat history and notes:
+    it should be the user's alone."""
+    warnings = []
+    try:
+        folder = Path(directory).resolve()
+        home = Path.home().resolve()
+    except (OSError, RuntimeError):
+        return warnings
+    if home != folder and home not in folder.parents:
+        warnings.append(f"The bridge folder is outside your own user folder ({home}). Anyone who can write to it "
+                        "can make REAPER run creaper's commands, and anyone who can read it sees the chat history "
+                        "and notes: keep it where only you have access (a shared drive or a portable REAPER in a "
+                        "shared folder isn't).")
+    if os.name == "posix":
+        try:
+            mode = folder.stat().st_mode
+        except OSError:
+            return warnings
+        if mode & 0o022:
+            warnings.append("Other users on this computer can write to the bridge folder, so they can make REAPER "
+                            f"run creaper's commands. Make it yours alone: chmod 700 \"{folder}\"")
+        elif mode & 0o055:
+            warnings.append("Other users on this computer can read the bridge folder (chat history, notes, "
+                            f"requests). Make it yours alone: chmod 700 \"{folder}\"")
+    return warnings
+
+
+def make_private(directory: Path) -> None:
+    """On macOS and Linux, makes the bridge folder the user's alone (0700). Windows keeps
+    the folder's own permissions: under the user's profile those are already theirs alone."""
+    if os.name == "posix":
+        try:
+            os.chmod(directory, 0o700)
+        except OSError:
+            pass
 
 
 class Bridge:

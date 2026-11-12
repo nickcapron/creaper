@@ -175,7 +175,7 @@ def run_setup(resource_dir: Path, yes: bool = False, dry_run: bool = False, reai
     elif not reaimgui:
         print("Not installed. Get it in REAPER: Extensions > ReaPack > Browse packages > ReaImGui.")
     elif dry_run:
-        print(f"Would download {reaimgui_asset()} from github.com/{REAIMGUI_REPO} (latest release).")
+        print(f"Would download {reaimgui_asset()} from github.com/{REAIMGUI_REPO} (release {REAIMGUI_TAG}).")
     elif _ask("Download and install ReaImGui from its official GitHub release?", yes):
         try:
             install_reaimgui(resource_dir)
@@ -215,12 +215,12 @@ def run_setup(resource_dir: Path, yes: bool = False, dry_run: bool = False, reai
     if not code or not claude:
         print("Skipped." if not code else "Skipped until Claude Code is installed.")
     elif dry_run:
-        print("Would run: claude mcp add --scope user creaper -- <python> -m creaper")
+        print("Would run: claude mcp add --scope user creaper -- <python> -I -m creaper")
     elif _ask("Add creaper to Claude Code too (for `claude` in a terminal)?", yes):
         try:
             print(f"creaper {add_to_claude_code(claude)} in Claude Code.")
         except Exception as e:  # noqa: BLE001
-            print(f"Couldn't add it ({e}). You can run: claude mcp add creaper -- \"{sys.executable}\" -m creaper")
+            print(f"Couldn't add it ({e}). You can run: claude mcp add creaper -- \"{sys.executable}\" -I -m creaper")
 
     step("Done")
     print("Restart REAPER: the creaper panel opens by itself (dock it with the Dock button).")

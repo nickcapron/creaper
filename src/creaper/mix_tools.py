@@ -19,7 +19,7 @@ import numpy as np
 from pydantic import Field
 
 from . import analysis, genres, plugin_profiles
-from .server import DESTRUCTIVE, Bar, analyze_audio, call, setup_sidechain, tool
+from .server import DESTRUCTIVE, Bar, analyze_audio, call, drop_renders, setup_sidechain, tool
 
 # Loudness of each role while it plays (max short-term LUFS), relative to the drums. The
 # voice is the record: it sits over the drums (at 1 LU under them a synth-funk vocal was
@@ -1510,8 +1510,7 @@ def auto_mix(
             c["stereo"] = m.get("stereo")
             c["role"] = given.get(c["name"].lower()) or role_of(c["name"], m["spectrum"], c.get("kit", False))
     finally:
-        for f in stems.get("files", []):
-            Path(f).unlink(missing_ok=True)
+        drop_renders(stems.get("files", []), always=True)
     for c in channels:
         c.setdefault("role", given.get(c["name"].lower()) or role_of(c["name"], kit=c.get("kit", False)))
     spans = _loud_spans(channels, envelopes, stems.get("start", {}).get("seconds", 0.0)) \

@@ -15,6 +15,7 @@ from __future__ import annotations
 import base64
 import importlib.util
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -24,7 +25,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .bridge import default_bridge_dir
+from .bridge import default_bridge_dir, system32
 
 TIMEOUT = 180.0
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -34,17 +35,31 @@ class SpeechError(RuntimeError):
     """No speech engine, or it failed."""
 
 
-def _powershell(script: str, timeout: float = TIMEOUT) -> str:
+SPEECH_JOB_ENV = "CREAPER_SPEECH_JOB"
+# The job file's path reaches PowerShell in this environment variable, never in the
+# script's text: a folder name can hold quote characters PowerShell reads as code.
+_READ_JOB = f"$job = Get-Content -Raw -Encoding UTF8 -LiteralPath $env:{SPEECH_JOB_ENV} | ConvertFrom-Json;"
+
+
+def _powershell(script: str, timeout: float = TIMEOUT, job: Path | None = None) -> str:
     encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
-    done = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
-                          capture_output=True, text=True, timeout=timeout, creationflags=_NO_WINDOW)
+    env = {**os.environ, SPEECH_JOB_ENV: str(job)} if job is not None else None
+    done = subprocess.run([system32("WindowsPowerShell", "v1.0", "powershell.exe"), "-NoProfile", "-NonInteractive",
+                           "-EncodedCommand", encoded],
+                          capture_output=True, text=True, timeout=timeout, creationflags=_NO_WINDOW, env=env)
     if done.returncode != 0:
         raise SpeechError(f"Windows speech failed: {done.stderr.strip()[:300]}")
     return done.stdout
 
 
+# PowerShell ends a single-quoted string at any of these, not only the ASCII one.
+_PS_QUOTES = "'" + "".join(map(chr, (0x2018, 0x2019, 0x201A, 0x201B)))
+
+
 def _ps_quote(text: str) -> str:
-    return "'" + text.replace("'", "''") + "'"
+    """Text as a PowerShell single-quoted string. Prefer passing values out of band
+    (an environment variable, a job file): this is for the rare value that can't be."""
+    return "'" + re.sub(f"[{_PS_QUOTES}]", lambda m: m.group(0) * 2, text) + "'"
 
 
 def _espeak() -> str | None:
@@ -222,7 +237,7 @@ def speak(texts: list[str], folder: Path, voice: str | None = None) -> list[Path
             "-and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1' })[0];"
             "function Await($op, [Type]$t) { $task = $asTask.MakeGenericMethod($t).Invoke($null, @($op)); "
             "$task.Wait(-1) | Out-Null; $task.Result };"
-            f"$job = Get-Content -Raw -Encoding UTF8 -LiteralPath {_ps_quote(str(job))} | ConvertFrom-Json;"
+            + _READ_JOB +
             "$s = New-Object Windows.Media.SpeechSynthesis.SpeechSynthesizer;"
             "$s.Voice = [Windows.Media.SpeechSynthesis.SpeechSynthesizer]::AllVoices | "
             "Where-Object { $_.DisplayName -eq $job.voice } | Select-Object -First 1;"
@@ -231,7 +246,7 @@ def speak(texts: list[str], folder: Path, voice: str | None = None) -> list[Path
             "  $reader = New-Object Windows.Storage.Streams.DataReader($stream.GetInputStreamAt(0));"
             "  $n = [uint32]$stream.Size; $null = Await ($reader.LoadAsync($n)) ([uint32]);"
             "  $bytes = New-Object byte[] $n; $reader.ReadBytes($bytes);"
-            "  [System.IO.File]::WriteAllBytes($w.path, $bytes) }")
+            "  [System.IO.File]::WriteAllBytes($w.path, $bytes) }", job=job)
         job.unlink(missing_ok=True)
     elif sys.platform == "win32":
         job = folder / "speech-job.json"
@@ -239,13 +254,13 @@ def speak(texts: list[str], folder: Path, voice: str | None = None) -> list[Path
             {"text": t, "path": str(p)} for t, p in zip(texts, paths)]}), encoding="utf-8")
         _powershell(
             "Add-Type -AssemblyName System.Speech;"
-            f"$job = Get-Content -Raw -Encoding UTF8 -LiteralPath {_ps_quote(str(job))} | ConvertFrom-Json;"
+            + _READ_JOB +
             "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer;"
             "if ($job.voice) { $s.SelectVoice($job.voice) };"
             "$fmt = New-Object System.Speech.AudioFormat.SpeechAudioFormatInfo(44100, "
             "[System.Speech.AudioFormat.AudioBitsPerSample]::Sixteen, [System.Speech.AudioFormat.AudioChannel]::Mono);"
             "foreach ($w in $job.items) { $s.SetOutputToWaveFile($w.path, $fmt); $s.Speak($w.text) };"
-            "$s.SetOutputToNull(); $s.Dispose()")
+            "$s.SetOutputToNull(); $s.Dispose()", job=job)
         job.unlink(missing_ok=True)
     elif sys.platform == "darwin":
         for text, path in zip(texts, paths):

@@ -1,6 +1,6 @@
 -- @description creaper chat: talk to Claude from a dockable panel inside REAPER
 -- @author nickcapron
--- @version 0.60.0
+-- @version 0.60.1
 -- @link https://github.com/nickcapron/creaper
 -- @about
 --   A chat panel for creaper. Messages go to your own Claude Code (your Claude
@@ -163,7 +163,9 @@ local function start_turn(prompt)
     add_message("error", "Couldn't write to " .. CHAT_DIR .. ", so the message wasn't sent.")
     return
   end
-  reaper.ExecProcess(string.format('"%s" -m creaper chat-turn "%s"', config.python, t.request), -1)
+  -- -I: Python must not import from the folder REAPER happens to be working in (a
+  -- downloaded project's folder could hold a "creaper" package of its own).
+  reaper.ExecProcess(string.format('"%s" -I -m creaper chat-turn "%s"', config.python, t.request), -1)
   turn = t
   save_state()
 end

@@ -231,7 +231,8 @@ def build_command(claude: str, mcp_config: str, session_id: str | None, model: s
 def _kill_tree(proc: subprocess.Popen) -> None:
     if sys.platform == "win32":
         # claude is a .cmd shim around node; kill the whole tree, not just cmd.exe.
-        subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True,
+        from .bridge import system32
+        subprocess.run([system32("taskkill.exe"), "/T", "/F", "/PID", str(proc.pid)], capture_output=True,
                        creationflags=subprocess.CREATE_NO_WINDOW)
     else:
         proc.kill()

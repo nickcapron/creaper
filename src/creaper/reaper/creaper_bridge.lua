@@ -1,6 +1,6 @@
 -- @description creaper bridge: lets Claude work in REAPER through the creaper MCP server
 -- @author nickcapron
--- @version 0.60.0
+-- @version 0.60.1
 -- @link https://github.com/nickcapron/creaper
 -- @provides
 --   [nomain] creaper_json.lua
@@ -13,7 +13,7 @@
 --   Every change it makes is a named undo point ("creaper: ..."), so Ctrl+Z
 --   reverts anything Claude did.
 
-local BRIDGE_VERSION = "0.60.0"
+local BRIDGE_VERSION = "0.60.1"
 local PROTOCOL = 2
 
 ----------------------------------------------------------------------- JSON
@@ -1664,22 +1664,32 @@ function commands.undo(p)
   return { undone = undone }
 end
 
+-- An action by number or name: its number, its name in REAPER's language, and its own
+-- name, which doesn't change with the language: "" for REAPER's built-in actions,
+-- "RS<hash>" for a script, 32 hex digits for a custom action, the extension's name
+-- (SWS_ABOUT) for an extension's.
 local function lookup_action(command)
   local id = tonumber(command)
   if not id then id = reaper.NamedCommandLookup(tostring(command)) end
   if not id or id == 0 then fail("no action with id '" .. tostring(command) .. "'") end
   local name = reaper.kbd_getTextFromCmd(id, 0)
   if name == "" then fail("no action with id '" .. tostring(command) .. "'") end
-  return id, name
+  local named = reaper.ReverseNamedCommandLookup and reaper.ReverseNamedCommandLookup(id) or ""
+  return id, name, (named:gsub("^_", ""))
 end
 
 function commands.describe_action(p)
-  local id, name = lookup_action(p.command)
-  return { command_id = id, name = name }
+  local id, name, named = lookup_action(p.command)
+  return { command_id = id, name = name, named_id = named }
 end
 
 function commands.run_action(p)
-  local id, name = lookup_action(p.command)
+  local id, name, named = lookup_action(p.command)
+  -- The server refuses scripts and custom actions; here too, for a request that didn't come through it.
+  if named:match("^RS") or (#named == 32 and named:match("^%x+$")) then
+    fail("\"" .. name .. "\" is a script or a custom action, which can do anything on the computer: "
+      .. "creaper doesn't run those. The user can run it from REAPER's action list.")
+  end
   reaper.Main_OnCommand(id, 0)
   return { ran = name, command_id = id }
 end
@@ -2017,7 +2027,12 @@ end
 
 function commands.project_paths()
   local _, current = reaper.EnumProjects(-1)
+  -- default_folder is the project's recording path, which a project file can set to any
+  -- folder. reaper_default_folder is the user's own setting (Preferences > Paths: where
+  -- new projects are saved), so the server can tell the two apart.
+  local ok, user_default = reaper.get_config_var_string("defsavepath")
   return { project = current ~= "" and current or nil, default_folder = reaper.GetProjectPath(""),
+           reaper_default_folder = ok and user_default ~= "" and user_default or nil,
            name = reaper.GetProjectName(0, "") }
 end
 
@@ -2162,8 +2177,13 @@ function hws.session_end()
   local saved = hws.session_saved()
   if not saved then return nil end
   local restored = {}
-  for key, value in pairs(saved) do
-    restored[key] = hws.set_config(key, value) or hws.config_int(key) == value
+  -- Only the settings a session changes are put back: whatever else the saved record
+  -- holds (it's a line in an .ini file anyone could have edited) is not applied.
+  for _, key in ipairs(hws.SESSION_KEYS) do
+    local value = saved[key]
+    if value ~= nil then
+      restored[key] = hws.set_config(key, value) or hws.config_int(key) == value
+    end
   end
   reaper.DeleteExtState("creaper", "hw_session", true)
   return restored
@@ -2428,6 +2448,51 @@ function commands.create_hardware_tracks(p)
   end)
 end
 
+-- SysEx is how a synth's memory is written, so what a hardware track would send is
+-- looked at before it plays: only a sound creaper wrote into the song may hold any.
+hws.SYSEX_LISTED = 8 -- messages reported per item; the count is of all of them
+
+-- The SysEx messages in a MIDI take: how many, and the first few as hex (F0 .. F7).
+function hws.take_sysex(take)
+  if not take or not reaper.TakeIsMIDI(take) then return 0, {} end
+  local _, _, _, texts = reaper.MIDI_CountEvts(take)
+  local count, listed = 0, {}
+  for i = 0, (texts or 0) - 1 do
+    local ok, _, _, _, kind, msg = reaper.MIDI_GetTextSysexEvt(take, i, false, false, 0, 0, "")
+    if ok and kind == -1 then
+      count = count + 1
+      if #listed < hws.SYSEX_LISTED then
+        msg = (msg or ""):gsub("^" .. string.char(0xF0), ""):gsub(string.char(0xF7) .. "$", "")
+        listed[#listed + 1] = to_hex(string.char(0xF0) .. msg:sub(1, 4096) .. string.char(0xF7))
+      end
+    end
+  end
+  return count, listed
+end
+
+-- Whether a track's MIDI goes out to a device: a hardware MIDI output, or a creaper hardware part.
+function hws.plays_hardware(t)
+  return reaper.GetMediaTrackInfo_Value(t, "I_MIDIHWOUT") >= 0 or hw_ext(t, "role") ~= ""
+end
+
+-- Removes every SysEx message from an item's takes. Returns how many went and how many are left.
+function hws.strip_sysex(item)
+  local removed, left = 0, 0
+  for ti = 0, reaper.CountTakes(item) - 1 do
+    local take = reaper.GetTake(item, ti)
+    if take and reaper.TakeIsMIDI(take) then
+      local _, _, _, texts = reaper.MIDI_CountEvts(take)
+      for i = (texts or 0) - 1, 0, -1 do
+        local ok, _, _, _, kind = reaper.MIDI_GetTextSysexEvt(take, i, false, false, 0, 0, "")
+        if ok and kind == -1 and reaper.MIDI_DeleteTextSysexEvt(take, i) then removed = removed + 1 end
+      end
+      if removed > 0 then reaper.MIDI_Sort(take) end
+      left = left + hws.take_sysex(take)
+    end
+  end
+  return removed, left
+end
+
 local function hw_items(t)
   local parts, sounds = {}, {}
   for i = 0, reaper.CountTrackMediaItems(t) - 1 do
@@ -2435,6 +2500,13 @@ local function hw_items(t)
     local pos = reaper.GetMediaItemInfo_Value(item, "D_POSITION")
     local entry = { id = item_guid(item), start_seconds = pos,
                     end_seconds = pos + reaper.GetMediaItemInfo_Value(item, "D_LENGTH"), start = time_to_pos(pos) }
+    -- What the item would send to the synth besides notes: print_hardware checks it.
+    local active = reaper.GetActiveTake(item)
+    entry.sysex_count, entry.sysex_events = hws.take_sysex(active)
+    if active then
+      local _, take_name = reaper.GetSetMediaItemTakeInfo_String(active, "P_NAME", "", false)
+      entry.name = take_name ~= "" and take_name or nil
+    end
     local sound = hw_item_ext(item, "sound")
     if sound ~= "" then
       entry.sound = sound
@@ -2515,7 +2587,11 @@ end
 local hw_take
 
 function commands.hardware_take_start(p)
-  if hw_take then fail("a hardware recording is already under way (hardware_take_finish ends it)") end
+  hws.take_watch() -- a pass nobody finished (the turn was stopped mid-recording) is finished first
+  if hw_take then
+    fail("a hardware recording is already under way. It finishes by itself (within "
+      .. hws.TAKE_GRACE_S .. " seconds of stopping, if nothing collects it): wait, then try again")
+  end
   if reaper.GetPlayState() & 4 ~= 0 then fail("REAPER is already recording") end
   if not audio_running(true) then
     fail("REAPER's audio device is closed and wouldn't open (Options > Preferences > Audio > Device)")
@@ -2590,6 +2666,7 @@ function commands.hardware_take_start(p)
   end)
   take.midi, take.audio = reaper.GetTrackGUID(midi), reaper.GetTrackGUID(audio)
   take.start_t, take.end_t = start_t, end_t
+  take.deadline = reaper.time_precise() + (end_t - start_t) + hws.TAKE_OVERRUN_S
   hw_take = take
   reaper.SetEditCurPos(start_t, false, false)
   stop_at = end_t
@@ -2674,6 +2751,31 @@ function commands.hardware_take_finish(p)
     reaper.SetEditCurPos(take.cursor, false, false)
     return { items = out, scratch = take.scratch and true or false }
   end)
+end
+
+-- A pass is finished by whoever started it, a moment after it stops. If that never comes
+-- (the user stopped the turn mid-recording, so the server was killed), the bridge finishes
+-- it itself: tracks armed and unmuted again, scratch tracks removed, and the next pass can
+-- start. TAKE_GRACE_S after the recording stopped (counted from the first tick that sees
+-- it stopped: REAPER's save/delete window holds the script while it's open), or
+-- TAKE_OVERRUN_S past its planned end if it's somehow still recording.
+hws.TAKE_GRACE_S = 60
+hws.TAKE_OVERRUN_S = 120
+
+function hws.take_watch()
+  local take = hw_take
+  if not take then return false end
+  local now = reaper.time_precise()
+  if reaper.GetPlayState() & 4 ~= 0 then
+    take.stopped_at = nil
+    if now < take.deadline then return false end
+  else
+    take.stopped_at = take.stopped_at or now
+    if now - take.stopped_at < hws.TAKE_GRACE_S then return false end
+  end
+  local ok = pcall(commands.hardware_take_finish, {})
+  if not ok then hw_take = nil end -- never left wedged: the next pass can start
+  return true
 end
 
 local RECMODES = { input = 0, output = 1, none = 2, ["midi overdub"] = 7, ["midi replace"] = 8 }
@@ -3740,17 +3842,39 @@ function commands.insert_audio_file(p)
     local selected_items = {}
     for i = 0, reaper.CountSelectedMediaItems(0) - 1 do selected_items[#selected_items + 1] = reaper.GetSelectedMediaItem(0, i) end
     local inserted
+    local new_items = {}
     with_only_track_selected(t, function()
       reaper.SelectAllMediaItems(0, false)
       reaper.SetEditCurPos(qn_to_time(start_qn), false, false)
       reaper.InsertMedia(path, 0) -- 0 = add to the selected track
       inserted = reaper.GetSelectedMediaItem(0, 0)
+      for i = 0, reaper.CountSelectedMediaItems(0) - 1 do new_items[#new_items + 1] = reaper.GetSelectedMediaItem(0, i) end
     end)
     reaper.SelectAllMediaItems(0, false)
     for _, it in ipairs(selected_items) do reaper.SetMediaItemSelected(it, true) end
     reaper.SetEditCurPos(cursor, false, false)
     if not inserted then fail("REAPER couldn't import " .. path) end
-    return item_info(inserted)
+    -- A MIDI file can carry SysEx, and on a track that plays a hardware synth REAPER would
+    -- send it: a file from anywhere could then overwrite the synth's stored programs. The
+    -- notes are kept and the SysEx is removed; if REAPER won't remove it, nothing is imported.
+    local removed, left = 0, 0
+    if ext == "mid" or ext == "midi" then
+      for _, it in ipairs(new_items) do
+        if hws.plays_hardware(reaper.GetMediaItem_Track(it)) then
+          local r, l = hws.strip_sysex(it)
+          removed, left = removed + r, left + l
+        end
+      end
+    end
+    if left > 0 then
+      for _, it in ipairs(new_items) do reaper.DeleteTrackMediaItem(reaper.GetMediaItem_Track(it), it) end
+      fail("not imported: " .. path .. " holds SysEx messages (they can overwrite a synth's memory), this track "
+        .. "plays a hardware synth, and REAPER couldn't remove them. Import it on a track without a hardware "
+        .. "MIDI output, or use a MIDI file without SysEx.")
+    end
+    local info = item_info(inserted)
+    if removed > 0 then info.sysex_removed = removed end
+    return info
   end)
 end
 
@@ -4212,6 +4336,7 @@ local function step()
   if device_closed_at and (audio_is_running() or now - device_closed_at > DEVICE_IDLE_S) then
     ensure_audio() -- the renders have stopped (or REAPER opened the device itself): the user's sound is back
   end
+  hws.take_watch() -- a hardware recording nobody came back to finish
   if hws.touched and now - hws.touched > hws.SESSION_IDLE_S and reaper.GetPlayState() & 4 == 0 then
     hws.session_end() -- no hardware work for a while: the user's recording settings are theirs again
   end

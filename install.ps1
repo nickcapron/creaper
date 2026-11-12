@@ -12,7 +12,7 @@
 
 $ErrorActionPreference = 'Stop'
 # The creaper release this installs (a tag, so what's installed is what was released).
-$Release = 'v0.60.0'
+$Release = 'v0.60.1'
 
 $ProgressPreference = 'SilentlyContinue'
 
@@ -87,6 +87,16 @@ if (-not $python) {
     } else {
         $setup = Join-Path $env:TEMP 'python-3.12.7-amd64.exe'
         Invoke-WebRequest 'https://www.python.org/ftp/python/3.12.7/python-3.12.7-amd64.exe' -OutFile $setup
+        # Only an installer signed by the Python Software Foundation is run: a download that
+        # was swapped or damaged on the way has no valid signature of theirs.
+        $signature = Get-AuthenticodeSignature -FilePath $setup
+        $signer = if ($signature.SignerCertificate) { $signature.SignerCertificate.Subject } else { '' }
+        if ($signature.Status -ne 'Valid' -or $signer -notmatch '(^|,\s*)(CN|O)=Python Software Foundation(,|$)') {
+            Remove-Item -Force $setup -ErrorAction SilentlyContinue
+            Warn "The Python installer that was downloaded isn't signed by the Python Software Foundation (signature: $($signature.Status)), so it wasn't run."
+            Warn "Install Python 3.10 or newer yourself from https://www.python.org, then run this again."
+            return
+        }
         Start-Process $setup -ArgumentList '/quiet', 'InstallAllUsers=0', 'PrependPath=1', 'Include_launcher=1' -Wait
     }
     Refresh-Path

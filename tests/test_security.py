@@ -157,6 +157,10 @@ def test_the_installer_installs_the_released_tag():
     version = re.search(r'^version = "([^"]+)"', (root / "pyproject.toml").read_text(), re.M).group(1)
     ps1 = (root / "install.ps1").read_text(encoding="utf-8")
     assert f"$Release = 'v{version}'" in ps1 and "refs/tags/$Release.zip" in ps1 and "heads/main.zip" not in ps1
+    # The README's pip lines and its pinned installer name the same release (see also test_security_review.py).
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    assert f"archive/refs/tags/v{version}.zip" in readme and "heads/main.zip" not in readme
+    assert f"creaper/v{version}/install.ps1" in readme
 
 
 def test_the_model_and_ci_are_pinned():

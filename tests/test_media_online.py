@@ -40,7 +40,7 @@ class FakeBridge:
                 self.offline = self.still_offline
             return out
         if cmd == "describe_action":
-            return {"command_id": int(params["command"]), "name": "Item: Set all media online"}
+            return {"command_id": int(params["command"]), "name": "Item: Set all media online", "named_id": ""}
         if cmd == "run_action":
             self.actions.append(params["command"])
             return {}

@@ -105,9 +105,7 @@ def render_group(tracks: list, start_bar: float | None, end_bar: float | None) -
             audio, fs = sf.read(s["file"], always_2d=True)
             out[ref], out["_fs"] = audio, int(fs)
     finally:
-        if not os.environ.get("CREAPER_KEEP_RENDERS"):
-            for f in files:
-                Path(f).unlink(missing_ok=True)
+        server.drop_renders(files)
     missing = [t for t in tracks if t not in out]
     for t in missing:     # anything the pass didn't give back, the slow way
         audio, fs, _ = server._render_array(t, start_bar, end_bar)

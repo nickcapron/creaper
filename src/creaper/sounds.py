@@ -27,6 +27,18 @@ SOURCE_PLUGIN = "plugin"
 SOURCE_HARDWARE = "hardware"
 
 
+MAX_DESCRIPTION_CHARS = 400   # a sentence or two about a sound, not a document
+
+
+def _description(text: Any) -> str | None:
+    """A description as it's kept and shown: one line, no longer than MAX_DESCRIPTION_CHARS.
+    It comes back to Claude in every list_sounds, so it stays a short remark about a sound."""
+    text = re.sub(r"\s+", " ", str(text or "")).strip()
+    if len(text) > MAX_DESCRIPTION_CHARS:
+        text = text[:MAX_DESCRIPTION_CHARS - 3].rstrip() + "..."
+    return text or None
+
+
 def _slug(name: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:40] or "sound"
     return f"{slug}-{hashlib.sha1(name.lower().encode()).hexdigest()[:6]}"
@@ -106,7 +118,7 @@ class SoundLibrary:
             "kind": "instrument" if captured.get("instrument") else "effect",
             "format": captured.get("format"),
             "tags": _norm_tags(tags),
-            "description": (description or "").strip() or None,
+            "description": _description(description),
             # Placeholder program names ("Program 1") say nothing about the sound.
             "plugin_preset": None if re.fullmatch(r"Program \d+", captured.get("preset") or "")
             else captured.get("preset"),
@@ -135,7 +147,7 @@ class SoundLibrary:
         entry = {
             "id": _slug(name), "name": name, "source": SOURCE_HARDWARE, "plugin": f"{model} (hardware)",
             "plugin_name": model, "kind": "hardware", "format": "hardware", "tags": _norm_tags(tags),
-            "description": (description or "").strip() or None, "plugin_preset": None,
+            "description": _description(description), "plugin_preset": None,
             "restore": "hardware patch", "saved": dt.datetime.now().isoformat(timespec="seconds"),
         }
         self.folder.mkdir(parents=True, exist_ok=True)
@@ -184,7 +196,7 @@ class SoundLibrary:
         if add_tags:
             entry["tags"] = _norm_tags(entry.get("tags", []) + add_tags)
         if description is not None:
-            entry["description"] = description.strip() or None
+            entry["description"] = _description(description)
         if new_name and new_name.strip().lower() != key:
             new_key = new_name.strip().lower()
             if new_key in sounds:
@@ -211,6 +223,7 @@ class SoundLibrary:
 def describe(entry: dict[str, Any]) -> dict[str, Any]:
     """The library entry as Claude sees it."""
     out = {k: entry.get(k) for k in ("name", "plugin_name", "kind", "tags", "description", "restore", "saved")}
+    out["description"] = _description(out["description"])   # the file may hold an older, longer or edited one
     if entry.get("plugin_preset"):
         out["plugin_preset"] = entry["plugin_preset"]
     return {k: v for k, v in out.items() if v not in (None, [])}

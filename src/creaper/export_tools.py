@@ -55,9 +55,9 @@ def _check_renders(files: list[str]) -> None:
 
 
 def _cleanup(files: list[str]) -> None:
-    if not os.environ.get("CREAPER_KEEP_RENDERS"):
-        for f in files:
-            Path(f).unlink(missing_ok=True)
+    from .server import drop_renders
+
+    drop_renders(files)
 
 
 OGG_QUALITY = 0.6   # Vorbis quality 0-1; 0.6 is about 150-190 kbps for stereo music
@@ -133,7 +133,12 @@ def check_folder(folder: str | Path, info: dict | None = None) -> Path:
     roots = [Path.home() / d for d in USUAL_FOLDERS] + [bridge.directory]
     if info.get("project"):
         roots.append(Path(info["project"]).parent)
-    if info.get("default_folder"):
+    if info.get("reaper_default_folder"):
+        roots.append(Path(info["reaper_default_folder"]))     # the user's own setting in REAPER
+    if info.get("default_folder") and not info.get("project"):
+        # An unsaved project records to REAPER's default path. A saved project's recording
+        # path comes from its file (RECORD_PATH), which someone else may have written: it's
+        # usual only where it lies inside the folders above.
         roots.append(Path(info["default_folder"]))
     # A project saved at the top of a drive (or in the home folder) doesn't make it all usual.
     roots = [r for r in roots if samplelib.too_broad(r) is None]
@@ -282,8 +287,8 @@ def save_project(
     folder: Annotated[str | None, Field(description="Folder for a new file; default: REAPER's project folder")] = None,
     copy: Annotated[bool, Field(description="Save a copy (a snapshot) and keep working in the current project")] = False,
     overwrite: Annotated[bool, Field(description=(
-        "Replace an existing file of that name. A file creaper exported (unchanged since) is replaced without "
-        "asking; the chat panel asks about any other"))] = False,
+        "Replace an existing project file of that name (another project's file is lost): asked in creaper's "
+        "chat panel, refused in other apps unless the user set CREAPER_ALLOW_UNCONFIRMED=1"))] = False,
 ) -> dict:
     """Saves the project: in place when it already has a file, as a new file the first
     time (or with a new name), or as a snapshot copy before big changes. A first save
@@ -302,7 +307,7 @@ def save_project(
     if folder:
         check_folder(folder, info)
     if path.exists() and not (info.get("project") and Path(info["project"]) == path):
-        confirm_with_user(f"replace the existing project file {path}")
+        confirm_with_user(f"replace the existing project file {path}", irreversible=True)
     path.parent.mkdir(parents=True, exist_ok=True)
     result = call("save_project", timeout=120.0, mode="copy" if copy else "save_as", path=str(path))
     if not copy:
@@ -433,14 +438,37 @@ def export_stems(
 
 @tool()
 def reveal_exports(folder: Annotated[str | None, Field(description="Default: the project's Exports folder")] = None) -> dict:
-    """Lists the exported files in the export folder (newest first)."""
+    """Lists the exported files in the export folder (newest first). An export folder,
+    not a drive or a home folder: a very large folder is only partly listed."""
+    from . import samplelib
+
     info = _project_info()
     base = Path(folder) if folder else _default_folder(info)
     if not base.exists():
         return {"folder": str(base), "files": []}
-    files = sorted((p for p in base.rglob("*") if p.suffix.lower() in EXTENSIONS.values()),
-                   key=lambda p: p.stat().st_mtime, reverse=True)
-    return {"folder": str(base), "files": [{"file": str(p), "size_mb": round(p.stat().st_size / 1e6, 2),
-                                            "modified": time.strftime("%Y-%m-%d %H:%M", time.localtime(p.stat().st_mtime))}
-                                           for p in files[:50]]}
+    broad = samplelib.too_broad(base.resolve())
+    if broad:
+        raise ValueError(f"{broad}, not an export folder: name the folder the exports are in")
+    found, looked, partial = [], 0, False
+    for p in base.rglob("*"):
+        looked += 1
+        if looked > REVEAL_MAX_ENTRIES:       # a folder this big isn't an export folder: stop walking it
+            partial = True
+            break
+        if p.suffix.lower() in EXTENSIONS.values():
+            try:
+                found.append((p.stat().st_mtime, p.stat().st_size, p))
+            except OSError:
+                continue
+    found.sort(key=lambda f: f[0], reverse=True)
+    out = {"folder": str(base), "files": [{"file": str(p), "size_mb": round(size / 1e6, 2),
+                                           "modified": time.strftime("%Y-%m-%d %H:%M", time.localtime(mtime))}
+                                          for mtime, size, p in found[:50]]}
+    if partial:
+        out["note"] = (f"This folder holds more than {REVEAL_MAX_ENTRIES} files and folders, so only part of it was "
+                       "looked at; name the exact export folder for a full list.")
+    return out
+
+
+REVEAL_MAX_ENTRIES = 5000
 

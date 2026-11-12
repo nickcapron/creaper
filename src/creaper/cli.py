@@ -11,7 +11,7 @@ from importlib import resources
 from pathlib import Path
 
 from . import __version__
-from .bridge import Bridge, BridgeError, default_bridge_dir
+from .bridge import Bridge, BridgeError, default_bridge_dir, folder_warnings, make_private
 from .chat import find_claude
 
 # What install-bridge keeps in REAPER's Scripts/__startup.lua, which REAPER runs at launch.
@@ -61,6 +61,7 @@ def write_chat_config(bridge_dir: Path) -> Path:
         "creaper_version": __version__,
     }
     bridge_dir.mkdir(parents=True, exist_ok=True)
+    make_private(bridge_dir)   # requests, chat history and notes live here: the user's alone
     path = bridge_dir / "chat_config.json"
     path.write_text(json.dumps(config, indent=2), encoding="utf-8")
     return path
@@ -116,6 +117,8 @@ def doctor() -> int:
     bridge = Bridge()
     print(f"creaper {__version__}")
     print(f"Bridge folder: {bridge.directory}")
+    for warning in folder_warnings(bridge.directory):
+        print(f"Warning: {warning}")
     beat = bridge.heartbeat()
     if beat is None:
         print("No heartbeat from the bridge. Is REAPER open with creaper_bridge.lua running?")

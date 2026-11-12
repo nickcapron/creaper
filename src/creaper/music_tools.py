@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field
 
 from . import composer, feel, genres, harmony, plugin_profiles, scales as scales_db, theory
 from .harmony import Key, SpelledChord
-from .server import READ_ONLY, ItemId, add_drum_pattern, call, tool
+from .server import READ_ONLY, ItemId, add_drum_pattern, call, drop_renders, tool
 
 ChordsArg = Annotated[list[str] | str, Field(description=(
     "Chord symbols (Am7, F#m7b5, C/E, Bbmaj9) or, with a key, Roman numerals (ii7, V7/V, bVII, viiø7, iv6, N6). "
@@ -1207,9 +1207,7 @@ def _render_track(track: str | int, start_bar: float, end_bar: float, stereo: bo
     try:
         audio, fs = sf.read(render["files"][0], dtype="float32", always_2d=True)
     finally:
-        if not os.environ.get("CREAPER_KEEP_RENDERS"):
-            for f in render["files"]:
-                Path(f).unlink(missing_ok=True)
+        drop_renders(render["files"])
     return (audio if stereo else audio.mean(axis=1)), fs
 
 

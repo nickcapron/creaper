@@ -16,7 +16,7 @@ import soundfile as sf
 from pydantic import Field
 
 from . import listen, pluginscan, theory
-from .server import READ_ONLY, BridgeError, bridge, call, plugin_catalog, tool
+from .server import READ_ONLY, BridgeError, bridge, call, drop_renders, plugin_catalog, tool
 
 # Instrument test: one note per octave (pitch tracking, range, envelope, tone), then
 # a row of drum keys 36-51 (C2-D#3, the General MIDI kit) on channel 10. Everything
@@ -53,9 +53,7 @@ def _read(files: list[str]) -> tuple[np.ndarray, int]:
     try:
         audio, fs = sf.read(files[0], dtype="float32", always_2d=True)
     finally:
-        if not os.environ.get("CREAPER_KEEP_RENDERS"):
-            for f in files:
-                Path(f).unlink(missing_ok=True)
+        drop_renders(files)
     return audio, int(fs)
 
 

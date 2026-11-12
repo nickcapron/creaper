@@ -13,7 +13,7 @@ import soundfile as sf
 from pydantic import Field
 
 from . import analysis, asr, genres, harmony, perception, structure
-from .server import READ_ONLY, Bar, BridgeError, bridge, call, tool
+from .server import READ_ONLY, Bar, BridgeError, bridge, call, drop_renders, tool
 from . import vocal_tools  # the module, not its names: it may still be loading (circular import)
 
 try:  # mcp 2.x
@@ -33,9 +33,7 @@ def _render(track: str | int, start_bar: float | None, end_bar: float | None) ->
                 raise BridgeError(f"refusing to use a render outside {renders}: {f}")
         audio, fs = sf.read(render["files"][0], always_2d=True)
     finally:
-        if not os.environ.get("CREAPER_KEEP_RENDERS"):
-            for f in render["files"]:
-                Path(f).unlink(missing_ok=True)
+        drop_renders(render["files"])
     return audio, int(fs), render
 
 
@@ -398,8 +396,7 @@ def check_ending(
                 raise BridgeError(f"refusing to use a render outside {renders}: {f}")
         audio, fs = sf.read(render["files"][0], always_2d=True)
     finally:
-        for f in render["files"]:
-            Path(f).unlink(missing_ok=True)
+        drop_renders(render["files"], always=True)
     prof = perception.ending_profile(audio, int(fs))
     total = length + tail_seconds
     out: dict = {"kind": kind, "length": f"{int(total // 60)}:{int(total % 60):02d}",
@@ -636,8 +633,7 @@ def measure_tracks(
                     if kit:
                         kits[name] = kit
     finally:
-        for f in stems.get("files", []):
-            Path(f).unlink(missing_ok=True)
+        drop_renders(stems.get("files", []), always=True)
     out = {"range": {"from": stems.get("start"), "to": stems.get("end")}, "tracks": table,
            "how_to_read": "lufs_playing: how loud each part is while it plays (compare parts by it); energy_pct: "
                           "where its sound sits; brightness_hz: higher is brighter; harsh_pct_p95: share of its "

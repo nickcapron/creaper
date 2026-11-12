@@ -165,7 +165,8 @@ recorded.
 - **Sound design on the synth.** On a microKORG, creaper reads the current patch as named
   settings, changes them by name (as a whole patch into the edit buffer, or live as knob
   moves over MIDI), and keeps a backup of the sound it replaced. Writing to a program slot
-  always asks first, and the synth's own write protect is respected.
+  asks first, every time, in creaper's chat panel; outside the panel, where creaper can't
+  ask, it's refused (see Security notes). The synth's own write protect is respected.
 - **Hears it.** `audition_hardware` plays a phrase, records it from the interface and
   measures pitch, tuning, envelope, brightness and level. `calibrate_hardware_latency`
   measures how late the synth's audio comes back, so recordings land on the grid.
@@ -246,12 +247,22 @@ REAPER: the creaper panel opens by itself. Run the same command again to update.
 The installer never asks for a Claude password or key; signing in happens in Claude's
 own apps. To see what it does first, [read install.ps1](install.ps1).
 
+That line runs the installer as it is on `main` today. To run exactly the installer
+that was released with a version (the one you read), use the tagged one instead:
+
+```powershell
+irm https://raw.githubusercontent.com/nickcapron/creaper/v0.60.1/install.ps1 | iex
+```
+
+Either way the creaper it installs is the released version, and a Python installer it
+downloads is only run if it's signed by the Python Software Foundation.
+
 ### macOS, Linux, or by hand
 
 You need Python 3.10 or newer.
 
 ```bash
-pip install https://github.com/nickcapron/creaper/archive/refs/heads/main.zip
+pip install https://github.com/nickcapron/creaper/archive/refs/tags/v0.60.1.zip
 creaper setup
 ```
 
@@ -273,13 +284,13 @@ individual steps are below if you'd rather do them yourself.
 - `creaper[analysis]`: librosa's beat tracker, for finding the bars of reference tracks.
 
 ```bash
-pip install "creaper[ml] @ https://github.com/nickcapron/creaper/archive/refs/heads/main.zip"
+pip install "creaper[ml] @ https://github.com/nickcapron/creaper/archive/refs/tags/v0.60.1.zip"
 ```
 
 **1. Install creaper** (manual steps)
 
 ```bash
-pip install https://github.com/nickcapron/creaper/archive/refs/heads/main.zip
+pip install https://github.com/nickcapron/creaper/archive/refs/tags/v0.60.1.zip
 ```
 
 **2. Install the bridge script into REAPER**
@@ -317,7 +328,7 @@ creaper doctor
   "mcpServers": {
     "creaper": {
       "command": "python",
-      "args": ["-m", "creaper"]
+      "args": ["-I", "-m", "creaper"]
     }
   }
 }
@@ -325,11 +336,15 @@ creaper doctor
 
 If `python` isn't on your PATH, use the full path to the Python you installed creaper
 with (on Windows, something like `C:\\Users\\you\\AppData\\Local\\Programs\\Python\\Python312\\python.exe`).
+`-I` keeps Python from loading code out of whatever folder it's started in (a project
+or repository from someone else could hold a `creaper` folder of its own). It also
+skips packages installed with `pip install --user`: if Python then can't find creaper,
+install it in a virtual environment and give that environment's Python here.
 
 *Claude Code:*
 
 ```bash
-claude mcp add creaper -- python -m creaper
+claude mcp add creaper -- python -I -m creaper
 ```
 
 Then ask Claude something like "What's in my REAPER project?"
@@ -380,13 +395,37 @@ shows **Allow / Deny** before anything riskier: running an arbitrary REAPER acti
 - The chat panel's Claude has no shell, file or web tools, only creaper's.
 - Projects can come from other people, and names inside them (tracks, markers,
   presets) reach Claude as text. Claude is told to treat them as data, never as
-  instructions, and the riskier tools need your confirmation in the panel. In Claude
-  Desktop, keep per-tool approval on for `run_action` and `delete_track`.
-- In the panel, replacing an existing file always asks, and so does the first write
-  into a folder outside the project's, REAPER's project folder and your Music,
-  Documents, Videos, Desktop and Downloads folders.
-- `run_action` won't run scripts or actions that save, close, quit, delete files or
-  open preferences; run those yourself from REAPER's action list.
+  instructions.
+- **What asks you, and where.** creaper can only ask you a question (Allow / Deny) in
+  its chat panel inside REAPER. There it asks before: running a REAPER action,
+  deleting a track that has items or effects, starting a recording, overwriting a
+  program on a hardware synth (every time, naming the slot), loading sounds into a
+  synth's edit buffer and recording from it (once a session each), deleting or
+  replacing a sound in your library, deleting a saved drum map or an older note,
+  replacing an existing file, and the first write into a folder outside the project's
+  own, your REAPER default path and your Music, Documents, Videos, Desktop and Downloads
+  folders.
+- In Claude Desktop and Claude Code creaper can't ask: the app's own approval of each
+  tool call is the only question, so keep per-tool approval on (not "always allow")
+  for creaper's tools that delete, record, export or touch hardware. Because that
+  approval can be switched off, the things that can't be undone are refused outright
+  outside the panel: overwriting a hardware synth's stored program
+  (`write_hardware_program`), `run_action`, deleting or replacing a sound in your
+  library, deleting a saved drum map, and saving a project over another project's
+  file. To allow them there, relying on the app's approval, set
+  `CREAPER_ALLOW_UNCONFIRMED=1` in the creaper MCP server's environment.
+- `run_action` won't run scripts, custom actions or actions that save, close, quit,
+  render, delete files or open preferences, in any REAPER language; run those yourself
+  from REAPER's action list.
+- **Hardware synths.** Only creaper's own messages reach a synth: SysEx in an imported
+  MIDI file is left out on a track that plays a hardware synth, and `print_hardware`
+  refuses a part whose MIDI track holds SysEx other than a sound creaper wrote there.
+- **The bridge folder is the trust boundary.** Whoever can write to
+  `<REAPER resource folder>/creaper` can make REAPER run creaper's commands, and
+  whoever can read it sees the panel's chat history and your notes. Keep it yours
+  alone: not on a shared drive, and with a portable REAPER not in a shared folder.
+  `creaper doctor` warns when it isn't; on macOS and Linux `creaper install-bridge`
+  makes it private (0700).
 - Notes Claude saves (`save_note`) are shown in full in the panel and come back to
   Claude marked as information, not instructions. They're in
   `<REAPER resource folder>/creaper/knowledge.json`; delete any you don't recognise.
@@ -449,7 +488,8 @@ HFC) are for non-commercial use only.
   folder for both `creaper install-bridge --reaper-resource-path ...` and the MCP
   server's environment.
 - **Updating:** on Windows, run the installer command again. Otherwise
-  `pip install --upgrade https://github.com/nickcapron/creaper/archive/refs/heads/main.zip`,
+  `pip install --upgrade https://github.com/nickcapron/creaper/archive/refs/tags/<version>.zip`
+  with the newest release's tag (for this README, `v0.60.1`),
   then `creaper install-bridge` again and restart the bridge. A newly started bridge takes
   over from a running one, so you don't need to restart REAPER.
 
