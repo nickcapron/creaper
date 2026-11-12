@@ -414,8 +414,7 @@ def test_only_files_in_the_renders_folder_are_deleted(tmp_path, monkeypatch):
 
 
 def test_no_module_deletes_bridge_named_files_itself():
-    # vocal_tools.py still has its own loop (it was being edited when this was fixed).
-    for name in ("batch", "ear_tools", "mix_tools", "music_tools", "scan_tools", "export_tools", "server"):
+    for name in ("batch", "ear_tools", "mix_tools", "music_tools", "scan_tools", "export_tools", "server", "vocal_tools"):
         source = (ROOT / "src" / "creaper" / f"{name}.py").read_text(encoding="utf-8")
         assert not re.search(r"\bPath\(f\)\.unlink\(", source), name
 

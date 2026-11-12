@@ -1009,6 +1009,32 @@ def test_write_vocal_melody_writes_the_line_and_returns_its_lyrics(monkeypatch):
     assert all(50 <= n["pitch"] <= 64 for n in added["notes"])
 
 
+def test_sung_density_warning_follows_the_tempo(monkeypatch):
+    # Two syllables a beat is four a second at 120 bpm; at 170 the same lines run at five
+    # and blur (VocalVST clarity sweep, 2026-11-09), so the cap drops to four a second.
+    from creaper import lyric_melody, music_tools, vocal_tools
+
+    assert vocal_tools.sung_max_per_beat(90) == 2.0
+    assert vocal_tools.sung_max_per_beat(120) == 2.0
+    assert vocal_tools.sung_max_per_beat(170) == pytest.approx(240 / 170)
+    real = lyric_melody.compose
+    monkeypatch.setattr(lyric_melody, "compose", lambda *a, **kw: {**real(*a, **kw), "syllables_per_beat_max": 1.75})
+    monkeypatch.setattr(vocal_tools, "installed_voices", lambda: {"TIGER": (None, ""), "tiger_disco": (None, "tiger_disco")})
+    for bpm, warned in ((100, False), (170, True)):
+        def fake(cmd, bpm=bpm, **kw):
+            if cmd == "add_midi_notes":
+                return {"notes": len(kw["notes"]), "end": {"bar": 9}}
+            return {"time_signature": "4/4", "tempo_bpm": bpm}
+
+        monkeypatch.setattr(vocal_tools, "call", fake)
+        monkeypatch.setattr(music_tools, "call", fake)
+        out = vocal_tools.write_vocal_melody(item_id="{I}", lyrics="Baby it's you, yeah / Baby it's true, oh",
+                                             chords="Am7 Fmaj7 Cmaj7 G", key="A minor", shape="chorus", seed=2)
+        assert ("warning" in out) == warned, (bpm, out.get("warning"))
+        if warned:
+            assert "5.0 a second at 170 bpm" in out["warning"]
+
+
 def test_render_vocalvst_sets_the_newer_controls_and_reports_the_seed(tmp_path, monkeypatch):
     from creaper import vocal_tools
 

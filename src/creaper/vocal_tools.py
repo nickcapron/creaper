@@ -19,7 +19,7 @@ from pydantic import Field
 
 from . import analysis, asr, composer, harmony, lyric_melody, samplelib, singing, speech, talkbox, theory
 from . import sample_tools  # the module, not its names: it may still be loading (circular import)
-from .server import READ_ONLY, ItemId, TrackRef, bridge, call, tool
+from .server import READ_ONLY, ItemId, TrackRef, bridge, call, drop_renders, tool
 
 # Notes starting this close together (in QN) count as one onset: the top one sings.
 ONSET_TOLERANCE = 1 / 64
@@ -410,6 +410,16 @@ def add_spoken_lines(
 
 SUNG_MAX_PER_BEAT = 2.0   # a sung line keeps its words clear at up to two syllables a beat
 RAP_MAX_PER_BEAT = 4.0    # a rap runs in 16ths; past that VocalVST's 220 ms vowels overlap
+# ...and at up to about four a second, whatever the tempo. Measured 2026-11-09 (VocalVST's
+# HANDOFF, "Clarity sweep"): six pop lines sung by every bank and transcribed by asr.py, key
+# words heard 92-100 % at about 2.3 syllables a second, 85-96 % at 3.6, 72-86 % at 5. Two a
+# beat is four a second at 120 bpm but 4.7 at 140 and 5.7 at 170.
+SUNG_MAX_PER_SECOND = 4.0
+
+
+def sung_max_per_beat(bpm: float) -> float:
+    """The most syllables a beat VocalVST sings clearly at this tempo."""
+    return min(SUNG_MAX_PER_BEAT, SUNG_MAX_PER_SECOND * 60.0 / max(bpm, 1.0))
 
 
 def _sing(words: list[dict], line: list[dict], times: list[float], note_times: list[float], base: float,
@@ -1231,9 +1241,7 @@ def _render_track(track: str | int, start: float, end: float) -> tuple[np.ndarra
                 raise ValueError(f"refusing to read a render outside {renders}: {f}")
             audio, fs = sf.read(f, dtype="float32", always_2d=True)
     finally:
-        if not os.environ.get("CREAPER_KEEP_RENDERS"):
-            for f in files:
-                Path(f).unlink(missing_ok=True)
+        drop_renders(files)   # only ever inside the renders folder; CREAPER_KEEP_RENDERS keeps them
     return audio, int(fs)
 
 
@@ -1896,8 +1904,10 @@ def write_vocal_melody(
                        "token per note, so pass it as returned")}
     if isinstance(written, dict):
         result["item"] = {k_: written[k_] for k_ in ("notes", "end", "grew") if k_ in written}
-    if out["syllables_per_beat_max"] > (RAP_MAX_PER_BEAT if shape == "rap" else SUNG_MAX_PER_BEAT):
-        result["warning"] = (f"{out['syllables_per_beat_max']:g} syllables a beat at the busiest: words this fast "
+    busiest = out["syllables_per_beat_max"]
+    if busiest > (RAP_MAX_PER_BEAT if shape == "rap" else sung_max_per_beat(bpm)):
+        per_second = "" if shape == "rap" else f" ({busiest * bpm / 60.0:.1f} a second at {bpm:g} bpm; clear up to about {SUNG_MAX_PER_SECOND:g})"
+        result["warning"] = (f"{busiest:g} syllables a beat at the busiest{per_second}: words this fast "
                              "blur; give the lines more bars (line_bars) or fewer words")
     check = lyric_melody.lint(out["lyrics"], [n["length"] * 60.0 / bpm for n in out["notes"]])
     if check:
