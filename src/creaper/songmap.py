@@ -123,29 +123,98 @@ def phrase_rests(plan: list[dict], club: bool) -> None:
     loses its drums for its first half; an 8-bar or longer intro opens on its chords
     before the beat (club intros keep the beat for the DJ); an 8-bar or longer outro
     loses its drums for the last 4 bars (a club outro its bass for the second half).
-    Adds 'rests': [[from_bar, to_bar], ...] (0-based within the section) to those parts."""
-    def rest(row: dict, part: str, a: int, b: int) -> None:
-        if part in row["parts"] and 0 <= a < b <= row["bars"]:
-            row["parts"][part] = dict(row["parts"][part], rests=row["parts"][part].get("rests", []) + [[a, b]])
+    Adds 'rests': [[from_bar, to_bar], ...] (0-based within the section) to those parts.
+    The rules are rest_rules', which thin_arrangement applies to hand-written parts."""
+    for r in rest_rules(plan, club):
+        row = plan[r["row"]]
+        part = row["parts"][r["part"]]
+        row["parts"][r["part"]] = dict(part, rests=part.get("rests", []) + [[r["from"], r["to"]]])
 
-    first_verse = next((r for r in plan if r["kind"] == "verse"), None)
-    for i, row in enumerate(plan):
+
+HELD_BACK = ("counter", "chords", "bass", "lead")   # which part waits, first one playing; never the drums
+TAIL_REST = ("chords", "counter", "bass")           # which part breathes before a section that adds nothing
+
+
+def rest_rules(rows: list[dict], club: bool, entries: bool = False) -> list[dict]:
+    """Where parts sit out inside their sections, as [{'row', 'part', 'from', 'to',
+    'why'}] with from/to 0-based bars within the section (to exclusive). rows:
+    [{'kind', 'bars', 'parts': the part names playing there}], in song order. The one
+    set of rules behind phrase_rests (build_song's plan) and thin_arrangement (parts
+    written by hand): the first verse's bass comes in at its 5th bar; chords, bass and
+    counter leave the last bar before a chorus; a bridge (or a breakdown that has drums)
+    loses its drums for its first half; a long intro opens before the beat; a long
+    outro loses its drums (a club outro its bass).
+
+    entries=True adds two rules for sections those leave whole, so something comes in
+    at every section start and no thin stretch runs unchanged: before a section that
+    plays exactly the parts of the one before it, one part (TAIL_REST) leaves the last
+    bar, so it comes back in on the downbeat; and in a section of STEADY_BARS or more
+    with two or three parts, one part (HELD_BACK) waits 4 bars (8 from 20 bars up)
+    before it enters. A chorus is never thinned."""
+    out: list[dict] = []
+
+    def rest(i: int, part: str, a: int, b: int, why: str) -> None:
+        if part in rows[i]["parts"] and 0 <= a < b <= rows[i]["bars"]:
+            out.append({"row": i, "part": part, "from": a, "to": b, "why": why})
+
+    first_verse = next((i for i, r in enumerate(rows) if r["kind"] == "verse"), None)
+    for i, row in enumerate(rows):
         bars, kind = row["bars"], row["kind"]
-        if row is first_verse and bars >= 8:
-            rest(row, "bass", 0, 4)
-        following = plan[i + 1]["kind"] if i + 1 < len(plan) else None
-        if following == "chorus" and kind != "intro" and bars >= 4:
+        mine = len(out)
+        if i == first_verse and bars >= 8:
+            rest(i, "bass", 0, 4, "the bass comes in at the first verse's 5th bar")
+        following = rows[i + 1] if i + 1 < len(rows) else None
+        if following and following["kind"] == "chorus" and kind != "intro" and bars >= 4:
             for part in ("chords", "bass", "counter"):
-                rest(row, part, bars - 1, bars)
-        if kind == "bridge" and bars >= 8:
-            rest(row, "drums", 0, bars // 2)
+                rest(i, part, bars - 1, bars, "a bar's breath before the chorus, so it lands")
+        if kind in ("bridge", "breakdown") and bars >= 8:
+            rest(i, "drums", 0, bars // 2, f"the {kind} opens without drums")
         if kind == "intro" and bars >= 8 and not club and "chords" in row["parts"]:
-            rest(row, "drums", 0, bars // 2)
+            rest(i, "drums", 0, bars // 2, "the intro opens on its chords before the beat")
         if kind == "outro" and bars >= 8:
             if club:
-                rest(row, "bass", bars // 2, bars)
+                rest(i, "bass", bars // 2, bars, "the outro's second half without bass, for the DJ")
             elif len(row["parts"]) > 1:
-                rest(row, "drums", bars - 4, bars)
+                rest(i, "drums", bars - 4, bars, "the outro ends without drums")
+        if not entries:
+            continue
+        resting = out[mine:]
+        if (following and following["kind"] != "chorus" and kind not in ("intro", "chorus") and bars >= 8
+                and len(row["parts"]) > 1
+                and set(following["parts"]) == set(row["parts"])
+                and not any(r["to"] == bars for r in resting)):
+            part = next((p for p in TAIL_REST if p in row["parts"]), None)
+            if part:
+                rest(i, part, bars - 1, bars, "nothing new comes in at the next section, so this leaves a bar "
+                                              "before it and comes back in on its downbeat")
+        if (bars >= STEADY_BARS and 2 <= len(row["parts"]) < FULL_TEXTURE_PARTS and kind not in ("chorus", "outro")
+                and not any(r["from"] == 0 for r in resting)):
+            part = next((p for p in HELD_BACK if p in row["parts"]), None)
+            if part:
+                wait = 8 if bars >= 20 else 4     # a phrase, and enough to break a 16-bar run
+                rest(i, part, 0, wait, f"{bars} bars of the same {len(row['parts'])} parts: this one waits and "
+                                       f"enters at bar {wait + 1} of the section")
+    return out
+
+
+def rest_notes(notes: list[dict], ranges: list[tuple[float, float]]) -> tuple[list[dict], int, int]:
+    """Notes with the ones starting inside any [from, to) range (QN, on the notes' own
+    clock) taken out; a note ringing into a range stops where it begins. Returns (the
+    notes kept, how many were removed, how many were shortened)."""
+    kept, removed, shortened = [], 0, 0
+    for n in notes:
+        start, length = n["start"], n.get("length", 0)
+        if any(a - 1e-6 <= start < b - 1e-6 for a, b in ranges):
+            removed += 1
+            continue
+        for a, _ in ranges:
+            if start < a - 1e-6 < start + length:
+                length = a - start
+        if length != n.get("length", 0):
+            shortened += 1
+            n = dict(n, length=round(length, 6))
+        kept.append(n)
+    return kept, removed, shortened
 
 
 # ----------------------------------------------------------------- song map

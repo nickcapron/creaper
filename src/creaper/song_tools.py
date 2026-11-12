@@ -783,17 +783,141 @@ def _rest(item_id: str, rests: list[list[int]], bar_qn: float) -> None:
     """Takes the notes out of an item's rest bars (0-based [from, to) within it); a note
     ringing into a rest stops where the rest begins."""
     notes = call("get_midi_notes", item_id=item_id, limit=20000).get("notes", [])
-    kept = []
-    for n in notes:
-        start, length = n["start"], n["length"]
-        if any(a * bar_qn - 1e-6 <= start < b * bar_qn - 1e-6 for a, b in rests):
+    kept, _, _ = songmap.rest_notes(notes, [(a * bar_qn, b * bar_qn) for a, b in rests])
+    call("add_midi_notes", item_id=item_id, notes=[_plain_note(n) for n in kept], replace=True)
+
+
+def _plain_note(n: dict) -> dict:
+    """A note as add_midi_notes takes it."""
+    return {"pitch": n["pitch"], "start": n["start"], "length": round(n["length"], 6),
+            "velocity": n.get("velocity", 96), "channel": n.get("channel", 1), **({"muted": True} if n.get("muted") else {})}
+
+
+# Which of plan_song's parts a hand-named track plays, from its mix role (mix_tools.role_of).
+# An arp is a second line over the bed, as a counter-melody is. Vocals, effects and tracks
+# with no role keep every note.
+ROLE_PART = {"drums": "drums", "kick": "drums", "snare": "drums", "perc": "drums", "bass": "bass", "keys": "chords",
+             "pad": "chords", "guitar": "chords", "lead": "lead", "arp": "counter"}
+THIN_SUGGESTS = ("nothing enters", "no moving part")   # song_map findings that finish_stage answers with thin_arrangement
+
+
+@tool(annotations=DESTRUCTIVE)
+def thin_arrangement(
+    dry_run: Annotated[bool, Field(description=(
+        "True lists the bars it would clear and changes nothing; False clears them"))] = True,
+    keep: Annotated[list[str] | None, Field(description=(
+        "Leave these whole: a track ('Pad'), a section ('Bridge') or one track in one section ('Pad@Verse 2')"))] = None,
+    genre: Annotated[str | None, Field(description=(
+        "Default: the song plan's. Club genres keep the beat through the intro and thin the outro's bass instead"))] = None,
+) -> dict:
+    """Makes parts enter and drop out inside sections, over parts already written (by
+    hand or by any tool): the movement build_song writes in, for songs it didn't write.
+    Reads each track's MIDI by section (the regions) and clears bars by build_song's
+    rules: chords, bass and arp out for the last bar before a chorus; the bass in at the
+    first verse's 5th bar; no drums for the first half of a bridge or breakdown; a long
+    intro before the beat, a long outro after it; a bar's rest before a section that
+    brings nothing new in; one part held back 4 or 8 bars in a long thin section. Tracks
+    are read by name (Drums/Kick/Hats, Bass, Pad/Keys/Piano/Strings, Lead, Arp); vocals,
+    effects and other names are never touched. It never empties a track's whole section
+    or leaves a bar with nothing playing, and running it again clears nothing more.
+    Call it with dry_run=True first, then dry_run=False (keep= for anything to leave).
+    Returns every range cleared per track ('bars' are song bars, first to last), what it
+    left alone and why, and the undo steps that take it back."""
+    from .mix_tools import role_of
+
+    overview = call("get_project_overview")
+    sections = _sections(overview)
+    if not sections:
+        raise ValueError("name the sections as regions first (add_marker with end_bar)")
+    bar_qn = _bar_qn(overview)
+    if genre is None:
+        paths = _song_paths()
+        genre = (jsonstore.read(paths[0], dict) if paths and paths[0].exists() else {}).get("genre")
+    club = bool(genre) and genres.find(genre).family in songmap.CLUB_FAMILIES
+    kept_whole = {k.strip().lower() for k in keep or []}
+
+    # Every unmuted track's MIDI items with their notes; state changes as bars are cleared.
+    items: dict[str, dict] = {}          # item id -> {"track", "start", "notes", "changed"}
+    part_of: dict[str, str | None] = {}
+    for t in overview.get("tracks", []):
+        if t.get("mute"):
             continue
-        for a, _ in rests:
-            if start < a * bar_qn - 1e-6 < start + length:
-                length = a * bar_qn - start
-        kept.append({"pitch": n["pitch"], "start": start, "length": round(length, 6),
-                     "velocity": n.get("velocity", 96), "channel": n.get("channel", 1)})
-    call("add_midi_notes", item_id=item_id, notes=kept, replace=True)
+        details = call("get_track_details", track=t.get("guid") or t["name"])
+        for item in details.get("items", []):
+            if item.get("type") != "midi" or item.get("muted"):
+                continue
+            notes = call("get_midi_notes", item_id=item["id"], limit=20000).get("notes", [])
+            if notes:
+                items[item["id"]] = {"track": t["name"], "start": item["start"]["qn"], "notes": notes, "changed": False}
+                part_of[t["name"]] = "counter" if "counter" in t["name"].lower() else ROLE_PART.get(role_of(t["name"]))
+
+    def sounding(track: str, lo: float, hi: float, starts_only: bool = False) -> list[dict]:
+        """A track's unmuted notes starting in [lo, hi), or also ringing into it."""
+        out = []
+        for it in items.values():
+            if it["track"] != track:
+                continue
+            for n in it["notes"]:
+                a = it["start"] + n["start"]
+                if n.get("muted") or a >= hi - 1e-6:
+                    continue
+                if a >= lo - 1e-6 or (not starts_only and a + n.get("length", 0) > lo + 1e-6):
+                    out.append(n)
+        return out
+
+    rows = []
+    for s in sections:
+        playing = {t for t in part_of if sounding(t, s["start_qn"], s["end_qn"], starts_only=True)}
+        rows.append({"section": s["name"], "kind": composer.section_kind(s["name"]),
+                     "bars": max(1, int(round((s["end_qn"] - s["start_qn"]) / bar_qn))),
+                     "parts": {part_of[t] for t in playing if part_of[t]}, "tracks": playing})
+    cleared, left = [], []
+    for rule in songmap.rest_rules(rows, club, entries=True):
+        row, s = rows[rule["row"]], sections[rule["row"]]
+        lo, hi = s["start_qn"] + rule["from"] * bar_qn, s["start_qn"] + rule["to"] * bar_qn
+        first_bar = int(s.get("start_bar") or int(s["start_qn"] // bar_qn) + 1)
+        for track in sorted(t for t in row["tracks"] if part_of[t] == rule["part"]):
+            where = {"track": track, "section": row["section"],
+                     "bars": [first_bar + rule["from"], first_bar + rule["to"] - 1]}
+            if kept_whole & {track.lower(), row["section"].lower(), f"{track}@{row['section']}".lower()}:
+                left.append({**where, "why": "kept (keep=)"})
+                continue
+            if not sounding(track, lo, hi):
+                continue      # already rests there: nothing to clear, nothing to report
+            in_section = sounding(track, s["start_qn"], s["end_qn"], starts_only=True)
+            going = sounding(track, lo, hi, starts_only=True)
+            if len(going) == len(in_section):
+                left.append({**where, "why": "it only plays in these bars: clearing them would empty its section"})
+                continue
+            if not any(sounding(other, lo, hi) for other in part_of if other != track):
+                left.append({**where, "why": "nothing else plays in these bars: clearing them would leave silence"})
+                continue
+            removed = shortened = 0
+            for it in items.values():
+                if it["track"] != track:
+                    continue
+                kept, r, sh = songmap.rest_notes(it["notes"], [(lo - it["start"], hi - it["start"])])
+                if r or sh:
+                    it["notes"], it["changed"] = kept, True
+                    removed, shortened = removed + r, shortened + sh
+            cleared.append({**where, "notes_removed": removed, **({"notes_cut_short": shortened} if shortened else {}),
+                            "why": rule["why"]})
+    changed = [i for i, it in items.items() if it["changed"]]
+    if not dry_run:
+        for item_id in changed:
+            call("add_midi_notes", item_id=item_id, notes=[_plain_note(n) for n in items[item_id]["notes"]],
+                 replace=True, extend_item=False)
+    unread = sorted(t for t, p in part_of.items() if p is None)
+    if not cleared:
+        state = "nothing to clear: the parts already rest where the rules would rest them, or the rules don't fit"
+    elif dry_run:
+        state = "nothing changed yet: thin_arrangement(dry_run=False) clears these, keep=[...] leaves any of them whole"
+    else:
+        state = (f"cleared; undo(steps={len(changed)}) takes all of it back (one step per MIDI item). Listen to the "
+                 "joins, then song_map")
+    return {"dry_run": dry_run, "cleared": cleared, **({"left_alone": left} if left else {}),
+            **({"not_read_as_a_part": unread} if unread else {}),
+            **({"undo_steps": len(changed)} if cleared and not dry_run else {}), "next": state}
 
 
 LEAD_DOUBLE_STEPS = {"third": 2, "octave": 7}   # scale steps over the hook
@@ -872,8 +996,15 @@ def finish_stage(
                                                 "forced": bool(fails), "checks": rows,
                                                 **({"tracks": _mix_snapshot(ctx.overview)} if stage == "mix" else {})}
     left = [s for s in STAGES if not data["stages"].get(s, {}).get("done")]
+    static = sorted({r["section"] for r in rows if r["check"] in THIN_SUGGESTS and r["status"] == "warn"
+                     and r.get("section")}) if stage == "parts" else []
     return {"stage": stage, "done": True, **({"forced_past": [r["check"] for r in fails]} if fails else {}),
-            "checks": rows, "next": left[0] if left else "all stages done: check_song for the scorecard"}
+            "checks": rows,
+            **({"suggest": f"thin_arrangement() lists the bars it would clear so parts come in and drop out "
+                           f"inside sections ({', '.join(static)} sit{'s' if len(static) == 1 else ''} unchanged); "
+                           "thin_arrangement(dry_run=False) clears them. A section with no moving part needs a line "
+                           "written too"} if static else {}),
+            "next": left[0] if left else "all stages done: check_song for the scorecard"}
 
 
 @tool(annotations=READ_ONLY)
