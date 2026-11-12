@@ -217,13 +217,7 @@ def test_run_action_needs_a_bridge_that_names_scripts(monkeypatch):
     assert calls == ["describe_action"]
 
 
-def test_the_bridge_names_actions_and_refuses_scripts_itself():
-    describe_fn = BRIDGE_LUA.split("function commands.describe_action(p)")[1].split("\nend")[0]
-    assert "named_id = named" in describe_fn
-    assert "reaper.ReverseNamedCommandLookup(id)" in BRIDGE_LUA
-    run = BRIDGE_LUA.split("function commands.run_action(p)")[1].split("\nend")[0]
-    assert 'named:match("^RS")' in run and "#named == 32" in run
-    assert run.index("fail(") < run.index("reaper.Main_OnCommand(id, 0)")
+# The bridge's own refusal of scripts is run for real in tests/test_lua_runtime.py.
 
 
 # ------------------------------------------------------ 4, 11. how other programs are started
@@ -292,37 +286,11 @@ def test_install_bridge_makes_the_folder_private():
     assert "make_private(bridge_dir)" in source[made:made + 200]
 
 
-# ---------------------------------------- 8, 9. hardware state the bridge keeps (Lua, read as text)
+# ------------------------------- 8, 9, 3a. hardware state the bridge keeps, SysEx in an imported file
 
-def test_a_take_nobody_finished_is_finished_by_the_bridge():
-    watch = BRIDGE_LUA.split("function hws.take_watch()")[1].split("\nend")[0]
-    assert "hws.TAKE_GRACE_S" in watch and "take.deadline" in watch
-    assert "pcall(commands.hardware_take_finish, {})" in watch
-    step = BRIDGE_LUA.split("local function step()")[1].split("\nend")[0]
-    assert "hws.take_watch()" in step                                   # every tick
-    start = BRIDGE_LUA.split("function commands.hardware_take_start(p)")[1].split("\nend")[0]
-    assert start.index("hws.take_watch()") < start.index("if hw_take then")   # and before the next pass
-    assert "hardware_take_finish ends it" not in BRIDGE_LUA             # a command Claude can't call
-    assert "take.deadline = reaper.time_precise()" in start
-
-
-def test_only_the_two_session_settings_are_ever_put_back():
-    end = BRIDGE_LUA.split("function hws.session_end()")[1].split("\nend")[0]
-    assert "for _, key in ipairs(hws.SESSION_KEYS) do" in end
-    assert "pairs(saved)" not in end
-
-
-# ----------------------------------------------------- 3a. SysEx in an imported MIDI file
-
-def test_sysex_is_stripped_from_midi_imported_onto_a_hardware_track():
-    insert = BRIDGE_LUA.split("function commands.insert_audio_file(p)")[1].split("\nend\n")[0]
-    assert "hws.plays_hardware(reaper.GetMediaItem_Track(it))" in insert and "hws.strip_sysex(it)" in insert
-    assert insert.index("hws.strip_sysex(it)") < insert.index("return info")
-    assert "if left > 0 then" in insert and "reaper.DeleteTrackMediaItem" in insert   # can't strip: not imported
-    plays = BRIDGE_LUA.split("function hws.plays_hardware(t)")[1].split("\nend")[0]
-    assert '"I_MIDIHWOUT") >= 0' in plays
-    strip = BRIDGE_LUA.split("function hws.strip_sysex(item)")[1].split("\nend\n")[0]
-    assert "reaper.MIDI_DeleteTextSysexEvt(take, i)" in strip and "kind == -1" in strip
+# The Lua side (an unfinished take is finished by the bridge, only the two session settings are put
+# back, SysEx is stripped from a .mid imported onto a hardware track) is run for real in
+# tests/test_lua_runtime.py.
 
 
 def test_claude_is_told_when_sysex_was_left_out(monkeypatch):

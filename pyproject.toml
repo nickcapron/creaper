@@ -24,7 +24,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "luaparser>=3"]
+# lupa runs the bridge's Lua for the tests (it carries its own Lua 5.4; wheels for Windows,
+# macOS and Linux). Without it those tests are skipped.
+dev = ["pytest>=8", "luaparser>=3", "lupa>=2.1"]
 # Opt-in, heavy (about 1 GB with the model): a music model's view of a mix (embeddings.py).
 ml = ["transformers>=4.45", "torch>=2.6"]
 # Opt-in (about 300 MB with the model): a speech recogniser that names the robot-vocal

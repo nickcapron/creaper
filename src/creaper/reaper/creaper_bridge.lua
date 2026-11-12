@@ -4405,4 +4405,14 @@ end)
 -- session still under way starts again with the next hardware tool.
 hws.session_end()
 
+-- For the tests only (tests/lua_harness.py): they load this script into a plain Lua
+-- runtime with a fake `reaper` table and set this global first, and get the bridge's
+-- parts back in place of a running loop. A script in REAPER has its own globals and
+-- nothing sets this one, so there the loop always starts.
+if CREAPER_BRIDGE_TEST then
+  CREAPER_BRIDGE_TEST = { commands = commands, hws = hws, handle = handle, step = step, json = json,
+                          audio_is_running = audio_is_running }
+  return
+end
+
 tick()
