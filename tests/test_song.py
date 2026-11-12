@@ -788,3 +788,146 @@ def test_a_thin_stretch_where_nothing_enters_is_flagged():
     later = songmap.song_map({"Pad": pad, "Arp": arp, "Strings": strings, **band}, secs)
     assert not [f for f in later["findings"] if f["check"] == "nothing enters"]        # bars 1-8, then 9-20 with strings
     assert songmap._lead_and_chords(["Pad", "Arp", "Lead"])[0] == "Lead"
+
+
+# ------------------------------------------------------- thin_arrangement
+
+def _hand_song(reaper, layout, tracks):
+    """A song written by hand: a region per (name, bars) and one song-long MIDI item per
+    track. tracks: name -> (pitches, step in QN, the sections it plays in or None for all)."""
+    bar, spans = 1, {}
+    for name, bars in layout:
+        reaper("add_marker", name=name, start_bar=bar, end_bar=bar + bars)
+        spans[name] = (bar - 1, bars)
+        bar += bars
+    items = {}
+    for track, (pitches, step, where) in tracks.items():
+        reaper.add_track(track, instrument="synth")
+        item = reaper("create_midi_item", track=track, start_bar=1, length_bars=bar - 1)["id"]
+        notes = []
+        for name, (start, bars) in spans.items():
+            if where is None or name in where:
+                notes += [{"pitch": p, "start": start * 4.0 + i * step, "length": step, "velocity": 90, "channel": 1}
+                          for i in range(int(bars * 4 / step)) for p in pitches]
+        reaper("add_midi_notes", item_id=item, notes=notes)
+        items[track] = item
+    return items
+
+
+def _starts_in_bars(reaper, item, first, last):
+    """How many of an item's notes start in song bars first..last."""
+    return sum(1 for n in reaper.items[item]["notes"] if (first - 1) * 4.0 <= n["start"] < last * 4.0)
+
+
+POP_LAYOUT = [("Intro", 8), ("Verse 1", 8), ("Pre-Chorus", 8), ("Chorus", 8), ("Bridge", 8), ("Outro", 8)]
+MIDDLE = ("Verse 1", "Pre-Chorus", "Chorus", "Bridge")
+
+
+def test_the_rest_rules_are_the_ones_build_song_plans_with():
+    pop = genres.find("pop")
+    plan = songmap.plan_song(pop, POP_LAYOUT, seed=2)
+    rules = songmap.rest_rules(plan, club=False)
+    assert rules and all(r["why"] for r in rules)
+    for r in rules:                                           # every rule is a rest in the plan, and the reverse
+        assert [r["from"], r["to"]] in plan[r["row"]]["parts"][r["part"]]["rests"]
+    assert len(rules) == sum(len(p.get("rests", [])) for row in plan for p in row["parts"].values())
+    # The two extra rules for hand-written songs: a bar's rest before a section that adds
+    # nothing, one part held back in a long thin section; neither touches a chorus.
+    rows = [{"kind": "verse", "bars": 8, "parts": {"drums", "chords", "lead"}},
+            {"kind": "verse", "bars": 16, "parts": {"drums", "chords", "lead"}},
+            {"kind": "chorus", "bars": 16, "parts": {"drums", "chords", "lead"}},
+            {"kind": "verse", "bars": 24, "parts": {"chords", "counter"}}]
+    assert songmap.rest_rules(rows, club=False) == [{"row": 1, "part": "chords", "from": 15, "to": 16,
+                                                     "why": "a bar's breath before the chorus, so it lands"}]
+    extra = [(r["row"], r["part"], r["from"], r["to"]) for r in songmap.rest_rules(rows, club=False, entries=True)]
+    assert extra == [(0, "chords", 7, 8), (1, "chords", 15, 16), (1, "chords", 0, 4), (3, "counter", 0, 8)]
+
+
+def test_thin_arrangement_clears_bars_of_hand_written_parts_and_says_which(reaper):
+    items = _hand_song(reaper, POP_LAYOUT, {
+        "Drums": ([36], 1.0, None), "Sub Bass": ([33], 1.0, MIDDLE + ("Outro",)), "Pad": ([60, 64, 67], 4.0, None),
+        "Lead": ([72, 74, 76], 1.0, MIDDLE), "Vox": ([65], 1.0, None)})
+    before = {t: [dict(n) for n in reaper.items[i]["notes"]] for t, i in items.items()}
+    plan = song_tools.thin_arrangement()
+    assert plan["dry_run"] and {t: reaper.items[i]["notes"] for t, i in items.items()} == before   # a list, no change
+    assert [(c["track"], c["section"], c["bars"]) for c in plan["cleared"]] == [
+        ("Drums", "Intro", [1, 4]),             # the pad alone, then the beat
+        ("Sub Bass", "Verse 1", [9, 12]),       # the bass comes in at the verse's 5th bar
+        ("Pad", "Verse 1", [16, 16]),           # the pre-chorus adds nothing: the pad leaves a bar and returns
+        ("Pad", "Pre-Chorus", [24, 24]), ("Sub Bass", "Pre-Chorus", [24, 24]),   # a breath before the chorus
+        ("Drums", "Bridge", [33, 36]), ("Drums", "Outro", [45, 48])]
+    assert plan["cleared"][0]["notes_removed"] == 16 and all(c["why"] for c in plan["cleared"])
+    assert plan["not_read_as_a_part"] == ["Vox"]
+    done = song_tools.thin_arrangement(dry_run=False)
+    assert done["cleared"] == plan["cleared"] and done["undo_steps"] == 3          # one step per item written
+    assert _starts_in_bars(reaper, items["Drums"], 1, 4) == 0 and _starts_in_bars(reaper, items["Drums"], 5, 8) == 4 * 4
+    assert _starts_in_bars(reaper, items["Sub Bass"], 9, 12) == 0 and _starts_in_bars(reaper, items["Pad"], 24, 24) == 0
+    assert _starts_in_bars(reaper, items["Drums"], 25, 32) == 32                   # the chorus plays in full
+    assert reaper.items[items["Lead"]]["notes"] == before["Lead"]                  # the melody keeps every note
+    assert reaper.items[items["Vox"]]["notes"] == before["Vox"]                    # and so do the words
+    # Again: nothing more to clear, and nothing written.
+    writes = len([c for c in reaper.calls if c[0] == "add_midi_notes"])
+    again = song_tools.thin_arrangement(dry_run=False)
+    assert again["cleared"] == [] and "undo_steps" not in again
+    assert len([c for c in reaper.calls if c[0] == "add_midi_notes"]) == writes
+    # Every track still plays in every section it played in.
+    for track, item in items.items():
+        bar = 1
+        for name, bars in POP_LAYOUT:
+            had = any((bar - 1) * 4.0 <= n["start"] < (bar - 1 + bars) * 4.0 for n in before[track])
+            assert bool(_starts_in_bars(reaper, item, bar, bar + bars - 1)) == had, (track, name)
+            bar += bars
+
+
+def test_thin_arrangement_never_empties_a_section_or_leaves_silence(reaper):
+    items = _hand_song(reaper, [("Verse", 8), ("Chorus", 8)], {"Bass": ([33], 1.0, None), "Pad": ([60, 64], 4.0, None)})
+    out = song_tools.thin_arrangement(dry_run=False)
+    assert [(c["track"], c["bars"]) for c in out["cleared"]] == [("Bass", [1, 4]), ("Pad", [8, 8])]
+    assert [(x["track"], x["bars"]) for x in out["left_alone"]] == [("Bass", [8, 8])]      # someone has to play bar 8
+    assert "silence" in out["left_alone"][0]["why"]
+    assert _starts_in_bars(reaper, items["Bass"], 8, 8) == 4
+    assert song_tools.thin_arrangement(dry_run=False)["cleared"] == []
+
+
+def test_thin_arrangement_keeps_a_part_that_only_plays_there_and_cuts_ringing_notes(reaper):
+    for name, a, b in (("Verse", 1, 9), ("Chorus", 9, 17)):
+        reaper("add_marker", name=name, start_bar=a, end_bar=b)
+    notes = {"Drums": [{"pitch": 36, "start": i * 1.0, "length": 0.5} for i in range(64)],
+             "Bass": [{"pitch": 33, "start": i * 1.0, "length": 1.0} for i in range(8)]       # only the verse's first two bars
+                     + [{"pitch": 33, "start": 32 + i * 1.0, "length": 1.0} for i in range(32)],
+             "Organ Pad": [{"pitch": 60, "start": 0.0, "length": 32.0}, {"pitch": 60, "start": 32.0, "length": 32.0}]}
+    items = {}
+    for track, ns in notes.items():
+        reaper.add_track(track)
+        items[track] = reaper("create_midi_item", track=track, start_bar=1, length_bars=16)["id"]
+        reaper("add_midi_notes", item_id=items[track], notes=ns)
+    out = song_tools.thin_arrangement(dry_run=False, keep=["drums"])
+    assert [(x["track"], x["bars"], x["why"][:13]) for x in out["left_alone"]] == [("Bass", [1, 4], "it only plays")]
+    assert out["cleared"] == [{"track": "Organ Pad", "section": "Verse", "bars": [8, 8], "notes_removed": 0,
+                               "notes_cut_short": 1, "why": "a bar's breath before the chorus, so it lands"}]
+    assert [(n["start"], n["length"]) for n in reaper.items[items["Organ Pad"]]["notes"]] == [(0.0, 28.0), (32.0, 32.0)]
+    assert len(reaper.items[items["Bass"]]["notes"]) == 40
+    # keep= names a track, a section or one track in one section.
+    reaper.items[items["Organ Pad"]]["notes"] = [dict(n) for n in notes["Organ Pad"]]
+    for keep in (["Organ Pad"], ["verse"], ["organ pad@Verse"]):
+        kept = song_tools.thin_arrangement(keep=keep)
+        assert kept["cleared"] == [] and ("Organ Pad", "kept (keep=)") in [(x["track"], x["why"]) for x in kept["left_alone"]]
+
+
+def test_the_parts_stage_suggests_thinning_where_nothing_enters(reaper, tmp_path):
+    # Daybreak again: 21 bars of a pad and an arp. The arp waits 8 bars, and the warning goes.
+    reaper.project = str(tmp_path / "song.rpp")
+    band = ("Chorus",)
+    items = _hand_song(reaper, [("Intro", 21), ("Chorus", 16)], {
+        "Pad": ([52, 55, 59], 4.0, None), "Arp": ([64], 0.5, None), "Drums": ([36], 1.0, band),
+        "Bass": ([33], 1.0, band), "Lead": ([76], 1.0, band)})
+    for i, n in enumerate(reaper.items[items["Arp"]]["notes"]):
+        n["pitch"] = (64, 67, 71)[i % 3]
+    song_tools.start_song(brief="a beatless opener", genre="pop")
+    stage = song_tools.finish_stage(stage="parts")
+    assert "nothing enters" in [r["check"] for r in stage["checks"]]
+    assert "thin_arrangement" in stage["suggest"] and "Intro" in stage["suggest"]
+    out = song_tools.thin_arrangement(dry_run=False)
+    assert [(c["track"], c["bars"]) for c in out["cleared"]] == [("Arp", [1, 8])]
+    again = song_tools.finish_stage(stage="parts")
+    assert "nothing enters" not in [r["check"] for r in again["checks"]] and "suggest" not in again
