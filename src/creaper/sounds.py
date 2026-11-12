@@ -21,9 +21,10 @@ from typing import Any
 
 from . import jsonstore
 
-# Where a sound comes from. Only plugins for now; hardware synths (MIDI out +
-# audio in) can be added as another source later without changing the format.
+# Where a sound comes from: a plugin (its captured state), or a hardware synth (the
+# patch it sent over MIDI, loaded back into its edit buffer the same way).
 SOURCE_PLUGIN = "plugin"
+SOURCE_HARDWARE = "hardware"
 
 
 def _slug(name: str) -> str:
@@ -115,6 +116,31 @@ class SoundLibrary:
         state = {key_: captured.get(key_) for key_ in ("plugin", "file", "format", "instrument", "chunk", "params")}
         self.folder.mkdir(parents=True, exist_ok=True)
         jsonstore.write(self._state_path(entry), state, indent=None)
+        with self._updating() as data:
+            data.setdefault("sounds", {})[key] = entry
+        return entry
+
+    def save_hardware(self, name: str, model: str, patch_hex: str, params: dict, tags: list[str] | None = None,
+                      description: str | None = None, overwrite: bool = False) -> dict:
+        """A hardware synth's patch as a library sound. Its kind is "hardware", so tools
+        that pick plugin sounds for a track never choose it."""
+        name = name.strip()
+        if not name:
+            raise ValueError("give the sound a name, e.g. 'Laser Zap'")
+        key = name.lower()
+        existing = self._read()
+        if key in existing and not overwrite:
+            raise ValueError(f"there's already a sound named '{existing[key]['name']}'; "
+                             "pick another name or set overwrite=true")
+        entry = {
+            "id": _slug(name), "name": name, "source": SOURCE_HARDWARE, "plugin": f"{model} (hardware)",
+            "plugin_name": model, "kind": "hardware", "format": "hardware", "tags": _norm_tags(tags),
+            "description": (description or "").strip() or None, "plugin_preset": None,
+            "restore": "hardware patch", "saved": dt.datetime.now().isoformat(timespec="seconds"),
+        }
+        self.folder.mkdir(parents=True, exist_ok=True)
+        jsonstore.write(self._state_path(entry), {"source": SOURCE_HARDWARE, "model": model, "patch": patch_hex,
+                                                  "params": params}, indent=None)
         with self._updating() as data:
             data.setdefault("sounds", {})[key] = entry
         return entry

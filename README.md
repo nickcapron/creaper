@@ -144,6 +144,43 @@ channel); a map you save under the same name overrides the built-in one. Claude
 prefers a real drum instrument over REAPER's basic ReaSynDr, and skips hardware-only
 plugins unless you say the device is connected.
 
+## Hardware synths
+
+creaper can play, program and record a synth on your desk. The first one it knows in
+depth is the original **Korg microKORG**. Any MIDI device can be found, saved, played and
+recorded.
+
+- **Finds what's connected.** `scan_hardware` asks each MIDI port "what are you?" (the
+  standard MIDI identity request) and names the maker, model and MIDI channel of every
+  device that answers. `save_hardware` remembers each device: its MIDI ports (by name, so
+  replugging doesn't break it), channel, and the interface inputs its audio returns on.
+- **Sets REAPER up, or tells you exactly how.** `setup_hardware` checks REAPER before
+  anything records: is the audio device open, is it the interface the synth is plugged
+  into (and not the laptop microphone), are the MIDI ports enabled. It matches the MIDI
+  port to the interface and its ASIO driver (e.g. *SSL 2+ MIDI* → *SSL ASIO Driver 1*).
+  If something's wrong, it opens the right Preferences page, says what to pick, and
+  carries on when you've changed it. While it works with the synth it turns off
+  "close audio device when inactive" and the save-files prompt after recording, and
+  puts both back when it's done (REAPER 7.74 or newer).
+- **Sound design on the synth.** On a microKORG, creaper reads the current patch as named
+  settings, changes them by name (as a whole patch into the edit buffer, or live as knob
+  moves over MIDI), and keeps a backup of the sound it replaced. Writing to a program slot
+  always asks first, and the synth's own write protect is respected.
+- **Hears it.** `audition_hardware` plays a phrase, records it from the interface and
+  measures pitch, tuning, envelope, brightness and level. `calibrate_hardware_latency`
+  measures how late the synth's audio comes back, so recordings land on the grid.
+- **Into the song.** `create_hardware_track` makes a MIDI track that plays the synth and
+  an audio track that records it. A part's sound is written into the song just before
+  the part, so the synth is on the right patch whenever it plays. `print_hardware`
+  records the part to audio in real time, after which mixing, mastering and export work
+  as with any other track.
+- **Recipes.** Starting patches for game sound effects (laser, power-up, alarm, explosion,
+  UI blip, drones, a vocoder robot voice) and for sounds in the style of well-known
+  microKORG users, with the sources for each and the factory program when that's what a
+  source says was used. They're starting points to tune by ear.
+
+The hardware map is saved in `<REAPER resource path>/creaper/hardware.json`.
+
 ## Mixing jobs, measured
 
 The one-call jobs were checked against real renders, not just set up:

@@ -1,6 +1,6 @@
 -- @description creaper bridge: lets Claude work in REAPER through the creaper MCP server
 -- @author nickcapron
--- @version 0.59.1
+-- @version 0.60.0
 -- @link https://github.com/nickcapron/creaper
 -- @provides
 --   [nomain] creaper_json.lua
@@ -13,7 +13,7 @@
 --   Every change it makes is a named undo point ("creaper: ..."), so Ctrl+Z
 --   reverts anything Claude did.
 
-local BRIDGE_VERSION = "0.59.1"
+local BRIDGE_VERSION = "0.60.0"
 local PROTOCOL = 2
 
 ----------------------------------------------------------------------- JSON
@@ -99,8 +99,14 @@ end
 local DEVICE_IDLE_S = 20
 local device_closed_at = nil
 
+-- Audio_IsRunning answers 0 or 1, and 0 counts as true in Lua: always compare.
+local function audio_is_running()
+  local r = reaper.Audio_IsRunning()
+  return r == true or r == 1
+end
+
 local function close_audio_for_renders()
-  if reaper.GetPlayState() == 0 and reaper.Audio_IsRunning() then
+  if reaper.GetPlayState() == 0 and audio_is_running() then
     reaper.Audio_Quit()
     device_closed_at = reaper.time_precise()
   elseif device_closed_at then
@@ -112,7 +118,7 @@ end
 local function ensure_audio()
   if device_closed_at then
     device_closed_at = nil
-    if not reaper.Audio_IsRunning() then reaper.Audio_Init() end
+    if not audio_is_running() then reaper.Audio_Init() end
   end
 end
 
@@ -2015,6 +2021,154 @@ function commands.project_paths()
            name = reaper.GetProjectName(0, "") }
 end
 
+------------------------------------------------------ hardware setup state
+
+-- What a hardware session needs to know about REAPER's audio and MIDI setup, and the two
+-- settings it turns off while it lasts. One table: the script is near Lua's limit of
+-- 200 local names.
+local hws = {}
+
+function hws.config_int(name)
+  local ok, value = reaper.get_config_var_string(name)
+  if not ok then return nil end
+  return tonumber(value)
+end
+
+-- REAPER only says whether a MIDI device is present (GetMIDIInputName / OutputName), not
+-- whether it's enabled, and a message sent to a disabled output goes nowhere without an
+-- error. The enables are in reaper.ini, [reaper] midiins / midiouts: a bitmask, bit N =
+-- device N (checked against the ports enabled by hand, REAPER 7.58). REAPER rewrites the
+-- file while it runs. Devices 32 and up are kept in other keys (midiins_h, _x ...) whose
+-- layout isn't known, so they answer nil: "can't tell".
+function hws.midi_masks()
+  local path = reaper.get_ini_file and reaper.get_ini_file() or join(reaper.GetResourcePath(), "reaper.ini")
+  local f = io.open(path, "r")
+  if not f then return {} end
+  local masks, inside = {}, false
+  for line in f:lines() do
+    local section = line:match("^%s*%[(.-)%]")
+    if section then
+      if inside then break end
+      inside = section:lower() == "reaper"
+    elseif inside then
+      local key, value = line:match("^%s*(midi%a+)%s*=%s*(-?%d+)")
+      if key == "midiins" then masks["in"] = tonumber(value) & 0xFFFFFFFF end
+      if key == "midiouts" then masks.out = tonumber(value) & 0xFFFFFFFF end
+    end
+  end
+  f:close()
+  return masks
+end
+
+-- true / false, or nil when it can't be told (device 32 and up, or no key in reaper.ini).
+function hws.enabled(masks, kind, device)
+  local mask = masks[kind]
+  if not mask or device < 0 or device > 31 then return nil end
+  return (mask >> device) & 1 == 1
+end
+
+-- Every MIDI device that is plugged in, or enabled but unplugged: { device, name, present, enabled }.
+function hws.ports(masks, kind)
+  local count = kind == "in" and reaper.GetNumMIDIInputs() or reaper.GetNumMIDIOutputs()
+  local name_of = kind == "in" and reaper.GetMIDIInputName or reaper.GetMIDIOutputName
+  local list = {}
+  for i = 0, count - 1 do
+    local present, name = name_of(i, "")
+    local enabled = hws.enabled(masks, kind, i)
+    if present or (enabled and name and name ~= "") then
+      list[#list + 1] = { device = i, name = name, present = present and true or false, enabled = enabled }
+    end
+  end
+  return list
+end
+
+-- The MIDI output a message is about to go to: it must be there and enabled.
+function hws.check_output(device)
+  device = int(device or -1)
+  local present, name = false, ""
+  if device >= 0 then present, name = reaper.GetMIDIOutputName(device, "") end
+  if not present then fail("there's no MIDI output " .. tostring(device)) end
+  if hws.enabled(hws.midi_masks(), "out", device) == false then
+    fail("MIDI output '" .. tostring(name) .. "' is plugged in but not enabled in REAPER, so nothing sent to it "
+      .. "would arrive. Options > Preferences > Audio > MIDI Devices: double-click it under MIDI outputs and "
+      .. "enable output.")
+  end
+  return device
+end
+
+-- While hardware is worked on, two of REAPER's settings get in the way: the save/delete
+-- window after every recording (it blocks scripts), and closing the audio device while
+-- REAPER is stopped and in the background (which it always is when driven from another
+-- app; MIDI stops with the device). Where REAPER can set config variables from a script
+-- (set_config_var_string, 7.74 and later), they're turned off in memory for the session
+-- and put back after: by hardware_status session='end', after SESSION_IDLE_S without
+-- hardware work, when the bridge stops, and when a bridge starts and finds them left
+-- changed (the originals are kept in REAPER's saved ExtState for that).
+hws.SESSION_KEYS = { "promptendrec", "audiocloseinactive" }
+hws.SESSION_IDLE_S = 1800
+hws.touched = nil -- when hardware was last worked on, while a session is on
+
+function hws.session_saved()
+  local saved, any = {}, false
+  for key, value in reaper.GetExtState("creaper", "hw_session"):gmatch("([%w_]+)=(-?%d+)") do
+    saved[key], any = tonumber(value), true
+  end
+  return any and saved or nil
+end
+
+function hws.session_store(saved)
+  local parts = {}
+  for _, key in ipairs(hws.SESSION_KEYS) do
+    if saved[key] then parts[#parts + 1] = key .. "=" .. int(saved[key]) end
+  end
+  if #parts == 0 then
+    reaper.DeleteExtState("creaper", "hw_session", true)
+  else
+    reaper.SetExtState("creaper", "hw_session", table.concat(parts, ";"), true)
+  end
+end
+
+-- Sets a config variable in memory (not written to reaper.ini). True if it took.
+function hws.set_config(name, value)
+  if not reaper.set_config_var_string then return false end
+  local ok = pcall(reaper.set_config_var_string, name, tostring(int(value)), 0)
+  return ok and hws.config_int(name) == int(value)
+end
+
+function hws.session_begin()
+  hws.touched = reaper.time_precise()
+  if not reaper.set_config_var_string then return end
+  local saved = hws.session_saved() or {}
+  for _, key in ipairs(hws.SESSION_KEYS) do
+    local now = hws.config_int(key)
+    if now and now & 1 ~= 0 then
+      -- The original is on record before the setting changes: a crash can't lose it.
+      local first = saved[key] == nil
+      if first then
+        saved[key] = now
+        hws.session_store(saved)
+      end
+      if not hws.set_config(key, now & ~1) and first then
+        saved[key] = nil -- REAPER refused: nothing to put back
+        hws.session_store(saved)
+      end
+    end
+  end
+end
+
+-- Puts the user's settings back. Returns what was restored, or nil if nothing was changed.
+function hws.session_end()
+  hws.touched = nil
+  local saved = hws.session_saved()
+  if not saved then return nil end
+  local restored = {}
+  for key, value in pairs(saved) do
+    restored[key] = hws.set_config(key, value) or hws.config_int(key) == value
+  end
+  reaper.DeleteExtState("creaper", "hw_session", true)
+  return restored
+end
+
 ------------------------------------------------------------ recording
 
 function commands.list_inputs()
@@ -2022,11 +2176,504 @@ function commands.list_inputs()
   for i = 0, reaper.GetNumAudioInputs() - 1 do
     audio[#audio + 1] = { channel = i + 1, name = reaper.GetInputChannelName(i) }
   end
+  -- Present isn't enabled: a port REAPER has switched off in its MIDI Devices settings is
+  -- listed with enabled = false (nothing arrives from it, and nothing sent to it goes out).
+  local masks = hws.midi_masks()
+  local function off(kind, i)
+    if hws.enabled(masks, kind, i) == false then return false end
+    return nil
+  end
   for i = 0, reaper.GetNumMIDIInputs() - 1 do
     local ok, name = reaper.GetMIDIInputName(i, "")
-    if ok then midi[#midi + 1] = { device = i, name = name } end
+    if ok then midi[#midi + 1] = { device = i, name = name, enabled = off("in", i) } end
   end
-  return { audio_inputs = audio, midi_inputs = midi }
+  local outs = {}
+  for i = 0, reaper.GetNumMIDIOutputs() - 1 do
+    local ok, name = reaper.GetMIDIOutputName(i, "")
+    if ok then outs[#outs + 1] = { device = i, name = name, enabled = off("out", i) } end
+  end
+  return { audio_inputs = audio, midi_inputs = midi, midi_outputs = outs }
+end
+
+------------------------------------------------------------ hardware MIDI
+
+-- "F0 7E 7F 06 01 F7" -> the bytes. Only whole bytes in hex; anything else is refused.
+local function hex_bytes(s)
+  if type(s) ~= "string" then fail("a MIDI message is given as hex, e.g. '90 3C 64'") end
+  s = s:gsub("%s", "")
+  if #s == 0 or #s % 2 == 1 or s:find("[^%x]") then fail("not a MIDI message in hex: " .. s:sub(1, 40)) end
+  return (s:gsub("%x%x", function(h) return string.char(tonumber(h, 16)) end))
+end
+
+local function to_hex(buf)
+  return (buf:gsub(".", function(c) return string.format("%02X", c:byte()) end))
+end
+
+-- Sends MIDI messages (hex strings, in order) out of one hardware MIDI output.
+-- REAPER takes MIDI in through its audio engine: with the audio device closed, nothing a
+-- synth sends arrives. Opens the device when asked; returns whether it's running.
+local function audio_running(open)
+  if open and not audio_is_running() then
+    device_closed_at = nil
+    reaper.Audio_Init()
+  end
+  return audio_is_running()
+end
+
+function commands.send_midi(p)
+  if not reaper.SendMIDIMessageToHardware then fail("this REAPER can't send MIDI to hardware from a script; update REAPER") end
+  local audio = audio_running(p.open_audio)
+  local device = hws.check_output(p.device)
+  if hws.touched then hws.touched = reaper.time_precise() end
+  local msgs = {}
+  for _, m in ipairs(p.messages or {}) do msgs[#msgs + 1] = hex_bytes(m) end
+  for _, m in ipairs(msgs) do reaper.SendMIDIMessageToHardware(device, m) end
+  return { device = device, sent = #msgs, audio_running = audio }
+end
+
+-- MIDI that arrived on the hardware inputs (REAPER's recent-input history), oldest first,
+-- only events newer than sequence number `after`. `latest` is the newest sequence number,
+-- to pass as `after` next time. REAPER leaves large SysEx messages out of this history.
+function commands.recent_midi_input(p)
+  if not reaper.MIDI_GetRecentInputEvent then fail("reading MIDI input from a script needs a newer REAPER (7 or later)") end
+  local after, limit = int(p.after or 0), int(p.limit or 64)
+  local events, latest = {}, 0
+  local idx = 0
+  while idx < limit do
+    local seq, buf, ts, dev = reaper.MIDI_GetRecentInputEvent(idx)
+    if not seq or seq == 0 then break end
+    if idx == 0 then latest = seq end
+    if seq <= after then break end
+    dev = int(dev or 0)
+    table.insert(events, 1, { seq = seq, hex = to_hex(buf or ""), device = dev & 0xFFFF,
+                              control_only = (dev & 0x10000) ~= 0 or nil })
+    idx = idx + 1
+  end
+  return { latest = latest, events = events, audio_running = audio_running(false) }
+end
+
+-- The audio and MIDI state a hardware session depends on, in one answer: which device
+-- REAPER has open (and whether it's running), which MIDI ports are enabled rather than
+-- just plugged in, and the two settings that get in the way. session = "begin" turns
+-- those settings off for the session where REAPER allows it; "end" puts them back.
+function hws.status(open)
+  local running = audio_running(open)
+  local function info(key)
+    local ok, value = reaper.GetAudioDeviceInfo(key, "")
+    if ok and value ~= "" then return value end
+  end
+  local function on(key)
+    local value = hws.config_int(key)
+    if value == nil then return nil end
+    return value & 1 ~= 0
+  end
+  local masks = hws.midi_masks()
+  return {
+    reaper_version = reaper.GetAppVersion(),
+    audio = {
+      running = running, mode = info("MODE"), input = info("IDENT_IN"), output = info("IDENT_OUT"),
+      sample_rate = tonumber(info("SRATE") or ""), block_size = tonumber(info("BSIZE") or ""),
+      input_channels = reaper.GetNumAudioInputs(),
+    },
+    midi = {
+      inputs = hws.ports(masks, "in"), outputs = hws.ports(masks, "out"),
+      input_enables_known = masks["in"] ~= nil, output_enables_known = masks.out ~= nil,
+    },
+    settings = {
+      promptendrec = on("promptendrec"), audiocloseinactive = on("audiocloseinactive"),
+      can_change = reaper.set_config_var_string ~= nil,
+      changed_for_session = hws.session_saved(),
+    },
+  }
+end
+
+function commands.hardware_status(p)
+  local restored
+  if p.session == "begin" then hws.session_begin() end
+  if p.session == "end" then restored = hws.session_end() end
+  local out = hws.status(p.open_audio)
+  out.restored = restored
+  return out
+end
+
+-- Opens REAPER's settings at the page the user has to change something on: "audio" =
+-- the audio device page (action 40099), "midi" = MIDI Devices. Whether the window holds
+-- scripts while it's open isn't known for every REAPER: the heartbeat says the bridge
+-- may be held (so clients wait instead of deciding REAPER has gone), and the answer,
+-- whenever it comes, carries the state as it is then.
+function commands.hardware_open_prefs(p)
+  local started = reaper.time_precise()
+  busy = { what = "waiting for the user in Preferences", until_time = os.time() + 150 }
+  if announce then announce() end
+  local how
+  if p.page == "midi" then
+    -- The page's number differs between REAPER versions and isn't known: asked for by name.
+    -- If REAPER doesn't know the name, Preferences opens where it was last.
+    if reaper.ViewPrefs then
+      reaper.ViewPrefs(0, "MIDI Devices")
+      how = "by name"
+    else
+      reaper.Main_OnCommand(40016, 0) -- Options: Preferences...
+      how = "preferences"
+    end
+  elseif reaper.ViewPrefs then
+    -- Preferences > Audio > Device (page 118 in REAPER 7.85, read from reaper.ini's prefspage
+    -- after the user saved that page). Not the separate "Audio device configuration" window
+    -- (action 40099): on 7.85 a user couldn't save the device from it.
+    reaper.ViewPrefs(118, "")
+    how = "audio device page"
+  else
+    reaper.Main_OnCommand(40099, 0) -- Audio device configuration...
+    how = "audio device window"
+  end
+  local out = hws.status(false)
+  out.opened = how
+  out.held_seconds = reaper.time_precise() - started
+  return out
+end
+
+------------------------------------------- hardware tracks, sounds in the song, takes
+
+-- A hardware part is two tracks: a MIDI track whose hardware output plays the device,
+-- and an audio track that records the device's interface inputs. Each remembers the
+-- other (by GUID) and the device's name in its P_EXT data, which is saved with the project.
+local function hw_ext(t, key, value)
+  local _, v = reaper.GetSetMediaTrackInfo_String(t, "P_EXT:creaper_hw_" .. key, value or "", value ~= nil)
+  return v or ""
+end
+
+local function hw_track_by_guid(guid)
+  if not guid or guid == "" then return nil end
+  for i = 0, reaper.CountTracks(0) - 1 do
+    local t = reaper.GetTrack(0, i)
+    if reaper.GetTrackGUID(t) == guid then return t end
+  end
+end
+
+-- The (MIDI track, audio track) of the hardware part a track belongs to.
+local function hw_pair(ref)
+  local t = get_track(ref)
+  local role = hw_ext(t, "role")
+  if role == "" then fail(track_name(t) .. " isn't a hardware track (create_hardware_track makes them)") end
+  local other = hw_track_by_guid(hw_ext(t, "pair"))
+  if not other then
+    fail("the other track of " .. track_name(t) .. "'s hardware pair is gone; make the pair again with create_hardware_track")
+  end
+  if role == "midi" then return t, other end
+  return other, t
+end
+
+local function hw_item_ext(item, key, value)
+  local _, v = reaper.GetSetMediaItemInfo_String(item, "P_EXT:creaper_hw_" .. key, value or "", value ~= nil)
+  return v or ""
+end
+
+local function hw_new_track(name)
+  local index = reaper.CountTracks(0)
+  reaper.InsertTrackAtIndex(index, true)
+  local t = reaper.GetTrack(0, index)
+  reaper.GetSetMediaTrackInfo_String(t, "P_NAME", name, true)
+  reaper.SetMediaTrackInfo_Value(t, "I_RECARM", 0)
+  return t
+end
+
+local function hw_set_output(t, device, channel)
+  reaper.SetMediaTrackInfo_Value(t, "I_MIDIHWOUT", (int(device) << 5) | int(channel or 0))
+end
+
+local function hw_check_input(audio_input, stereo)
+  local first = int(audio_input or 0) - 1
+  if first < 0 or first + (stereo and 1 or 0) >= reaper.GetNumAudioInputs() then
+    fail("the audio device has no input " .. tostring(audio_input) .. (stereo and " and the next" or "")
+      .. " (is REAPER's audio device open, and is it the interface?)")
+  end
+  return first
+end
+
+local function hw_set_input(t, audio_input, stereo)
+  local first = hw_check_input(audio_input, stereo)
+  reaper.SetMediaTrackInfo_Value(t, "I_RECINPUT", stereo and (1024 + first) or first)
+  reaper.SetMediaTrackInfo_Value(t, "I_RECMODE", 0)
+end
+
+function commands.create_hardware_tracks(p)
+  local device = hws.check_output(p.midi_device)
+  audio_running(true) -- the inputs can only be counted with the audio device open
+  hw_check_input(p.audio_input, p.stereo)
+  return with_undo("hardware tracks for " .. tostring(p.name), function()
+    local midi = hw_new_track(p.name .. " (MIDI)")
+    hw_set_output(midi, device, p.channel)
+    local audio = hw_new_track(p.name)
+    hw_set_input(audio, p.audio_input, p.stereo)
+    if p.monitor then
+      -- One live copy of the synth is enough: other parts of the same device stop monitoring.
+      for i = 0, reaper.CountTracks(0) - 1 do
+        local t = reaper.GetTrack(0, i)
+        if t ~= audio and hw_ext(t, "role") == "audio" and hw_ext(t, "device") == p.device then
+          reaper.SetMediaTrackInfo_Value(t, "I_RECARM", 0)
+        end
+      end
+      reaper.SetMediaTrackInfo_Value(audio, "I_RECMON", 1)
+      reaper.SetMediaTrackInfo_Value(audio, "I_RECARM", 1)
+    else
+      reaper.SetMediaTrackInfo_Value(audio, "I_RECMON", 0)
+    end
+    hw_ext(midi, "role", "midi")
+    hw_ext(midi, "device", p.device)
+    hw_ext(midi, "pair", reaper.GetTrackGUID(audio))
+    hw_ext(audio, "role", "audio")
+    hw_ext(audio, "device", p.device)
+    hw_ext(audio, "pair", reaper.GetTrackGUID(midi))
+    return { midi_track = track_ref(midi), audio_track = track_ref(audio), monitoring = p.monitor and true or false }
+  end)
+end
+
+local function hw_items(t)
+  local parts, sounds = {}, {}
+  for i = 0, reaper.CountTrackMediaItems(t) - 1 do
+    local item = reaper.GetTrackMediaItem(t, i)
+    local pos = reaper.GetMediaItemInfo_Value(item, "D_POSITION")
+    local entry = { id = item_guid(item), start_seconds = pos,
+                    end_seconds = pos + reaper.GetMediaItemInfo_Value(item, "D_LENGTH"), start = time_to_pos(pos) }
+    local sound = hw_item_ext(item, "sound")
+    if sound ~= "" then
+      entry.sound = sound
+      entry.sysex = hw_item_ext(item, "sysex")
+      sounds[#sounds + 1] = entry
+    else
+      parts[#parts + 1] = entry
+    end
+  end
+  return parts, sounds
+end
+
+-- Every hardware part in the project (or the one a track belongs to): its two tracks,
+-- the MIDI items on it, and the sounds written into the song with where each is sent.
+function commands.hardware_tracks(p)
+  local out = {}
+  local function describe(midi, audio)
+    local parts, sounds = hw_items(midi)
+    out[#out + 1] = { device = hw_ext(midi, "device"), midi_track = track_ref(midi), audio_track = track_ref(audio),
+                      midi_muted = reaper.GetMediaTrackInfo_Value(midi, "B_MUTE") == 1,
+                      printed_items = reaper.CountTrackMediaItems(audio), parts = parts, sounds = sounds }
+  end
+  if p.track then
+    describe(hw_pair(p.track))
+  else
+    for i = 0, reaper.CountTracks(0) - 1 do
+      local t = reaper.GetTrack(0, i)
+      if hw_ext(t, "role") == "midi" then
+        local audio = hw_track_by_guid(hw_ext(t, "pair"))
+        if audio then describe(t, audio) end
+      end
+    end
+  end
+  -- A bar range, when given, comes back in seconds (what hardware_take_start takes).
+  local s, e = resolve_qn(p, "start"), resolve_qn(p, "end")
+  return { hardware_tracks = out, start_seconds = s and qn_to_time(s) or nil, end_seconds = e and qn_to_time(e) or nil }
+end
+
+-- Writes a sound into the song: a short MIDI item on the part's MIDI track that sends the
+-- patch (SysEx) a moment before the bar, so the synth has loaded it when the first note plays.
+function commands.hardware_patch_item(p)
+  local midi = hw_pair(p.track)
+  local part_qn = resolve_qn(p, "start")
+  if not part_qn then fail("give the bar the sound starts at") end
+  local part_t = qn_to_time(part_qn)
+  local lead = tonumber(p.lead_seconds) or 0.5
+  local from = math.max(0, part_t - lead)
+  local to = part_t
+  local early = part_t - from >= lead - 0.001
+  if to - from < 0.05 then to = from + 0.25 end -- a part at the very start of the project
+  local body = hex_bytes(p.sysex)
+  if body:byte(1) ~= 0xF0 or body:byte(-1) ~= 0xF7 then fail("the sound isn't a SysEx message") end
+  return with_undo("hardware sound " .. tostring(p.name), function()
+    for i = reaper.CountTrackMediaItems(midi) - 1, 0, -1 do
+      local item = reaper.GetTrackMediaItem(midi, i)
+      if hw_item_ext(item, "sound") ~= "" and math.abs(reaper.GetMediaItemInfo_Value(item, "D_POSITION") - from) < 0.01 then
+        reaper.DeleteTrackMediaItem(midi, item)
+      end
+    end
+    local item = reaper.CreateNewMIDIItemInProj(midi, from, to, false)
+    if not item then fail("REAPER couldn't create the item") end
+    local take = reaper.GetActiveTake(item)
+    reaper.MIDI_InsertTextSysexEvt(take, false, false, reaper.MIDI_GetPPQPosFromProjTime(take, from), -1, body:sub(2, -2))
+    reaper.MIDI_Sort(take)
+    reaper.GetSetMediaItemTakeInfo_String(take, "P_NAME", "sound: " .. tostring(p.name), true)
+    hw_item_ext(item, "sound", tostring(p.name))
+    hw_item_ext(item, "sysex", to_hex(body))
+    return { item_id = item_guid(item), track = track_ref(midi), sends_at = time_to_pos(from),
+             part_starts = time_to_pos(part_t), loads_before_the_part = early }
+  end)
+end
+
+-- One recording pass from a hardware device. Scratch mode (p.scratch) makes two temporary
+-- tracks past the end of the project, plays p.notes to the device and records its inputs;
+-- hardware_take_finish removes them again. Print mode (p.track) records a hardware part's
+-- MIDI track through the device onto its audio track. Either way every other track is
+-- disarmed for the pass and put back after.
+local hw_take
+
+function commands.hardware_take_start(p)
+  if hw_take then fail("a hardware recording is already under way (hardware_take_finish ends it)") end
+  if reaper.GetPlayState() & 4 ~= 0 then fail("REAPER is already recording") end
+  if not audio_running(true) then
+    fail("REAPER's audio device is closed and wouldn't open (Options > Preferences > Audio > Device)")
+  end
+  if hws.touched then hws.touched = reaper.time_precise() end
+  local take = { arms = {}, mutes = {}, before = {}, cursor = reaper.GetCursorPosition() }
+  local midi, audio, start_t, end_t, device
+  if p.scratch then
+    device = hws.check_output(p.midi_device)
+    hw_check_input(p.audio_input, p.stereo)
+    start_t = math.ceil(reaper.GetProjectLength(0)) + 2
+    end_t = start_t + (tonumber(p.seconds) or 3)
+  else
+    midi, audio = hw_pair(p.track)
+    device = int(reaper.GetMediaTrackInfo_Value(midi, "I_MIDIHWOUT")) >> 5
+    start_t, end_t = tonumber(p.start_seconds), tonumber(p.end_seconds)
+    if not start_t or not end_t or end_t <= start_t then fail("give the range to record in seconds") end
+  end
+  with_undo("hardware take", function()
+    if p.scratch then
+      midi = hw_new_track("creaper hardware scratch (MIDI)")
+      hw_set_output(midi, device, 0)
+      audio = hw_new_track("creaper hardware scratch")
+      hw_set_input(audio, p.audio_input, p.stereo)
+      reaper.SetMediaTrackInfo_Value(audio, "I_RECMON", 0)
+      take.scratch = { reaper.GetTrackGUID(midi), reaper.GetTrackGUID(audio) }
+      local item = reaper.CreateNewMIDIItemInProj(midi, start_t, end_t, false)
+      local mt = reaper.GetActiveTake(item)
+      local chan = int((p.channel or 1) - 1)
+      for _, n in ipairs(p.notes or {}) do
+        local a = reaper.MIDI_GetPPQPosFromProjTime(mt, start_t + n.at)
+        local b = reaper.MIDI_GetPPQPosFromProjTime(mt, start_t + n.at + n.length)
+        reaper.MIDI_InsertNote(mt, false, false, a, b, chan, int(n.pitch), int(n.velocity or 100), true)
+      end
+      reaper.MIDI_Sort(mt)
+    else
+      -- Only this part may play the device: other tracks sending to the same output are muted.
+      take.midi_was_muted = reaper.GetMediaTrackInfo_Value(midi, "B_MUTE")
+      reaper.SetMediaTrackInfo_Value(midi, "B_MUTE", 0)
+      -- A sound the caller has just sent itself isn't sent again on top of the first note.
+      take.item_mutes = {}
+      for _, id in ipairs(p.mute_items or {}) do
+        for i = 0, reaper.CountTrackMediaItems(midi) - 1 do
+          local item = reaper.GetTrackMediaItem(midi, i)
+          if item_guid(item) == id then
+            take.item_mutes[#take.item_mutes + 1] = { id, reaper.GetMediaItemInfo_Value(item, "B_MUTE") }
+            reaper.SetMediaItemInfo_Value(item, "B_MUTE", 1)
+          end
+        end
+      end
+      for i = 0, reaper.CountTracks(0) - 1 do
+        local t = reaper.GetTrack(0, i)
+        local out = int(reaper.GetMediaTrackInfo_Value(t, "I_MIDIHWOUT"))
+        if t ~= midi and out >= 0 and (out >> 5) == device then
+          take.mutes[#take.mutes + 1] = { reaper.GetTrackGUID(t), reaper.GetMediaTrackInfo_Value(t, "B_MUTE") }
+          reaper.SetMediaTrackInfo_Value(t, "B_MUTE", 1)
+        end
+      end
+    end
+    for i = 0, reaper.CountTracks(0) - 1 do
+      local t = reaper.GetTrack(0, i)
+      if t ~= audio and reaper.GetMediaTrackInfo_Value(t, "I_RECARM") == 1 then
+        take.arms[#take.arms + 1] = reaper.GetTrackGUID(t)
+        reaper.SetMediaTrackInfo_Value(t, "I_RECARM", 0)
+      end
+    end
+    for i = 0, reaper.CountTrackMediaItems(audio) - 1 do
+      take.before[item_guid(reaper.GetTrackMediaItem(audio, i))] = true
+    end
+    reaper.SetMediaTrackInfo_Value(audio, "I_RECMODE", 0)
+    reaper.SetMediaTrackInfo_Value(audio, "I_RECARM", 1)
+  end)
+  take.midi, take.audio = reaper.GetTrackGUID(midi), reaper.GetTrackGUID(audio)
+  take.start_t, take.end_t = start_t, end_t
+  hw_take = take
+  reaper.SetEditCurPos(start_t, false, false)
+  stop_at = end_t
+  reaper.Main_OnCommand(1013, 0) -- Transport: Record
+  beat_now = true
+  return { recording = reaper.GetPlayState() & 4 ~= 0, start_seconds = start_t, end_seconds = end_t,
+           stop_prompt = stop_prompt_on() or nil }
+end
+
+function commands.hardware_take_finish(p)
+  local take = hw_take
+  if not take then fail("no hardware recording is under way") end
+  if reaper.GetPlayState() & 4 ~= 0 then
+    stop_at = nil
+    reaper.OnStopButton() -- with REAPER's save/delete prompt on, this waits for the user's answer
+  end
+  hw_take = nil
+  return with_undo("hardware take", function()
+    local midi, audio = hw_track_by_guid(take.midi), hw_track_by_guid(take.audio)
+    local items, old = {}, {}
+    if audio then
+      for i = 0, reaper.CountTrackMediaItems(audio) - 1 do
+        local item = reaper.GetTrackMediaItem(audio, i)
+        if take.before[item_guid(item)] then old[#old + 1] = item else items[#items + 1] = item end
+      end
+    end
+    local out = {}
+    local latency = tonumber(p.latency_seconds) or 0
+    for _, item in ipairs(items) do
+      local tk = reaper.GetActiveTake(item)
+      local src = tk and reaper.GetMediaItemTake_Source(tk)
+      local file = src and reaper.GetMediaSourceFileName(src) or ""
+      local pos = reaper.GetMediaItemInfo_Value(item, "D_POSITION")
+      -- Where the file's first sample sits against the start of the pass.
+      local offset = pos - take.start_t - (tk and reaper.GetMediaItemTakeInfo_Value(tk, "D_STARTOFFS") or 0)
+      if not take.scratch and tk then
+        if latency > 0 then
+          -- The device answers late: skip that much of the recording so notes land where they were written.
+          local len = reaper.GetMediaItemInfo_Value(item, "D_LENGTH")
+          reaper.SetMediaItemTakeInfo_Value(tk, "D_STARTOFFS", reaper.GetMediaItemTakeInfo_Value(tk, "D_STARTOFFS") + latency)
+          reaper.SetMediaItemInfo_Value(item, "D_LENGTH", math.max(0.01, len - latency))
+        end
+        if p.take_name then reaper.GetSetMediaItemTakeInfo_String(tk, "P_NAME", tostring(p.take_name), true) end
+      end
+      out[#out + 1] = { id = item_guid(item), file = file ~= "" and file or nil, file_starts_at_seconds = offset,
+                        start = time_to_pos(pos), length_seconds = reaper.GetMediaItemInfo_Value(item, "D_LENGTH") }
+    end
+    if take.scratch then
+      for _, guid in ipairs(take.scratch) do
+        local t = hw_track_by_guid(guid)
+        if t then reaper.DeleteTrack(t) end
+      end
+    else
+      if #items > 0 and p.replace and audio then
+        -- The new print replaces older ones over the same stretch.
+        for _, item in ipairs(old) do
+          local pos = reaper.GetMediaItemInfo_Value(item, "D_POSITION")
+          local fin = pos + reaper.GetMediaItemInfo_Value(item, "D_LENGTH")
+          if pos < take.end_t - 0.001 and fin > take.start_t + 0.001 then reaper.DeleteTrackMediaItem(audio, item) end
+        end
+      end
+      if audio then reaper.SetMediaTrackInfo_Value(audio, "I_RECARM", 0) end
+      if midi then
+        -- A printed part's MIDI track is muted, so the device doesn't play on top of its own recording.
+        reaper.SetMediaTrackInfo_Value(midi, "B_MUTE", (#items > 0 and p.mute_midi) and 1 or take.midi_was_muted)
+      end
+      for _, m in ipairs(take.mutes) do
+        local t = hw_track_by_guid(m[1])
+        if t then reaper.SetMediaTrackInfo_Value(t, "B_MUTE", m[2]) end
+      end
+      for _, m in ipairs(take.item_mutes or {}) do
+        for i = 0, (midi and reaper.CountTrackMediaItems(midi) or 0) - 1 do
+          local item = reaper.GetTrackMediaItem(midi, i)
+          if item_guid(item) == m[1] then reaper.SetMediaItemInfo_Value(item, "B_MUTE", m[2]) end
+        end
+      end
+    end
+    for _, guid in ipairs(take.arms) do
+      local t = hw_track_by_guid(guid)
+      if t then reaper.SetMediaTrackInfo_Value(t, "I_RECARM", 1) end
+    end
+    reaper.SetEditCurPos(take.cursor, false, false)
+    return { items = out, scratch = take.scratch and true or false }
+  end)
 end
 
 local RECMODES = { input = 0, output = 1, none = 2, ["midi overdub"] = 7, ["midi replace"] = 8 }
@@ -3562,8 +4209,11 @@ local function step()
     reaper.GetSetRepeat(restore_loop.rep)
     restore_loop = nil
   end
-  if device_closed_at and (reaper.Audio_IsRunning() or now - device_closed_at > DEVICE_IDLE_S) then
+  if device_closed_at and (audio_is_running() or now - device_closed_at > DEVICE_IDLE_S) then
     ensure_audio() -- the renders have stopped (or REAPER opened the device itself): the user's sound is back
+  end
+  if hws.touched and now - hws.touched > hws.SESSION_IDLE_S and reaper.GetPlayState() & 4 == 0 then
+    hws.session_end() -- no hardware work for a while: the user's recording settings are theirs again
   end
 
   if now < claim_after then return end
@@ -3614,6 +4264,7 @@ end
 
 reaper.atexit(function()
   if owns_bridge() then
+    hws.session_end() -- settings turned off for hardware work go back with the bridge
     os.remove(HEARTBEAT_PATH)
     reaper.DeleteExtState("creaper", "heartbeat", false)
     reaper.DeleteExtState("creaper", "owner", false)
@@ -3623,5 +4274,10 @@ reaper.atexit(function()
     reaper.RefreshToolbar2(section_id, command_id)
   end
 end)
+
+-- A bridge that stopped without its atexit (a crash, REAPER killed) may have left the
+-- hardware-session settings off: the originals are on record, so they go back now. A
+-- session still under way starts again with the next hardware tool.
+hws.session_end()
 
 tick()

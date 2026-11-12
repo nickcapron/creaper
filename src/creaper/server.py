@@ -407,6 +407,8 @@ READ_ONLY_COMMANDS = frozenset({
     "get_midi_notes", "get_midi_cc", "get_tempo_map", "get_routing", "read_automation", "describe_action",
     "time_to_positions", "bar_to_qn", "qn_to_times", "list_project_tabs", "list_inputs", "recording_status",
     "list_takes", "list_track_templates", "save_project", "render_audio", "render_stems",
+    "recent_midi_input", "send_midi", "hardware_tracks",   # hardware MIDI: offline renders never hear it
+    "hardware_status", "hardware_open_prefs",
 })
 
 
@@ -1237,10 +1239,11 @@ def list_sounds(
     search: Annotated[str | None, Field(description="Words to match in names, tags, descriptions, e.g. 'dark pad'")] = None,
     tag: Annotated[str | None, Field(description="Only sounds with this tag")] = None,
     plugin: Annotated[str | None, Field(description="Only sounds from this plugin, e.g. 'Mini V3'")] = None,
-    kind: Annotated[Literal["instrument", "effect"] | None, Field(description="Only instrument sounds or only effect settings")] = None,
+    kind: Annotated[Literal["instrument", "effect", "hardware"] | None, Field(description="Only instrument sounds, effect settings, or hardware synth patches")] = None,
 ) -> dict:
-    """Browses the user's own sound library: plugin sounds saved with save_sound, with
-    their tags and descriptions. Check here before designing a sound from scratch;
+    """Browses the user's own sound library: plugin sounds saved with save_sound and
+    hardware synth patches saved with save_hardware_sound, with their tags and
+    descriptions. Check here before designing a sound from scratch;
     load_sound puts one on a track. (Audio files are searched with find_samples, and
     plugin presets listed with list_fx_presets.) Returns the matching sounds and every
     tag in use. Read-only."""
@@ -1270,6 +1273,9 @@ def load_sound(
     if (track is None) == (new_track is None):
         raise ValueError("give either track or new_track")
     _, entry = sound_library.find(name)
+    if entry.get("source") == "hardware":
+        raise ValueError(f"'{entry['name']}' is a {entry['plugin_name']} hardware sound: load_hardware_sound sends "
+                         "it to the synth")
     state = sound_library.state(entry)
     result = call("apply_fx_state", timeout=60.0, track=track, new_track_name=new_track, fx=fx,
                   replace_instrument=replace_instrument, sound_name=entry["name"], state=state)
@@ -2682,6 +2688,9 @@ from . import motif_tools  # noqa: E402,F401  (motifs reused across songs)
 from . import sfx_tools  # noqa: E402,F401  (sound effects: one file per region)
 from . import arrange_tools  # noqa: E402,F401  (transitions and ear candy)
 from . import sound_tools  # noqa: E402,F401  (choosing sounds by audition)
+from . import hardware_setup  # noqa: E402,F401  (is REAPER set up for the synth: checked before each hardware tool)
+from . import hardware_tools  # noqa: E402,F401  (hardware synths on MIDI: scan, map, test, panic)
+from . import hardware_sound_tools  # noqa: E402,F401  (hardware patches, sound design, recording)
 
 
 def run() -> None:

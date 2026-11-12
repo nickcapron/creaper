@@ -14,6 +14,16 @@ def _no_installed_vocalvst_decides(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_audio_hardware_of_this_machine(monkeypatch):
+    """Which audio interface a synth belongs to is worked out from the Windows registry of
+    the machine running the tests. Tests start with none and name the hardware they test."""
+    from creaper import hardware_setup
+
+    monkeypatch.setattr(hardware_setup, "windows_audio", lambda: {"asio": [], "inputs": []})
+    monkeypatch.setattr(hardware_setup, "_sleep", lambda s: None)
+
+
+@pytest.fixture(autouse=True)
 def _no_remembered_render_noise(monkeypatch):
     """batch remembers which tracks render differently every time for a session; each
     test starts without that memory."""
