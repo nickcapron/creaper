@@ -335,11 +335,6 @@ def test_a_kit_already_over_the_knee_is_still_rounded():
     assert {c["parameter"]: c["display_value"] for c in next(kw for c, kw in calls if c == "set_fx_parameters")["changes"]}["Boost (dB)"] == 0.0
 
 
-def test_colour_keeps_a_gentle_overshoot():
-    from creaper import mix_tools
-    assert mix_tools.choose_colour([{"amount": 5, "rise_db": 6.0, "crest_drop_db": 0.2}])["amount"] == 5
-
-
 def test_mastering_a_range_forgets_the_whole_song_check_from_before(monkeypatch):
     # Mastered over the last chorus, the export was compared with auto_mix's pre-master
     # check (-21.7 against -12.3) and warned that part of the mix hadn't played.

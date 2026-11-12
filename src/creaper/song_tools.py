@@ -1,7 +1,7 @@
 """MCP tools for whole songs: build_song writes every section as its own variant,
 song_map shows what each section plays, start_song / finish_stage / song_status keep a
 song's stages honest (each stage's checks run and a failing stage refuses), check_song
-is the scorecard (one render, every check, a score out of 10 and what changed since
+is the scorecard (one render, every check as pass / warn / fail and what changed since
 last time), and compare_to_reference measures the mix against a reference track."""
 
 from __future__ import annotations
@@ -422,6 +422,26 @@ def mark_mixed(channels: list[str]) -> None:
         return
     with jsonstore.updating(paths[0], dict, indent=2) as data:
         data["auto_mix"] = {"at": time.strftime("%Y-%m-%d %H:%M"), "tracks": channels}
+
+
+def mark_mastered(asked_lufs: float, target_lufs: float, lufs: float) -> None:
+    """master_to_target records a whole-song master in the song plan, when there is one:
+    the loudness asked for, the target it used (lower for a sparse mix) and what it
+    reached (less when the limiter stopped short)."""
+    paths = _song_paths()
+    if not paths or not paths[0].exists():
+        return
+    with jsonstore.updating(paths[0], dict, indent=2) as data:
+        data["master"] = {"at": time.strftime("%Y-%m-%d %H:%M"), "asked_lufs": asked_lufs,
+                          "target_lufs": target_lufs, "lufs": lufs}
+
+
+def last_master() -> dict | None:
+    """What mark_mastered kept, or None."""
+    paths = _song_paths()
+    if not paths or not paths[0].exists():
+        return None
+    return jsonstore.read(paths[0], dict).get("master")
 
 
 def _mix_rows(ctx: _Context) -> list[dict]:
@@ -873,7 +893,7 @@ def finish_stage(
                                                 **({"tracks": _mix_snapshot(ctx.overview)} if stage == "mix" else {})}
     left = [s for s in STAGES if not data["stages"].get(s, {}).get("done")]
     return {"stage": stage, "done": True, **({"forced_past": [r["check"] for r in fails]} if fails else {}),
-            "checks": rows, "next": left[0] if left else "all stages done: check_song for the scorecard"}
+            "checks": rows, "next": left[0] if left else "all stages done: check_ending, check_song once, then export_mix"}
 
 
 @tool(annotations=READ_ONLY)
@@ -909,13 +929,14 @@ def _fingerprint(measured: dict, overview: dict) -> dict:
 def check_song(
     genre: Annotated[str | None, Field(description="The song's genre; default: the song plan's")] = None,
 ) -> dict:
-    """The song's scorecard: renders the master once (and each lead's busiest section,
-    for its tuning) and runs every check (form,
+    """Every check on the song in one pass: renders the master once (and each lead's
+    busiest section, for its tuning) and runs the checks (form,
     instruments, the song map, groove, copied bars and loops, the energy arc, the mix
     against the genre, the release gates), each pass / warn / fail with its number,
-    limit and fix, and a score out of 10 (a warning counts half). The result is kept next
-    to the saved project, so the next run reports what changed (score_change, and 'was'
-    and 'change' per check). It also warns when the song sounds like the last song
+    limit and fix. The checks find faults; they don't say how good the song is, so
+    report the warnings and fails, not a count as a grade. The result is kept next
+    to the saved project, so the next run reports what changed ('was' and 'change' per
+    check). It also warns when the song sounds like the last song
     checked (the same tempo and nearly the same tone curve). With the optional music
     model installed (creaper[ml]), a 'character' line says how it comes across
     (realistic or synthetic, modern or dated). Changes nothing in the project; writes
@@ -961,12 +982,14 @@ def check_song(
         except Exception as e:  # noqa: BLE001
             card["character"] = {"error": f"the music model couldn't run: {e}"}
     if paths:
-        jsonstore.write(paths[1], {"at": time.strftime("%Y-%m-%d %H:%M"), "score": card["score"],
-                                   "checks": [{k: v for k, v in r.items() if k in ("check", "status", "value", "track",
-                                                                                     "section")} for r in rows]},
+        jsonstore.write(paths[1], {"at": time.strftime("%Y-%m-%d %H:%M"),
+                                   # "stage" too: rows are matched by stage, check and track, and
+                                   # without it no row ever found its earlier self ('was', 'change').
+                                   "checks": [{k: v for k, v in r.items() if k in ("stage", "check", "status", "value",
+                                                                                     "track", "section")} for r in rows]},
                         indent=1)
     else:
-        card["note"] = "save the project to keep this scorecard and see the changes next time"
+        card["note"] = "save the project to keep these checks and see the changes next time"
     return card
 
 

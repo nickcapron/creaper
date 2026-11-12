@@ -151,8 +151,10 @@ def test_command_only_allows_creaper_tools():
     assert "--strict-mcp-config" in cmd
     assert cmd[cmd.index("--resume") + 1] == SESSION
     assert "--model" not in cmd
-    # If claude can only be reached through a .cmd shim, cmd.exe sees these arguments.
-    assert not set(chat.PANEL_PROMPT) & set('&|<>^%!"')
+    # If claude can only be reached through a .cmd shim, cmd.exe sees these arguments:
+    # the system prompt goes in a file, and no argument holds a character cmd.exe reads.
+    assert cmd[cmd.index("--append-system-prompt-file") + 1] == chat.PROMPT_FILE
+    assert not set("".join(cmd)) & set('&|<>^%!"\n')
 
 
 @pytest.mark.parametrize("session, model", [

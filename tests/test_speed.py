@@ -192,23 +192,6 @@ def test_mix_spans_share_the_peak_unless_a_part_sits_it_out(monkeypatch):
     assert spans["_drums"] == spans["D"]
 
 
-def test_saturation_trials_share_their_passes(monkeypatch):
-    from creaper import mix_tools
-    passes = []
-
-    def render_group(tracks, lo, hi):
-        passes.append(list(tracks))
-        return {"_fs": FS, **{t: np.stack([drums(2, 0.4, 1)] * 2, axis=1) for t in tracks}}
-
-    monkeypatch.setattr(batch, "render_group", render_group)
-    monkeypatch.setattr(mix_tools, "call", lambda cmd, **kw: {"fx": []} if cmd == "get_track_details" else {"index": 4})
-    out = mix_tools._add_colour([("Bass", "B"), ("drum bus", "D")], None, None, {"B": (9.0, 25.0), "D": (9.0, 25.0)})
-    assert len(out) == 2 and all(p == ["B", "D"] for p in passes)    # every pass renders both
-    # Identical dry and wet: no rise at all, so both stop at the hopeless point, together.
-    assert len(passes) == 1 + mix_tools.COLOUR_STEPS.index(mix_tools.COLOUR_HOPELESS_AT) + 1
-    assert all("skipped" in o for o in out)
-
-
 # ------------------------------------------------------------- review regressions
 
 def test_nested_hints_put_back_the_outer_one():

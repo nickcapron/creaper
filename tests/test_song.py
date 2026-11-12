@@ -332,14 +332,16 @@ def test_song_status_needs_a_plan(reaper):
 
 # ------------------------------------------------------------- scorecard
 
-def test_the_scorecard_scores_and_reports_changes():
+def test_the_scorecard_counts_and_reports_changes_without_a_score():
     rows = [songmap.row("a", "pass"), songmap.row("b", "warn", 0.45, 0.4, "fix b"),
             songmap.row("c", "fail", 0.7, 0.4, "fix c")]
     card = songmap.scorecard(rows)
-    assert card["score"] == 5.0 and card["failed"] == 1 and rows[1]["fix"] == "fix b"
+    assert (card["passed"], card["warnings"], card["failed"]) == (1, 1, 1) and rows[1]["fix"] == "fix b"
     again = songmap.scorecard([songmap.row("a", "pass"), songmap.row("b", "pass", 0.3, 0.4),
-                               songmap.row("c", "warn", 0.5, 0.4)], previous=card)
-    assert again["score_change"] == 3.3
+                               songmap.row("c", "warn", 0.5, 0.4)], previous={**card, "score": 5.0})
+    # 2026-11-12: the score out of 10 didn't follow the owner's ratings, and the model
+    # reported "9.2/10" for songs he found mid. A baseline written with one still reads.
+    assert not any("score" in k for k in (*card, *again)) and songmap.scorecard([]) == {"checks": []}
     assert again["checks"][2]["was"] == "fail" and again["checks"][2]["change"] == -0.2
     assert songmap.graded("x", 0.5, 0.4, 0.6, "f")["status"] == "warn"
     assert songmap.graded("x", 0.3, 0.5, 0.25, "f", higher_is_worse=False)["status"] == "warn"
@@ -373,12 +375,15 @@ def test_check_song_renders_once_and_keeps_a_baseline(reaper, tmp_path):
     assert [a.get("track") for a in renders].count("master") == 1 and len(renders) == 2
     lead = next(a for a in renders if a.get("track") != "master")
     assert lead["end_bar"] - lead["start_bar"] <= song_tools.TUNING_BARS
-    assert 0 <= card["score"] <= 10 and card["checks"]
+    assert card["checks"] and "score" not in card
+    assert card["passed"] + card["warnings"] + card["failed"] == len(card["checks"])
     assert {r["stage"] for r in card["checks"]} >= {"form", "parts", "transitions", "mix", "master"}
     assert all(r["status"] in ("pass", "warn", "fail") for r in card["checks"])
     assert (tmp_path / "song - creaper checks.json").exists()
     again = song_tools.check_song(genre="pop")
-    assert again["previous_score"] == card["score"] and again["score_change"] == 0
+    assert "score" not in (tmp_path / "song - creaper checks.json").read_text(encoding="utf-8")
+    # The second run compares with the baseline: the same song, so no row changed status.
+    assert not any("was" in r for r in again["checks"]) and any(r.get("change") == 0 for r in again["checks"])
 
 
 def test_a_second_song_like_the_last_is_flagged(reaper, tmp_path):

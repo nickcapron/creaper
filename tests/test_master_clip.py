@@ -210,3 +210,70 @@ def test_the_master_is_high_passed_under_what_anyone_hears(monkeypatch, tmp_path
     state = _master_with_renders(monkeypatch, tmp_path / "again", mix, fx_names=("ReaEQ", "ReaLimit"))
     out = server.master_to_target(target_lufs=-14.0, glue=False, force=True)
     assert "ReaEQ" not in [n for n, _ in state["added"]] and "sub_highpass" not in out   # one already there stays
+
+
+# ------------------------------------------- a song already at its target
+
+def _plan_memory(monkeypatch):
+    """The song plan's record of the last master, in memory."""
+    from creaper import song_tools
+
+    kept = {}
+    monkeypatch.setattr(song_tools, "mark_mastered",
+                        lambda asked, target, lufs: kept.update(asked_lufs=asked, target_lufs=target, lufs=lufs))
+    monkeypatch.setattr(song_tools, "last_master", lambda: dict(kept) or None)
+    return kept
+
+
+def test_a_song_already_at_its_target_isnt_mastered_again(monkeypatch, tmp_path):
+    """2026-10-27 to 11-10: 35 of 69 master_to_target calls in the panel repeated an
+    earlier one after a revision; none of the 31 readable ones moved the loudness by
+    more than 0.5 LU, for 1 h 43 m of renders."""
+    _plan_memory(monkeypatch)
+    state = _master_with_renders(monkeypatch, tmp_path, _peaky_mix(24), fx_names=("ReaEQ", "ReaLimit"))
+    first = server.master_to_target(target_lufs=-16.0, glue=False, force=True)
+    assert first["reached"] and "already_mastered" not in first
+    settings = (state["threshold"], state["fader"], state["ceiling"], state["clip_on"], list(state["added"]))
+    renders = state["renders"]
+    again = server.master_to_target(target_lufs=-16.0, glue=False)
+    assert again["already_mastered"] and again["reached"] and again["true_peak_ok"]
+    assert "again=True" in again["note"] and f"{again['integrated_lufs']:g} LUFS" in again["note"]
+    assert state["renders"] == renders + 1                       # one render to know, none to master
+    assert (state["threshold"], state["fader"], state["ceiling"], state["clip_on"], state["added"]) == settings
+    # The export after it compares itself with this measurement.
+    assert server._master_check["lufs"] == again["integrated_lufs"]
+    # Asked for outright, it runs.
+    redo = server.master_to_target(target_lufs=-16.0, glue=False, force=True, again=True)
+    assert "already_mastered" not in redo and redo["passes"] and state["renders"] > renders + 2
+
+
+def test_a_master_that_drifted_or_is_asked_for_differently_runs(monkeypatch, tmp_path):
+    _plan_memory(monkeypatch)
+    state = _master_with_renders(monkeypatch, tmp_path, _peaky_mix(24), fx_names=("ReaEQ", "ReaLimit"))
+    server.master_to_target(target_lufs=-16.0, glue=False, force=True)
+    state["fader"] -= 2.0                    # the revision turned the song down 2 LU
+    out = server.master_to_target(target_lufs=-16.0, glue=False, force=True)
+    assert "already_mastered" not in out and out["passes"]
+    # Another target, a lower ceiling, a range, or a chain that isn't there: each runs.
+    for change in ({"target_lufs": -18.0}, {"ceiling_dbtp": -6.0}, {"start_bar": 5.0, "end_bar": 9.0},
+                   {"eq": "EQ SITRAL-295"}):
+        server.master_to_target(target_lufs=-16.0, glue=False, force=True, again=True)
+        out = server.master_to_target(**{"target_lufs": -16.0, "glue": False, "force": True, **change})
+        assert "already_mastered" not in out, change
+
+
+def test_a_master_that_stopped_short_isnt_run_again_for_the_same_target(monkeypatch, tmp_path):
+    """'This master is finished as it is: re-running it at this target changes nothing.'"""
+    kept = _plan_memory(monkeypatch)
+    state = _master_with_renders(monkeypatch, tmp_path, _peaky_mix(24), fx_names=("ReaEQ", "ReaLimit"))
+    first = server.master_to_target(target_lufs=-4.0, glue=False, force=True)
+    assert not first["reached"] and kept["asked_lufs"] == -4.0
+    assert kept["lufs"] == first["passes"][-1]["integrated_lufs"]
+    renders = state["renders"]
+    again = server.master_to_target(target_lufs=-4.0, glue=False, force=True)
+    assert again["already_mastered"] and not again["reached"] and "where the last master stopped" in again["note"]
+    assert state["renders"] == renders + 1
+    # Without the plan's record there's no telling it from a song that drifted: it runs.
+    kept.clear()
+    out = server.master_to_target(target_lufs=-4.0, glue=False, force=True)
+    assert "already_mastered" not in out
