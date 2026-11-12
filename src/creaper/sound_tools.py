@@ -13,7 +13,7 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, Field
 
 from . import listen
-from .server import READ_ONLY, TrackRef, call, sound_library, tool
+from .server import READ_ONLY, BridgeError, TrackRef, call, sound_library, tool
 
 Role = Literal["bass", "sub", "lead", "pad", "keys", "pluck", "bell", "arp", "strings", "brass"]
 Character = Literal["bright", "dark", "punchy", "soft", "plucky", "sustained", "detuned", "wide", "thick", "moving"]
@@ -333,7 +333,16 @@ def audition_sounds(
     sequence) or are tuned to another key score far down. The track fader is moved so
     the chosen sound plays as loud as the original did, by its loudness while held
     (match_level). Returns the ranking with the measurements behind it."""
-    track_info = call("get_track_details", track=track)
+    try:
+        track_info = call("get_track_details", track=track)
+    except BridgeError as e:
+        if "there is no track named" not in str(e):
+            raise
+        # Sent in the same batch of calls as the create_track that makes the track, this
+        # one can arrive first: it failed that way in three sessions.
+        raise ValueError(f"{e}. If this was sent together with the call that creates the track, it ran before "
+                         "the track existed: create the track in an earlier call, wait for its result, then "
+                         "audition sounds on it (not both in one batch of calls)") from e
     fx = next((f for f in track_info.get("fx", []) if f.get("instrument")), None)
     if fx is None and candidates != "arturia":
         raise ValueError("that track has no instrument to audition sounds on (candidates='arturia' loads its own)")

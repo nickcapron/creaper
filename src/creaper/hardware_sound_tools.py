@@ -24,7 +24,7 @@ from pydantic import BaseModel, Field
 
 from . import hardware_setup as setup
 from . import hardware_tools as hw
-from . import jsonstore, listen, microkorg, server
+from . import convstate, jsonstore, listen, microkorg, server
 from .bridge import STOP_PROMPT_WAIT
 from .server import DESTRUCTIVE, READ_ONLY, call, confirm_with_user, tool
 from .theory import midi_to_note
@@ -41,7 +41,20 @@ SILENT_DBFS = -60.0
 DEAD_DBFS = -125.0
 HOT_DBFS = -0.3
 PATCH_LEAD_S = 0.5        # a sound written into the song is sent this long before its part
-_asked: set[str] = set()  # devices the user has allowed sounds to be loaded on, this session
+_asked: set[str] = set()  # standing questions the user said yes to, in this server's lifetime
+
+
+def _was_asked(key: str) -> bool:
+    """Whether the user already said yes to this standing question (the device's name:
+    load sounds; 'record:<name>': record test clips). One key per question. In the chat
+    panel the answer is kept for the conversation (a new server starts with every
+    message there), lapsing an hour after it was last relied on."""
+    return key in _asked or convstate.allowed('hardware:' + key)
+
+
+def _mark_asked(key: str) -> None:
+    _asked.add(key)
+    convstate.allow('hardware:' + key)
 
 
 @dataclass
@@ -143,10 +156,10 @@ def _load(link: Link, data: bytes, label: str, current: bytes | None = None, kee
                          f"bytes, a patch is {p.PROGRAM_BYTES}), so it wasn't sent to {link.name}")
     if current is None:
         current = _read_program(link)   # no backup, no load
-    if ask and link.name not in _asked:
+    if ask and not _was_asked(link.name):
         confirm_with_user(f"load sounds into the {link.name}'s edit buffer during this session (its stored programs "
                           "aren't changed, and the sound it has now is kept as a backup)")
-        _asked.add(link.name)
+        _mark_asked(link.name)
     if keep and current != data:
         _backup(link, current, f"before loading {label}")
     function, _ = _ask(link, [p.program_dump(link.channel, data)], {p.F_LOAD_OK, p.F_LOAD_ERROR, p.F_FORMAT_ERROR},
@@ -339,10 +352,10 @@ def load_hardware_sound(
     out: dict[str, Any] = {"device": link.name}
     if program is not None:
         number = p.program_number(program)
-        if link.name not in _asked:
+        if not _was_asked(link.name):
             confirm_with_user(f"change the sound on the {link.name} during this session (its stored programs aren't "
                               "changed, and the sound it has now is kept as a backup)")
-            _asked.add(link.name)
+            _mark_asked(link.name)
         _backup(link, current, f"before selecting program {p.program_name(number)}")
         call("send_midi", device=link.out, messages=[f"{0xC0 | (link.channel - 1):02X} {number:02X}"], open_audio=True)
         hw._sleep(0.3)
@@ -427,7 +440,7 @@ def write_hardware_program(
                       + ("creaper has kept a copy of the program that's there now" if kept else
                          "the program that's there now can't be backed up and will be lost") + ")",
                       irreversible=True)
-    _asked.add(link.name)   # only now: a Deny above leaves later loads still to be asked
+    _mark_asked(link.name)   # only now: a Deny above leaves later loads still to be asked
     function, _ = _ask(link, [p.message(link.channel, p.F_WRITE_REQUEST, [0, number])], {p.F_WRITE_OK, p.F_WRITE_ERROR},
                        f"asked it to write program {slot}", wait=4.0)
     if function != p.F_WRITE_OK:
@@ -637,10 +650,10 @@ def audition_hardware(
     phrase = [{**n, "at": n["at"] + 0.25} for n in phrase]      # a moment for the transport to start
     seconds = max(n["at"] + n["length"] for n in phrase) + tail_seconds
     start = _scratch(link, phrase, seconds)
-    if f"record:{link.name}" not in _asked:
+    if not _was_asked(f"record:{link.name}"):
         confirm_with_user(f"record short test clips from the {link.name} during this session (temporary tracks at the "
                           "end of the project, removed after each one)")
-        _asked.add(f"record:{link.name}")
+        _mark_asked(f"record:{link.name}")
     items, prompt = _take(start, {})
     audio, fs, offset, path = _audio_of(items, link)
     try:
@@ -686,15 +699,16 @@ def calibrate_hardware_latency(name: Annotated[str, Field(description="Name in t
     checked = setup.preflight(link.name, link.device)
     confirm_with_user(f"play five test clicks on the {link.name} and record them to measure its latency (its current "
                       "sound is put back afterwards)")
-    _asked.add(link.name)
     current = _read_program(link)
     notes = [{"pitch": 72, "at": 0.5 + 0.5 * i, "length": 0.1, "velocity": 127} for i in range(CLICKS)]
     click = p.apply(p.init_program(current, name="click"), CALIBRATION_SOUND)
-    _load(link, click, "the calibration click", current=current)
+    # ask=False: the question above covers the click and putting the sound back, and only
+    # those. It isn't a yes to loading sounds from then on, which stays its own question.
+    _load(link, click, "the calibration click", current=current, ask=False)
     try:
         items, _ = _take(_scratch(link, notes, notes[-1]["at"] + 1.0), {})
     finally:
-        _load(link, current, "the sound from before the calibration", current=click, keep=False)
+        _load(link, current, "the sound from before the calibration", current=click, keep=False, ask=False)
     audio, fs, offset, path = _audio_of(items, link)
     try:
         problem = _level_problem(audio, link)
@@ -863,8 +877,8 @@ def print_hardware(
     mute_items = []
     if earlier:
         sound = max(earlier, key=lambda s: s["start_seconds"])
-        _asked.add(link.name)
-        _load(link, _sound_patch(link, sound["sysex"], _item_label(sound)), sound["sound"])
+        # ask=False: the print was just allowed, and the part's own sound is part of it.
+        _load(link, _sound_patch(link, sound["sysex"], _item_label(sound)), sound["sound"], ask=False)
         out["sound"] = sound["sound"]
         if sound["end_seconds"] > start:
             mute_items.append(sound["id"])

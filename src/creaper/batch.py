@@ -16,6 +16,7 @@ to look first."""
 
 from __future__ import annotations
 
+import json
 import math
 import os
 import time
@@ -25,7 +26,7 @@ from typing import Any
 
 import numpy as np
 
-from . import analysis, plugin_profiles
+from . import analysis, convstate, plugin_profiles
 
 # --------------------------------------------------------------- span hints
 
@@ -271,10 +272,17 @@ def _noise_key(project: Any, track: Any, details: dict) -> tuple:
     return (project, str(track), name)
 
 
+def _kept_key(key: tuple) -> str:
+    return json.dumps(key, default=str)
+
+
 def _known_noise(key: tuple) -> float | None:
     hit = _noisy.get(key)
     if hit is None:
-        return None
+        # The chat panel starts a new server with every message: there the reading is kept
+        # for the conversation, so master_to_target in the next message still knows it.
+        kept = convstate.value("noisy", _kept_key(key), ttl=NOISE_MEMORY_S)
+        return float(kept) if isinstance(kept, (int, float)) else None
     if time.monotonic() - hit[1] > NOISE_MEMORY_S:
         _noisy.pop(key, None)
         return None
@@ -284,8 +292,10 @@ def _known_noise(key: tuple) -> float | None:
 def _remember_noise(key: tuple, noise: float) -> None:
     if noise >= NOISE_REMEMBER_DB:
         _noisy[key] = (noise, time.monotonic())
+        convstate.put("noisy", _kept_key(key), round(float(noise), 2))
     else:
         _noisy.pop(key, None)       # it read cleanly this time: measure from now on
+        convstate.forget("noisy", _kept_key(key))
 
 
 def _read_noise_floor(jobs: list[dict], idx: list[int], searches: dict, lo_bar, hi_bar, fs: int) -> None:

@@ -130,6 +130,8 @@ def chord_motion(x: np.ndarray, fs: float, note_off: float, lowest_hz: float) ->
     A plain patch holds the chord; an arpeggiator or sequence plays its notes one after
     another, so each slice is a different note."""
     env = np.abs(x)
+    if not env.size:   # the render ended before the chord: nothing to say about it
+        return {}
     above = np.flatnonzero(env > env.max() * 0.03)
     if not above.size:
         return {}
@@ -290,6 +292,8 @@ def features(x: np.ndarray, fs: float, note_off: float | None = None, expected_h
         return out
     hop = max(1, int(fs * 0.005))
     frames = len(x) // hop
+    if frames == 0:   # a few samples (a render cut off inside this note): too short to measure
+        return out
     env = np.sqrt(np.mean(np.square(x[: frames * hop]).reshape(frames, hop), axis=1)) + 1e-12
     p = int(np.argmax(env))
     env_db = 20 * np.log10(env / env[p])

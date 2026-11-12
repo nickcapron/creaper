@@ -14,6 +14,20 @@ def _no_installed_vocalvst_decides(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_panel_conversation_of_this_machine(monkeypatch):
+    """Tests run as a server outside the chat panel unless they say otherwise: no
+    conversation id or status file from the environment, no taskbar flash or sound when a
+    test asks a question, and nothing remembered from the test before."""
+    from creaper import convstate, server, timing
+
+    monkeypatch.delenv(convstate.ENV, raising=False)
+    monkeypatch.delenv(timing.STATUS_FILE_ENV, raising=False)
+    monkeypatch.setenv(server.QUESTION_ALERT_ENV, "0")
+    monkeypatch.setattr(server, "_made_tracks", set())
+    monkeypatch.setattr(server, "_nobody_there", [False])
+
+
+@pytest.fixture(autouse=True)
 def _no_audio_hardware_of_this_machine(monkeypatch):
     """Which audio interface a synth belongs to is worked out from the Windows registry of
     the machine running the tests. Tests start with none and name the hardware they test."""
