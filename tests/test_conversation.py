@@ -235,14 +235,14 @@ def test_an_unanswered_question_skips_the_step_instead_of_failing(folder, monkey
 def test_after_one_unanswered_question_the_next_waits_minutes_not_another_half_hour(folder, monkeypatch):
     confirm = folder / "turn_1.confirm.json"
     monkeypatch.setenv(server.CONFIRM_FILE_ENV, str(confirm))
-    monkeypatch.setattr(server, "CONFIRM_TIMEOUT", 0.2)
+    monkeypatch.setattr(server, "CONFIRM_TIMEOUT", 2.0)
     monkeypatch.setattr(server, "AWAY_TIMEOUT", 0.05)
     with pytest.raises(server.Unanswered, match="within 1 minute"):
         server.confirm_with_user("delete track 3")
     started = time.monotonic()
     with pytest.raises(server.Unanswered):
         server.confirm_with_user("delete track 4")
-    assert time.monotonic() - started < 0.19
+    assert time.monotonic() - started < 1.0   # well under the 2 s first wait, even on a slow CI runner
     # The user is back and answers: full patience again.
     monkeypatch.setattr(server, "AWAY_TIMEOUT", 5.0)
 
