@@ -183,12 +183,15 @@ needs a profile for the model, and the microKORG's is the only one so far.
   and mixing and exporting say which parts need printing again (they don't refuse).
 - **In time.** A microKORG sound with an arpeggiator, a tempo-synced delay or a synced
   LFO is set to the project's tempo when it's loaded or written into the song (whole
-  BPM, 20-300). creaper doesn't send MIDI clock: it tells you what the synth's Clock
-  setting means for the sound.
+  BPM, 20-300), and an arpeggio written into the song has its key sync turned on, so it
+  starts with the part's first note (measured on a microKORG at 97 BPM: a 4-bar print
+  within 10 ms of the grid; with key sync off it sat 100 ms late). creaper doesn't send
+  MIDI clock: it tells you what the synth's Clock setting means for the sound.
 - **Recipes.** Starting patches for game sound effects (laser, power-up, alarm, explosion,
   UI blip, drones, a vocoder robot voice) and for sounds in the style of well-known
   microKORG users, with the sources for each and the factory program when that's what a
-  source says was used. They're starting points to tune by ear.
+  source says was used. All 19 have been played and measured on a real microKORG;
+  they're still starting points to tune by ear.
 
 The hardware map is saved in `<REAPER resource path>/creaper/hardware.json`.
 
@@ -261,7 +264,7 @@ That line runs the installer as it is on `main` today. To run exactly the instal
 that was released with a version (the one you read), use the tagged one instead:
 
 ```powershell
-irm https://raw.githubusercontent.com/nickcapron/creaper/v0.61.2/install.ps1 | iex
+irm https://raw.githubusercontent.com/nickcapron/creaper/v0.61.3/install.ps1 | iex
 ```
 
 Either way the creaper it installs is the released version, and a Python installer it
@@ -272,7 +275,7 @@ downloads is only run if it's signed by the Python Software Foundation.
 You need Python 3.10 or newer.
 
 ```bash
-pip install https://github.com/nickcapron/creaper/archive/refs/tags/v0.61.2.zip
+pip install https://github.com/nickcapron/creaper/archive/refs/tags/v0.61.3.zip
 creaper setup
 ```
 
@@ -294,13 +297,13 @@ individual steps are below if you'd rather do them yourself.
 - `creaper[analysis]`: librosa's beat tracker, for finding the bars of reference tracks.
 
 ```bash
-pip install "creaper[ml] @ https://github.com/nickcapron/creaper/archive/refs/tags/v0.61.2.zip"
+pip install "creaper[ml] @ https://github.com/nickcapron/creaper/archive/refs/tags/v0.61.3.zip"
 ```
 
 **1. Install creaper** (manual steps)
 
 ```bash
-pip install https://github.com/nickcapron/creaper/archive/refs/tags/v0.61.2.zip
+pip install https://github.com/nickcapron/creaper/archive/refs/tags/v0.61.3.zip
 ```
 
 **2. Install the bridge script into REAPER**
@@ -499,7 +502,7 @@ HFC) are for non-commercial use only.
   server's environment.
 - **Updating:** on Windows, run the installer command again. Otherwise
   `pip install --upgrade https://github.com/nickcapron/creaper/archive/refs/tags/<version>.zip`
-  with the newest release's tag (for this README, `v0.61.2`),
+  with the newest release's tag (for this README, `v0.61.3`),
   then `creaper install-bridge` again and restart the bridge. A newly started bridge takes
   over from a running one, so you don't need to restart REAPER.
 

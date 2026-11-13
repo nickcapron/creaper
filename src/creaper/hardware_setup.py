@@ -32,7 +32,9 @@ _sleep = time.sleep       # tests replace these
 _now = time.monotonic
 
 AUDIO_PREFS = "Options > Preferences > Audio > Device"
-MIDI_PREFS = "Options > Preferences > Audio > MIDI Devices"
+# REAPER 7 has a page each for MIDI outputs and inputs; before that, one "MIDI Devices" page.
+MIDI_PREFS = ("Options > Preferences > Audio > MIDI Outputs and MIDI Inputs (one page, 'MIDI Devices', on older "
+              "REAPER)")
 CLOSE_INACTIVE_FIX = ("Options > Preferences > Audio: untick 'Close audio device when stopped and application is "
                       "inactive'")
 STOP_PROMPT_FIX = ("Options > Preferences > Media > Recording: untick 'Prompt to save/delete/rename new files on "
@@ -333,10 +335,10 @@ def _audio_pick(device: dict | None, interface: dict | None) -> str:
 def _midi_pick(inputs: list[str], outputs: list[str]) -> str:
     steps = []
     if inputs:
-        steps.append("under 'MIDI inputs' double-click " + " and ".join(f"'{n}'" for n in inputs)
+        steps.append("on MIDI Inputs double-click " + " and ".join(f"'{n}'" for n in inputs)
                      + " and tick 'Enable input from this device'")
     if outputs:
-        steps.append("under 'MIDI outputs' double-click " + " and ".join(f"'{n}'" for n in outputs)
+        steps.append("on MIDI Outputs double-click " + " and ".join(f"'{n}'" for n in outputs)
                      + " and tick 'Enable output to this device'")
     return "; ".join(steps) + "; OK."
 
@@ -397,10 +399,13 @@ def find_problems(name: str | None, device: dict | None, st: dict, record: bool 
         out.append({"problem": "MIDI port not connected", "blocks": True,
                     "what": f"{who}'s MIDI port '{gone[0]}' isn't connected: REAPER doesn't see it.",
                     "fix": "Plug in and switch on the MIDI interface (or the synth, if it's on USB). If REAPER was "
-                           "already running, Preferences > Audio > MIDI Devices > 'Reset all MIDI devices' finds it."})
+                           "already running, Preferences > Audio > MIDI Outputs (or MIDI Inputs) > 'Reset all MIDI devices' "
+                           "finds it."})
     if off_in or off_out:
         ports = sorted(set(off_in + off_out))
-        out.append({"problem": "MIDI port disabled", "blocks": True, "page": "midi",
+        # Outputs first: without one nothing reaches the synth at all. guided_fix moves on to the
+        # inputs page once the output is enabled.
+        out.append({"problem": "MIDI port disabled", "blocks": True, "page": "midi_outputs" if off_out else "midi_inputs",
                     "what": ("MIDI port " + " and ".join(f"'{p}'" for p in ports)
                              + (" is" if len(ports) == 1 else " are") + " plugged in but not enabled in REAPER"
                              + (" for " + " or ".join(k for k, v in (("input", off_in), ("output", off_out)) if v))
@@ -502,18 +507,30 @@ def guided_fix(name: str | None, device: dict | None) -> dict:
         return {"fixed": True, "note": "Nothing to fix in REAPER's audio or MIDI settings.",
                 **_report(name, device, st, problems)}
     started = _now()
-    try:
-        # If the settings window holds REAPER's scripts while it's open, this answers when
-        # the user closes it; if it doesn't, at once. Either way the watching below decides.
-        server.call("hardware_open_prefs", timeout=FIX_WAIT_S + 30.0, page=target["page"])
-    except BridgeError:
-        pass
+    opened: list[str] = []
+
+    def open_page(page: str) -> None:
+        try:
+            # If the settings window holds REAPER's scripts while it's open, this answers when
+            # the user closes it; if it doesn't, at once. Either way the watching below decides.
+            how = server.call("hardware_open_prefs", timeout=FIX_WAIT_S + 30.0, page=page).get("opened")
+        except BridgeError:
+            how = None
+        opened.append(how or page)
+
+    page = target["page"]
+    open_page(page)
     while True:
         try:
             st = status() or st     # not opening the device here: the user is choosing it
         except BridgeError:
             pass
         problems = find_problems(name, device, st, record)
+        same = next((p for p in problems if p["problem"] == target["problem"]), None)
+        if same and same.get("page") and same["page"] != page:
+            # Half done (the MIDI output is enabled, the input isn't yet): its page is another one.
+            page = same["page"]
+            open_page(page)
         # Done when the problem is gone and, for a blocking one, nothing else blocks either:
         # while the user switches devices REAPER closes the old one for a moment, and a
         # closed device is not a fixed one.
@@ -523,6 +540,10 @@ def guided_fix(name: str | None, device: dict | None) -> dict:
             break
         _sleep(FIX_POLL_S)
     out = {"fixed": not left, "was": target["what"], **_report(name, device, st, problems)}
+    if left and "preferences" in opened:
+        # This REAPER's page numbers aren't known: Preferences opened wherever it was last.
+        out["opened"] = ("REAPER's Preferences window, on the page it was last on, not the one to change: the user "
+                         "goes to the page the problem's 'fix' names.")
     if left:
         out["note"] = ("Still the same after two minutes. Tell the user what to choose (the problem's 'fix'), and "
                        "call this again when they're ready.")

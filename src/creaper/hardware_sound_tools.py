@@ -246,6 +246,12 @@ def _match_tempo(link: Link, data: bytes, bar: float | None) -> tuple[bytes, dic
                            "track and bar) where a part starts at another tempo." if bar is not None else
                            ": this is its opening tempo."))
         told["note"] = " ".join(said)
+    if bar is not None:
+        # In the song the part has to sit on the grid: a print of an arpeggio that waits for the
+        # synth's own clock lands late (live-measured). Played by hand, the patch stays as it is.
+        data, synced = p.start_on_the_note(data)
+        if synced:
+            told["arpeggiator"] = synced
     try:
         settings = _read_setup(link)       # the Clock setting is the user's to change on the synth: read now
     except ValueError:
@@ -277,8 +283,9 @@ def hardware_profile(
     if show == "recipes":
         return {"device": link.name, "recipes": p.describe_recipes(kind),
                 "factory_programs": p.FACTORY_NOTES,
-                "note": "Recipes are creaper's own starting points, written from published descriptions, not heard "
-                        "on this synth yet: load one, audition_hardware, and tune it by ear with the user. A "
+                "note": "Recipes are creaper's own starting points, written from published descriptions; each "
+                        "was played and measured on one microKORG, not matched to its source by ear: load one, "
+                        "audition_hardware, and tune it with the user. A "
                         "factory_program is selected with load_hardware_sound program=...; it's the maker's preset "
                         "only if that slot was never overwritten."}
     if show == "setup":
@@ -402,7 +409,8 @@ def load_hardware_sound(
     A sound with an arpeggiator, a tempo-synced delay or a tempo-synced LFO runs at a
     tempo stored in the patch: it's set to the project's tempo (at that bar, when the
     sound is written into the song) and the result says so under 'tempo', with what
-    the synth's clock setting means for it. A recipe that names its own tempo (an
+    the synth's clock setting means for it. An arpeggio written into the song also gets
+    its key sync turned on, so it starts with the part's first note. A recipe that names its own tempo (an
     effect's speed) and a backup loaded without a track keep theirs."""
     if sum(x is not None for x in (sound, recipe, program, backup)) != 1:
         raise ValueError("give exactly one of sound, recipe, program or backup")
@@ -580,7 +588,9 @@ def _audio_of(items: list[dict], link: Link) -> tuple[np.ndarray, int, float, st
 
 
 def _discard(path: str) -> None:
-    for f in (Path(path), Path(path + ".reapeaks")):
+    # REAPER keeps a recording's peaks beside it or in a "peaks" folder there (seen live: one
+    # stray .reapeaks per audition), depending on the user's settings.
+    for f in (Path(path), Path(path + ".reapeaks"), Path(path).parent / "peaks" / (Path(path).name + ".reapeaks")):
         try:
             f.unlink(missing_ok=True)
         except OSError:

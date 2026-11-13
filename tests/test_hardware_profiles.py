@@ -219,6 +219,27 @@ def test_a_stored_program_is_played_at_the_projects_tempo_and_stays_as_stored(ko
     assert not any(mk.parse_message(m) and mk.parse_message(m)[0] == mk.F_WRITE_REQUEST for m in korg.sent)
 
 
+def _key_sync(data):
+    return mk.decode_program(data)["common"]["arp_key_sync"]
+
+
+def test_an_arpeggio_written_into_the_song_starts_with_its_note(korg):  # noqa: F811
+    # Live, 2026-11-13: with key sync off a printed arpeggio sat about 100 ms behind the bar.
+    korg.programs[5] = mk.apply(mk.init_program(name="arp"), {"arp_on": "on", "arp_key_sync": "off"})
+    korg.tempo = 97.0
+    by_hand = hst.load_hardware_sound("microKORG", program="A.16")
+    assert "arpeggiator" not in by_hand["tempo"] and _key_sync(korg.buffer) == "off"   # the user's patch, as it is
+    told = hst.load_hardware_sound("microKORG", program="A.16", track="MK Lead", bar=3)["tempo"]
+    assert "arp_key_sync was turned on" in told["arpeggiator"]
+    assert _key_sync(mk.patch_in_message(korg.patch_items[0]["sysex"])) == "on" and _key_sync(korg.buffer) == "on"
+    assert _key_sync(korg.programs[5]) == "off"                                        # the stored program too
+    again = hst.load_hardware_sound("microKORG", backup=1, track="MK Lead", bar=5)["tempo"]
+    assert "arpeggiator" in again                                                      # a backup going into the song
+    plain = mk.init_program()
+    assert mk.start_on_the_note(plain) == (plain, None)                                # no arpeggio: nothing to do
+    assert _key_sync(mk.build(mk.find_recipe("power-up")[1])) == "on"                  # creaper's own arpeggios
+
+
 def test_a_backup_comes_back_exactly_as_it_was(korg):  # noqa: F811
     hst.set_hardware_params("microKORG", {"arp_on": "on", "arp_tempo": 133})
     mine = korg.buffer
@@ -279,6 +300,9 @@ def test_the_audio_page_number_is_only_used_where_it_was_seen():
     assert "reaper.ViewPrefs(hws.AUDIO_PAGE, \"\")" in prefs and "ViewPrefs(118" not in BRIDGE_LUA
     assert "reaper.Main_OnCommand(40099, 0)" in prefs            # older REAPER: the audio device window
     assert "hws.AUDIO_PAGE = 118" in BRIDGE_LUA and "hws.AUDIO_PAGE_SINCE = 7.85" in BRIDGE_LUA
+    # The MIDI pages too: by number, on the REAPER they were seen on; a page name does nothing there.
+    assert "hws.MIDI_PAGES = { midi_outputs = 620, midi_inputs = 153 }" in BRIDGE_LUA
+    assert 'ViewPrefs(0, "MIDI Devices")' not in BRIDGE_LUA and "reaper.ViewPrefs(midi_page, \"\")" in prefs
 
 
 def test_a_print_is_remembered_by_what_it_was_made_from():
@@ -371,3 +395,16 @@ def test_finish_stage_warns_about_a_stale_hardware_part_from_the_parts_stage_on(
     done = song_tools.finish_stage(stage="parts")
     assert done["done"] and "MK Lead changed after it was printed" in done["hardware_warning"]
     assert "hardware_warning" not in song_tools.finish_stage(stage="form") and asked == ["hardware_tracks"]
+
+
+def test_a_discarded_recording_takes_its_peaks_with_it(tmp_path):
+    # Live, 2026-11-13: every audition left a .reapeaks in REAPER's "peaks" folder.
+    wav = tmp_path / "02-creaper hardware scratch.wav"
+    beside, in_folder = tmp_path / (wav.name + ".reapeaks"), tmp_path / "peaks" / (wav.name + ".reapeaks")
+    in_folder.parent.mkdir()
+    for f in (wav, beside, in_folder):
+        f.write_bytes(b"x")
+    other = in_folder.with_name("song.wav.reapeaks")
+    other.write_bytes(b"x")
+    hst._discard(str(wav))
+    assert not wav.exists() and not beside.exists() and not in_folder.exists() and other.exists()

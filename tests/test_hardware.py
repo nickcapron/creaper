@@ -289,10 +289,32 @@ def test_a_port_that_is_plugged_in_but_not_enabled_is_called_that(ssl):
     assert "SSL 2+ MIDI" in hw.list_hardware()["plugged_in_but_not_enabled"]
     report = hw.setup_hardware()
     midi = next(p for p in report["problems"] if p["problem"] == "MIDI port disabled")
-    assert "'SSL 2+ MIDI'" in midi["what"] and "Audio > MIDI Devices" in midi["fix"] and "Enable output" in midi["fix"]
+    assert "'SSL 2+ MIDI'" in midi["what"] and "Audio > MIDI Outputs" in midi["fix"] and "Enable output" in midi["fix"]
     assert report["interfaces_by_midi_port"]["SSL 2+ MIDI"]["asio_driver"] == "SSL ASIO Driver 1"
     ssl.reaper.user_does = lambda r: r.midi_outputs[1].update(enabled=True)
-    assert hw.setup_hardware(action="fix")["fixed"] and ssl.reaper.prefs_opened == ["midi"]
+    assert hw.setup_hardware(action="fix")["fixed"] and ssl.reaper.prefs_opened == ["midi_outputs"]
+
+
+def test_the_guided_fix_moves_from_the_outputs_page_to_the_inputs_page(ssl, monkeypatch):
+    # Live, 2026-11-13 (REAPER 7.85): outputs and inputs are two pages, 620 and 153, and the
+    # page name the bridge used to ask for opened Preferences on General.
+    from creaper import hardware_setup
+    ssl.reaper.input = SSL_WASAPI
+    hw.save_hardware("microKORG", midi_output="SSL 2+ MIDI", midi_input="SSL 2+ MIDI")
+    ssl.reaper.midi_outputs[1]["enabled"] = False
+    ssl.reaper.midi_inputs[0]["enabled"] = False
+    clock = [0.0]
+    monkeypatch.setattr(hardware_setup, "_now", lambda: clock[0])
+    monkeypatch.setattr(hardware_setup, "_sleep", lambda s: clock.__setitem__(0, clock[0] + s))
+
+    def user(reaper):                      # one page per visit, as in REAPER
+        if reaper.prefs_opened[-1] == "midi_outputs":
+            reaper.midi_outputs[1]["enabled"] = True
+        else:
+            reaper.midi_inputs[0]["enabled"] = True
+    ssl.reaper.user_does = user
+    assert hw.setup_hardware("microKORG", action="fix")["fixed"]
+    assert ssl.reaper.prefs_opened == ["midi_outputs", "midi_inputs"]
 
 
 def test_a_saved_device_whose_port_got_disabled_or_unplugged_is_reported(ssl):

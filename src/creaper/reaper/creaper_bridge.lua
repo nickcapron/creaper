@@ -1,6 +1,6 @@
 -- @description creaper bridge: lets Claude work in REAPER through the creaper MCP server
 -- @author nickcapron
--- @version 0.61.2
+-- @version 0.61.3
 -- @link https://github.com/nickcapron/creaper
 -- @provides
 --   [nomain] creaper_json.lua
@@ -13,7 +13,7 @@
 --   Every change it makes is a named undo point ("creaper: ..."), so Ctrl+Z
 --   reverts anything Claude did.
 
-local BRIDGE_VERSION = "0.61.2"
+local BRIDGE_VERSION = "0.61.3"
 local PROTOCOL = 2
 
 ----------------------------------------------------------------------- JSON
@@ -128,13 +128,15 @@ local function qn_to_time(qn) return reaper.TimeMap2_QNToTime(0, qn) end
 local function time_to_qn(t) return reaper.TimeMap2_timeToQN(0, t) end
 
 local function time_to_pos(t)
-  local beat, measures = reaper.TimeMap2_timeToBeats(0, t)
-  return {
-    seconds = round(t, 3),
-    bar = math.tointeger(measures) + 1,
-    beat = round(beat + 1, 3),
-    qn = round(time_to_qn(t), 3),
-  }
+  local beat, measures, beats_in_bar = reaper.TimeMap2_timeToBeats(0, t)
+  local bar = math.tointeger(measures) + 1
+  beat = round(beat + 1, 3)
+  -- A moment a hair before a bar line rounds up to the line: that is beat 1 of the next
+  -- bar, not "beat 5" of this one (seen live: an item recorded from bar 3 read as bar 2, beat 5).
+  if beats_in_bar and beats_in_bar > 0 and beat >= beats_in_bar + 1 then
+    bar, beat = bar + 1, round(beat - beats_in_bar, 3)
+  end
+  return { seconds = round(t, 3), bar = bar, beat = beat, qn = round(time_to_qn(t), 3) }
 end
 
 -- Bars and beats are 1-based like REAPER's ruler. A fractional bar is a
@@ -2113,12 +2115,12 @@ function hws.check_output(device)
     fail("MIDI output '" .. tostring(name) .. "' is REAPER's output number " .. device .. ", and a track can only "
       .. "play outputs 0 to " .. hws.MAX_MIDI_OUTPUT .. ", so creaper can't use it. REAPER keeps a number for every "
       .. "MIDI device it has seen: removing outputs that are no longer used (Options > Preferences > Audio > MIDI "
-      .. "Devices) may give this one a lower number after REAPER restarts.")
+      .. "Outputs) may give this one a lower number after REAPER restarts.")
   end
   if hws.enabled(hws.midi_masks(), "out", device) == false then
     fail("MIDI output '" .. tostring(name) .. "' is plugged in but not enabled in REAPER, so nothing sent to it "
-      .. "would arrive. Options > Preferences > Audio > MIDI Devices: double-click it under MIDI outputs and "
-      .. "enable output.")
+      .. "would arrive. Options > Preferences > Audio > MIDI Outputs ('MIDI Devices' on older REAPER): "
+      .. "double-click it and enable output.")
   end
   return device
 end
@@ -2330,6 +2332,11 @@ end
 
 hws.AUDIO_PAGE = 118         -- Preferences > Audio > Device, as ViewPrefs numbers it ...
 hws.AUDIO_PAGE_SINCE = 7.85  -- ... from this REAPER version on (the only one it was checked on)
+-- Preferences > Audio > MIDI Outputs and MIDI Inputs, found the same way on 7.85 (2026-11-13:
+-- every page number tried on the live REAPER and the window read back). ViewPrefs' second
+-- argument, a page name, changed nothing there: "MIDI Devices", "MIDI Inputs", "MIDI
+-- Outputs" all left Preferences where it was, so the pages are opened by number or not at all.
+hws.MIDI_PAGES = { midi_outputs = 620, midi_inputs = 153 }
 
 -- Whether this REAPER is at least a version, given as a number (7.85). GetAppVersion
 -- answers like "7.85/win64" or "7.85+dev0101/x64"; minor versions always have two digits.
@@ -2339,7 +2346,7 @@ function hws.version_at_least(wanted)
 end
 
 -- Opens REAPER's settings at the page the user has to change something on: "audio" =
--- the audio device page (action 40099), "midi" = MIDI Devices. Whether the window holds
+-- the audio device page, "midi_outputs" / "midi_inputs" = those pages. Whether the window holds
 -- scripts while it's open isn't known for every REAPER: the heartbeat says the bridge
 -- may be held (so clients wait instead of deciding REAPER has gone), and the answer,
 -- whenever it comes, carries the state as it is then.
@@ -2348,13 +2355,14 @@ function commands.hardware_open_prefs(p)
   busy = { what = "waiting for the user in Preferences", until_time = os.time() + 150 }
   if announce then announce() end
   local how
-  if p.page == "midi" then
-    -- The page's number differs between REAPER versions and isn't known: asked for by name.
-    -- If REAPER doesn't know the name, Preferences opens where it was last.
-    if reaper.ViewPrefs then
-      reaper.ViewPrefs(0, "MIDI Devices")
-      how = "by name"
+  local midi_page = hws.MIDI_PAGES[p.page == "midi" and "midi_outputs" or p.page]
+  if midi_page then
+    if reaper.ViewPrefs and hws.version_at_least(hws.AUDIO_PAGE_SINCE) then
+      reaper.ViewPrefs(midi_page, "")
+      how = p.page == "midi_inputs" and "MIDI inputs page" or "MIDI outputs page"
     else
+      -- Another REAPER numbers its pages differently: Preferences opens where it was last,
+      -- and the caller tells the user where to go.
       reaper.Main_OnCommand(40016, 0) -- Options: Preferences...
       how = "preferences"
     end
@@ -4515,7 +4523,7 @@ hws.session_end()
 -- nothing sets this one, so there the loop always starts.
 if CREAPER_BRIDGE_TEST then
   CREAPER_BRIDGE_TEST = { commands = commands, hws = hws, handle = handle, step = step, json = json,
-                          audio_is_running = audio_is_running }
+                          audio_is_running = audio_is_running, time_to_pos = time_to_pos }
   return
 end
 

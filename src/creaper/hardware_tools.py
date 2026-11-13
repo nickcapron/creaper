@@ -165,9 +165,10 @@ def scan_hardware() -> dict:
     if not ports["outputs"]:
         off = [p["name"] for p in ports["disabled_outputs"]]
         return {"found": [], "midi_inputs": ports["inputs"], "note": (
-            "REAPER has no MIDI outputs enabled. In REAPER: Options > Preferences > Audio > MIDI Devices, "
-            "double-click the MIDI interface under 'MIDI outputs' and choose Enable output (and enable its input "
-            "under 'MIDI inputs'); setup_hardware(action='fix') opens that page and waits for the change."
+            "REAPER has no MIDI outputs enabled. In REAPER: Options > Preferences > Audio > MIDI Outputs, "
+            "double-click the MIDI interface and choose Enable output (and enable its input on the MIDI Inputs page; "
+            "older REAPER has both on one 'MIDI Devices' page). setup_hardware(action='fix') opens the page and "
+            "waits for the change."
             + (f" Plugged in but not enabled: {', '.join(off)}." if off else ""))}
     names = ", ".join(p["name"] for p in ports["outputs"])
     confirm_with_user(f"send a MIDI identity request (asks a device what it is; changes nothing) to: {names}")

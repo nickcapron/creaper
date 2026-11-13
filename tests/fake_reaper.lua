@@ -23,6 +23,7 @@ local F = {
   midi_inputs = { [0] = "microKORG" },
   action_names = {},      -- [id] = { name, named }
   actions = {},           -- every Main_OnCommand id, in order
+  prefs = {},             -- every ViewPrefs page number, in order
   sent = {},              -- { device, bytes } per SendMIDIMessageToHardware
   media = {},             -- [path] = { notes = n, sysex = n, text = n }
   atexit = {},
@@ -220,6 +221,11 @@ function reaper.GetCursorPosition() return F.cursor end
 function reaper.SetEditCurPos(t) F.cursor = t end
 function reaper.GetProjectLength() return F.project_length end
 
+function reaper.ViewPrefs(page, name)
+  assert(name == "", "a page name does nothing in REAPER 7.85: pages are opened by number")
+  F.prefs[#F.prefs + 1] = page
+end
+
 function reaper.Main_OnCommand(id)
   F.actions[#F.actions + 1] = id
   if id == 1013 then -- Transport: Record
@@ -249,7 +255,7 @@ function reaper.TimeMap_GetMeasureInfo(_, measure) return 0.0, measure * 4, meas
 function reaper.TimeMap2_timeToBeats(_, t)
   local qn = t * 2
   local measures = qn // 4
-  return qn - measures * 4, measures
+  return qn - measures * 4, measures, 4
 end
 
 --------------------------------------------------------------------- actions

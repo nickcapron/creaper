@@ -342,7 +342,7 @@ INIT_COMMON: dict[str, Any] = {
     "voice_mode": "single", "arp_steps": 8, "arp_pattern": "xxxxxxxx", "delay_sync": "off", "delay_division": "1/8",
     "delay_time": 40, "delay_depth": 0, "delay_type": "stereo", "mod_speed": 20, "mod_depth": 0,
     "mod_type": "chorus/flanger", "eq_high_freq": 20, "eq_high_gain": 0, "eq_low_freq": 14, "eq_low_gain": 0,
-    "arp_tempo": 120, "arp_on": "off", "arp_latch": "off", "arp_target": "both", "arp_key_sync": "off",
+    "arp_tempo": 120, "arp_on": "off", "arp_latch": "off", "arp_target": "both", "arp_key_sync": "on",
     "arp_type": "up", "arp_octaves": 1, "arp_gate": 80, "arp_resolution": "1/16", "arp_swing": 0, "kbd_octave": 0,
 }
 INIT_TIMBRE: dict[str, Any] = {
@@ -661,8 +661,12 @@ RECIPES: dict[str, dict] = {
     "ringing filter note": {
         "kind": "artist", "style_of": "The Killers, \"All These Things That I've Done\" ringing note",
         "evidence": "Keyboard (Oct 2005): a self-oscillating, high-resonance filter note with white noise under it.",
-        "play": "Hold one high note; the filter rings at a pitch that follows the key.",
-        "params": {"osc1_level": 0, "noise_level": 50, "cutoff": 70, "resonance": 127, "filter_kbd_track": 63,
+        "play": "Hold one note, C4-C6; the filter rings an octave above the key, in tune.",
+        # Measured on a microKORG (2026-11-13): one cutoff step is one semitone, keyboard track +48 is
+        # exactly 1:1, and at cutoff 24 the ringing filter sits on the played note (3 cents flat);
+        # every 12 more is an octave up, and above about 7 kHz it stops following. At 24 the ring
+        # takes a second to build; at 36 with the noise full up it speaks in about 0.1 s.
+        "params": {"osc1_level": 0, "noise_level": 127, "cutoff": 36, "resonance": 127, "filter_kbd_track": 48,
                    "eg2_attack": 20, "eg2_release": 80, "delay_depth": 40},
     },
     "sync scream": {
@@ -964,6 +968,20 @@ def with_tempo(data: bytes, bpm: float) -> tuple[bytes, int]:
     return apply(data, {"arp_tempo": whole}), whole
 
 
+def start_on_the_note(data: bytes) -> tuple[bytes, str | None]:
+    """(the patch with its arpeggiator restarting at every new note, what changed or None).
+    With arp_key_sync off the arpeggiator steps on a clock that never stops, so a part's
+    first step waits for the next tick: measured on a microKORG at 97 BPM, a printed
+    arpeggio sat about 100 ms behind the bar; with it on, 5 ms, and 2 ms of drift in 4 bars."""
+    common = decode_program(data)["common"]
+    if common["arp_on"] != "on" or common["arp_key_sync"] == "on":
+        return data, None
+    return apply(data, {"arp_key_sync": "on"}), (
+        "arp_key_sync was turned on in the song's copy of this sound, so the arpeggio starts with the part's first "
+        "note; with it off the first step waits for the synth's free-running clock and the part sits up to a step "
+        "late.")
+
+
 def clock_note(setup: dict | None) -> str:
     """What the synth's Clock setting means for a patch that runs at the tempo."""
     clock = (setup or {}).get("clock")
@@ -978,7 +996,9 @@ def clock_note(setup: dict | None) -> str:
                 "follows the clock instead.")
     if clock == "internal":
         return ("The microKORG is on its own clock (Internal), so it runs at the patch's tempo. It keeps that speed "
-                "but isn't locked to REAPER's bar lines: each arpeggio starts when its note does.")
+                "but isn't locked to REAPER's bar lines: an arpeggio starts with its note when the patch's "
+                "arp_key_sync is on (creaper's recipes have it on, and it's turned on in a sound written into the "
+                "song), then runs on the synth's clock.")
     return ("The patch's tempo only counts while the microKORG is on its own clock: with its Clock setting on "
             f"External (or Auto with MIDI clock arriving) it follows MIDI clock instead ({change}; hardware_profile "
             "show='setup' reads the setting).")

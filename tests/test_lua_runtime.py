@@ -56,6 +56,31 @@ def test_a_function_the_fake_lacks_fails_loudly(rig, bridge):
     assert failure.value.traceback                       # a bug, not a fail(): it has a traceback
 
 
+def test_a_moment_just_before_a_bar_line_is_beat_one_of_the_next_bar(rig, bridge):
+    # The fake runs at 120 BPM in 4/4: bar 3 starts at 4 s. Live, an item recorded from bar 3
+    # sat a hair early and read as "bar 2, beat 5".
+    early = bridge.parts.time_to_pos(4.0 - 1e-7)
+    assert (early["bar"], early["beat"]) == (3, 1)
+    assert (bridge.parts.time_to_pos(4.0)["bar"], bridge.parts.time_to_pos(4.0)["beat"]) == (3, 1)
+    inside = bridge.parts.time_to_pos(3.9)
+    assert (inside["bar"], inside["beat"]) == (2, 4.8)
+
+
+def test_the_settings_pages_open_by_the_numbers_seen_on_7_85(rig, bridge):
+    # Read off the live REAPER 7.85 on 2026-11-13: 118 Audio > Device, 620 MIDI Outputs, 153 MIDI Inputs.
+    for page, how in (("audio", "audio device page"), ("midi_outputs", "MIDI outputs page"),
+                      ("midi_inputs", "MIDI inputs page"), ("midi", "MIDI outputs page")):
+        assert bridge.call("hardware_open_prefs", page=page)["opened"] == how
+    assert list(rig.f.prefs.values()) == [118, 620, 153, 620]
+
+
+def test_another_reaper_gets_plain_preferences_for_a_midi_page(rig):
+    rig.f.without("ViewPrefs")
+    bridge = rig.start_bridge()
+    assert bridge.call("hardware_open_prefs", page="midi_inputs")["opened"] == "preferences"
+    assert 40016 in list(rig.f.actions.values())
+
+
 # ------------------------------------------------------------ the audio device's state
 
 @pytest.mark.parametrize("answer, running", [(0, False), (0.0, False), (1, True), (1.0, True),

@@ -94,6 +94,8 @@ class Profile(Protocol):
     def tempo(self, data: bytes) -> int: ...
     def with_tempo(self, data: bytes, bpm: float) -> tuple[bytes, int]: ...        # (patch, the tempo it got)
     def clock_note(self, setup: dict | None) -> str: ...                           # when that tempo counts
+    def start_on_the_note(self, data: bytes) -> tuple[bytes, str | None]: ...      # (patch whose arpeggio starts
+    #                                                                                with the note, what changed or None)
 
 
 INTERFACE = tuple(sorted(n for n in (*Profile.__annotations__, *vars(Profile)) if not n.startswith("_")))
