@@ -574,3 +574,50 @@ def test_a_kick_from_a_bass_folder_or_with_no_punch_is_marked_down():
     assert sample_tools._other_role_folder(r"D:\Samples\LinnDrum\21. Bass - Sub", "kick") == "bass"
     assert sample_tools._other_role_folder(r"D:\Samples\LinnDrum\01. Kicks", "kick") is None
     assert sample_tools._other_role_folder(r"D:\Samples\CMI\Toms", "kick") == "toms"
+
+
+def test_alternatives_of_one_level_take_turns_instead_of_velocity_bands(tmp_path, monkeypatch):
+    """Three Pearl kicks at about one level were split into velocity bands, and a kick lane
+    at velocity 97-103 only ever played the top one: one sample, every hit."""
+    import soundfile as sf
+    from creaper import server  # noqa: F401
+    from creaper import sample_tools
+    kicks = []
+    for i, gain in enumerate((1.0, 0.95, 0.9)):        # within a dB of each other
+        path = tmp_path / f"kick {i}.wav"
+        sf.write(str(path), _kick() * gain, FS44)
+        kicks.append(str(path))
+    calls = []
+
+    def fake_call(cmd, **kw):
+        calls.append((cmd, kw))
+        if cmd == "get_project_overview":
+            return {"tracks": [{"name": "Drums"}]}
+        if cmd == "build_sampler_kit":
+            return {"track": {"name": "Drums"}, "pads": [{"fx": i + 1, "note": p["note"]} for i, p in enumerate(kw["pads"])]}
+        return {}
+    monkeypatch.setattr(sample_tools, "call", fake_call)
+    out = sample_tools.build_drum_kit(track="Drums", samples={"kick": kicks}, trim_silence=False, fill_gaps=False,
+                                      balance=False)
+    pads = next(kw for cmd, kw in calls if cmd == "build_sampler_kit")["pads"]
+    assert len(pads) == 1 and len(pads[0]["files"]) == 3
+    assert not any(c["parameter"] == "Minimum velocity" for cmd, kw in calls if cmd == "set_fx_parameters"
+                   for c in kw["changes"])
+    assert all(s.endswith("(in turn)") for s in out["kit"]["kick"]["samples"])
+
+
+def test_the_kit_crash_is_chosen_by_tone_not_the_longest_wash(monkeypatch):
+    from creaper import sample_tools, samplelib
+    v = samplelib.ANALYSIS_VERSION
+    lib = [
+        {"path": r"D:\Samples\Ambient\AMBCRASH.wav", "name": "AMBCRASH",
+         "analysis": {"v": v, "kind": "one-shot", "decay_s": 6.0, "brightness_hz": 11000}},
+        {"path": r"D:\Samples\Acoustic\Crash 16.wav", "name": "Crash 16",
+         "analysis": {"v": v, "kind": "one-shot", "decay_s": 2.2, "brightness_hz": 6200}},
+        {"path": r"D:\SILA\LinnDrum\Crash_Lindrum.wav", "name": "Crash_Lindrum",
+         "analysis": {"v": v, "kind": "one-shot", "decay_s": 1.8, "brightness_hz": 6800}},
+    ]
+    monkeypatch.setattr(sample_tools.library, "search", lambda role=None, **kw: lib)
+    assert sample_tools._kit_crash({"kick": r"D:\Samples\Acoustic\Kick.wav"})["name"] == "Crash 16"
+    assert sample_tools._kit_crash({"kick": r"D:\SILA\LinnDrum\BD_Lindrum.wav"})["name"] == "Crash_Lindrum"
+    assert sample_tools._kit_crash({})["name"] != "AMBCRASH"

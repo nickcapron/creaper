@@ -117,7 +117,7 @@ def test_fills_land_every_8th_bar_with_a_crash_after():
     v = grooves.vary_groove(pattern, 0.25, 16, "snare_roll", seed=2)
     bar = lambda lane, b: v[lane][b * 16:(b + 1) * 16]
     assert bar("snare", 7).endswith("X") and bar("snare", 7).count("o") >= 2     # a roll into bar 9
-    assert bar("crash", 8)[0] == "X" and "X" not in v["crash"][16 * 9:]          # one crash per fill, not after the last
+    assert bar("crash", 8)[0] == "x" and not v["crash"][16 * 9:].strip(".")         # one crash per fill, not after the last; a hit, not an accent
     assert len(bar("snare", 15).rstrip(".")) > len(bar("snare", 7).rstrip(".")) or \
         bar("snare", 15).count("o") > bar("snare", 7).count("o")                  # the 16-bar fill is bigger
     toms = grooves.vary_groove(pattern, 0.25, 8, "tom", seed=2)
@@ -474,3 +474,13 @@ def test_a_low_line_in_a_narrow_range_keeps_its_contour():
         bottom = sum(p == 61 for p in pitches) / len(pitches)
         assert bottom < 0.35, (seed, bottom)
         assert len(set(pitches)) >= 4, (seed, sorted(set(pitches)))
+
+
+def test_a_busy_chorus_crashes_every_8_bars_not_after_every_fill():
+    """Night Patrol: a crash after every 4-bar fill, at full velocity, "hits 8 times" and
+    sounded like breaking glass."""
+    from creaper import grooves
+    pattern = {"kick": "x...x...x...x...", "snare": "....x.......x...", "closed hat": "x.x.x.x.x.x.x.x."}
+    v = grooves.vary_groove(pattern, 0.25, 16, "snare_roll", seed=2, energy=4)   # a fill every 4 bars
+    crashes = [i // 16 for i, c in enumerate(v["crash"]) if c != "."]
+    assert crashes == [8] and v["crash"][16 * 8] == "x"

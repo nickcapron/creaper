@@ -2408,6 +2408,19 @@ def _master_take(start_bar: float | None, end_bar: float | None):
 
 
 MODEL_RENDERS = 3   # the limiter model's checks: a render to confirm, a correction, one more
+MASTER_CLIP_OVER_CLIPPED_DRUMS_DB = 1.0
+_DRUM_TRACK = re.compile(r"drum|kick|snare|hat|perc|kit\b|808|clap|tom", re.I)
+_PEAK_FX = re.compile(r"clip|limit", re.I)
+
+
+def _clipped_drums() -> list[str]:
+    """The drum tracks (by name) whose own chain clips or limits their peaks."""
+    try:
+        tracks = call("get_project_overview").get("tracks", [])
+    except Exception:  # noqa: BLE001 - only a refinement of the master's plan
+        return []
+    return [t["name"] for t in tracks if _DRUM_TRACK.search(t.get("name") or "")
+            and any(_PEAK_FX.search(f) for f in t.get("fx", []))]
 
 
 def _limiter_by_model(pre_take, start_fader: float, target_lufs: float, ceiling_db: float, min_threshold: float,
@@ -2427,11 +2440,19 @@ def _limiter_by_model(pre_take, start_fader: float, target_lufs: float, ceiling_
     _, audio, fs, _ = pre_take
     into = audio * 10 ** (-start_fader / 20)            # rendered after the master fader; the limiter sits before
     if clipper is not None:
-        clip = batch.plan_master_clip(into, fs, target_lufs, ceiling_db, LIMITER_MAX_GR_DB, start_fader)
+        clipped_drums = _clipped_drums()
+        # Drums already clipped or limited on their own track: the master's clipper only
+        # rounds them again (Second Phase's kit, clipped twice before 2.3 dB more here).
+        over = MASTER_CLIP_OVER_CLIPPED_DRUMS_DB if clipped_drums else batch.MASTER_CLIP_OVER_DB
+        clip = batch.plan_master_clip(into, fs, target_lufs, ceiling_db, LIMITER_MAX_GR_DB, start_fader,
+                                      max_over_db=over)
         if clip is not None:
             into = clip["audio"]
             min_threshold = clip["peak_db"] - LIMITER_MAX_GR_DB
             state["clip"] = {k: clip[k] for k in ("boost_db", "over_db", "peak_shaved_db", "peak_db")}
+            if clipped_drums:
+                state["clip"]["note"] = (f"at most {over:g} dB over the clipper: {', '.join(clipped_drums)} already "
+                                         "clip or limit their own peaks")
             lim = clipper(clip["boost_db"])
     model = batch.LimiterModel(into, fs)
     aim, ceiling = target_lufs, ceiling_db

@@ -268,6 +268,11 @@ class Layer(BaseModel):
         "Its level against the lane's main sample (negative = quieter); a layer plays on every velocity"))
 
 
+# A lane's samples within this many dB of each other are alternatives, played in turn;
+# further apart they're velocity layers, softest on the lowest velocities.
+ROUND_ROBIN_SPREAD_DB = 3.0
+
+
 def velocity_bands(n: int) -> list[tuple[int, int]]:
     """MIDI velocity 1-127 split into n bands, softest first."""
     edges = [1 + round(i * 127 / n) for i in range(n + 1)]
@@ -281,6 +286,46 @@ KICK_PUNCH_MIN_DB = 3.0   # the Linn "Pitched" kicks (rejected in two songs) mea
 
 PUNCH_LAYER_MIN_DB, PUNCH_LAYER_MAX_DECAY_S, PUNCH_LAYER_GAIN_DB = 3.0, 0.35, -3.0   # a click, not a second boom
 CRASH_MIN_DECAY_S = 0.6
+# The crash a kit gets when it has none: one that rings a while but isn't the longest
+# wash in the library, and sits under the glassy top (Night Patrol's 'breaking glass'
+# AMBCRASH was picked for having the longest decay). Its own kit's family first.
+CRASH_DECAY_S, CRASH_BRIGHTNESS_HZ = (1.0, 3.0), (3000, 8000)
+
+
+def _crash_fit(a: dict) -> float | None:
+    """How well an analysed crash fits as a kit's crash: 0 is in range, more is worse."""
+    decay, bright = a.get("decay_s"), a.get("brightness_hz")
+    if decay is None or decay < CRASH_MIN_DECAY_S:
+        return None
+    off = max(0.0, CRASH_DECAY_S[0] - decay, decay - CRASH_DECAY_S[1])
+    if bright is not None:
+        off += max(0.0, CRASH_BRIGHTNESS_HZ[0] - bright, bright - CRASH_BRIGHTNESS_HZ[1]) / 1000.0
+    return off
+
+
+def _kit_crash(samples: dict) -> dict | None:
+    """The library's best crash for this kit: by _crash_fit, one from a folder the kit's
+    own samples share winning a near tie (a Linn kit gets a Linn crash)."""
+    kit_dirs = set()
+    for given in samples.values():
+        for path in (given if isinstance(given, list) else [given]):
+            if isinstance(path, str):
+                parts = Path(path).parent.parts
+                # Its folder and the one above (a kit's family), never as far up as the drive.
+                kit_dirs.update(Path(*parts[:i]) for i in range(max(3, len(parts) - 1), len(parts) + 1))
+    best, best_score = None, None
+    for f in library.search(role="crash"):
+        a = f.get("analysis") or {}
+        if a.get("v") != samplelib.ANALYSIS_VERSION or a.get("kind") != "one-shot":
+            continue
+        score = _crash_fit(a)
+        if score is None:
+            continue
+        if any(d in Path(f["path"]).parents for d in kit_dirs):
+            score -= 0.5
+        if best is None or score < best_score:
+            best, best_score = f, score
+    return best
 
 
 def _best_in_library(role: str, key, where=None) -> dict | None:
@@ -306,7 +351,7 @@ def fill_kit_gaps(samples: dict, layers: dict[str, list[Layer]]) -> list[str]:
     done = []
     lanes = {k.strip().lower(): k for k in samples}
     if "crash" not in lanes:
-        crash = _best_in_library("crash", key=lambda a: a.get("decay_s"), where=lambda a: (a.get("decay_s") or 0) >= CRASH_MIN_DECAY_S)
+        crash = _kit_crash(samples)
         if crash:
             samples["crash"] = crash["path"]
             done.append(f"crash lane added from the library ({crash['name']}): grooves and add_transitions put crashes on "
@@ -593,6 +638,13 @@ def build_drum_kit(
                 except Exception:  # noqa: BLE001
                     levels[x] = 0.0
             paths.sort(key=lambda x: levels[x])
+            if max(levels.values()) - min(levels.values()) <= ROUND_ROBIN_SPREAD_DB:
+                # About the same level: not soft and loud hits but alternatives. As velocity
+                # bands, a kick lane at 97-103 only ever played the top one.
+                pads.append({"note": note, "path": paths[0], "files": paths,
+                             "name": f"{lane} - {Path(paths[0]).stem} (+{len(paths) - 1} in turn)"})
+                setup.append({"lane": lane, "min_vel": 1, "max_vel": 127, "gain_db": 0.0, "layer": False})
+                paths = []
         for x, (lo, hi) in zip(paths, velocity_bands(len(paths)) if len(paths) > 1 else [(1, 127)]):
             pads.append({"note": note, "path": x, "name": f"{lane} - {Path(x).stem}"})
             setup.append({"lane": lane, "min_vel": lo, "max_vel": hi, "gain_db": 0.0, "layer": False})
@@ -621,6 +673,9 @@ def build_drum_kit(
     kit: dict = {}
     for p, cfg in zip(pads, setup):
         entry = kit.setdefault(cfg["lane"], {"key": f"{theory.midi_to_note(p['note'])} ({p['note']})", "samples": []})
+        if len(p.get("files") or []) > 1:
+            entry["samples"] += [f"{Path(f).stem} (in turn)" for f in p["files"]]
+            continue
         entry["samples"].append(Path(p["path"]).stem + (
             f" (layer, {cfg['gain_db']:+g} dB)" if cfg["layer"] else
             f" (velocity {cfg['min_vel']}-{cfg['max_vel']})" if (cfg["min_vel"], cfg["max_vel"]) != (1, 127) else ""))

@@ -18,6 +18,10 @@ FAMILY_FILLS = {
     "african": "tom", "asian": "tom", "middle eastern": "tom", "european folk": "none", "classical": "none",
     "film and games": "tom", "ambient and experimental": "none",
 }
+# A crash on the downbeat after a fill, at most every CRASH_EVERY bars and at a normal
+# hit (x), not an accent: after every 4-bar fill at full velocity it "hits 8 times" and
+# sounded like breaking glass (Night Patrol, 2026-11-07).
+CRASH_EVERY = 8
 VARIATION_EVERY, FILL_EVERY, BIG_FILL_EVERY = 4, 8, 16
 # How often the fills come at each section energy (bars; 0: never): a breakdown or intro
 # gets one small fill into the next section, a chorus or drop one every 4 bars with a big
@@ -99,8 +103,8 @@ def vary_groove(pattern: dict[str, str], step: float = 0.25, bars: int = 8, fill
         if (b + 1) % fill_every == 0 and fill_style != "none":
             big = bool(big_every) and (b + 1) % big_every == 0
             _fill(lanes, ensure, fill_style, s1, beat * (2 if big else 1), backbeat, kick)
-            if not last:
-                ensure("crash")[s1] = "X"
+            if not last and (b + 1) % max(CRASH_EVERY, fill_every) == 0:
+                ensure("crash")[s1] = "x"
         elif (b + 1) % VARIATION_EVERY == 0 or ((b + 1) % fill_every == 0 and fill_style == "none"):
             _variation(lanes, ensure, rng, s0, per_bar, backbeat, kick, hats, used, strong=True)
         elif (b + 1) % VARIATION_EVERY == 2:

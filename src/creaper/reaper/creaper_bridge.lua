@@ -3443,15 +3443,24 @@ function commands.build_sampler_kit(p)
   local pads = p.pads or {}
   if #pads == 0 then fail("give at least one sample") end
   for _, pad in ipairs(pads) do
-    if type(pad.path) ~= "string" or not reaper.file_exists(pad.path) then fail("can't find the sample " .. tostring(pad.path)) end
+    for _, f in ipairs(pad.files or { pad.path }) do
+      if type(f) ~= "string" or not reaper.file_exists(f) then fail("can't find the sample " .. tostring(f)) end
+    end
   end
   return with_undo("build sampler kit on " .. track_name(t), function()
     local loaded = {}
     for _, pad in ipairs(pads) do
       local fx = reaper.TrackFX_AddByName(t, "ReaSamplOmatic5000 (Cockos)", false, -1)
       if fx < 0 then fail("couldn't load ReaSamplOmatic5000") end
-      reaper.TrackFX_SetNamedConfigParm(t, fx, "FILE0", pad.path)
+      -- Alternatives of about the same level: all in this instance, played in turn, so a
+      -- steady kick lane isn't the same sample on every hit.
+      local files = pad.files or { pad.path }
+      for i, f in ipairs(files) do reaper.TrackFX_SetNamedConfigParm(t, fx, "FILE" .. (i - 1), f) end
       reaper.TrackFX_SetNamedConfigParm(t, fx, "DONE", "")
+      if #files > 1 then
+        local rr = find_param(t, fx, "Round-robin mode")
+        reaper.TrackFX_SetParamNormalized(t, fx, rr, solve_display_value(t, fx, rr, 1))
+      end
       reaper.TrackFX_SetParamNormalized(t, fx, 3, int(pad.note) / 127)  -- note range start
       reaper.TrackFX_SetParamNormalized(t, fx, 4, int(pad.note) / 127)  -- note range end
       if pad.name then reaper.TrackFX_SetNamedConfigParm(t, fx, "renamed_name", pad.name) end
@@ -3468,7 +3477,8 @@ function commands.build_sampler_kit(p)
         set("Release (note-off)", p.release_s * 1000)
       end
       local _, start_name = reaper.TrackFX_GetFormattedParamValue(t, fx, 3)
-      loaded[#loaded + 1] = { fx = fx + 1, note = int(pad.note), plays_on = start_name, sample = pad.path:match("[^\\/]+$") }
+      loaded[#loaded + 1] = { fx = fx + 1, note = int(pad.note), plays_on = start_name,
+                              sample = files[1]:match("[^\\/]+$"), takes = #files > 1 and #files or nil }
     end
     return { track = track_ref(t), pads = loaded }
   end)

@@ -277,3 +277,13 @@ def test_a_master_that_stopped_short_isnt_run_again_for_the_same_target(monkeypa
     kept.clear()
     out = server.master_to_target(target_lufs=-4.0, glue=False, force=True)
     assert "already_mastered" not in out
+
+
+def test_the_master_clips_less_when_the_drums_already_clip(monkeypatch):
+    from creaper import server
+    monkeypatch.setattr(server, "call", lambda cmd, **kw: {"tracks": [
+        {"name": "Drum Bus", "fx": ["VST3: Bus FORCE (Arturia)", "JS: Soft Clipper/Limiter"]},
+        {"name": "Kick", "fx": ["ReaEQ"]}, {"name": "Bass", "fx": ["JS: Soft Clipper/Limiter"]}]})
+    assert server._clipped_drums() == ["Drum Bus"]
+    from creaper import batch
+    assert server.MASTER_CLIP_OVER_CLIPPED_DRUMS_DB < batch.MASTER_CLIP_OVER_DB
