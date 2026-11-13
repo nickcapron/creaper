@@ -82,9 +82,32 @@ def tool(annotations: ToolAnnotations | None = None):
             return result
 
         mcp.tool(annotations=annotations)(wrapper)
+        registered = mcp._tool_manager._tools.get(fn.__name__)
+        if registered is not None:
+            registered.parameters = _without_titles(registered.parameters)
         return fn
 
     return decorator
+
+
+def _without_titles(schema):
+    """A tool's input schema without the titles pydantic writes on every node ("Start
+    Bar" for start_bar): 18k characters across creaper's tools that tell the model
+    nothing the parameter's name doesn't. Validation uses the function's own model, so
+    nothing else changes. Keys of "properties" are parameter names, and stay."""
+    if isinstance(schema, list):
+        return [_without_titles(s) for s in schema]
+    if not isinstance(schema, dict):
+        return schema
+    out = {}
+    for key, value in schema.items():
+        if key == "title" and isinstance(value, str):
+            continue
+        if key in ("properties", "$defs", "definitions") and isinstance(value, dict):
+            out[key] = {name: _without_titles(sub) for name, sub in value.items()}
+        else:
+            out[key] = _without_titles(value)
+    return out
 
 
 TrackRef = Annotated[str | int, Field(description='Track number (1 = top), track name, or "master"')]

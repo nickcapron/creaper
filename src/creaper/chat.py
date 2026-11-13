@@ -112,6 +112,7 @@ _SESSION_ID = re.compile(r"^[0-9a-fA-F-]{8,64}$")
 _MODEL = re.compile(r"^[A-Za-z0-9._\-\[\]]{1,80}$")
 
 TOOL_PREFIX = "mcp__creaper__"
+TOOL_SEARCH = "ToolSearch"   # Claude Code's own tool for loading deferred tool schemas
 TOOL_TIMEOUT_MS = 3 * 3600 * 1000
 
 # Arguments worth showing in the one-line description of a tool call.
@@ -187,6 +188,8 @@ class Translator:
                 self.emit(t="text", text=inner["delta"].get("text", ""))
         elif kind == "assistant":
             for block in event.get("message", {}).get("content", []):
+                if block.get("type") == "tool_use" and block.get("name") == TOOL_SEARCH:
+                    continue   # the model loading a tool's schema: not something it did in REAPER
                 if block.get("type") == "tool_use":
                     self.emit(t="tool", id=block.get("id"), summary=describe_tool(block.get("name", "?"), block.get("input") or {}))
         elif kind == "user":
@@ -249,9 +252,12 @@ def build_command(claude: str, mcp_config: str, session_id: str | None, model: s
     cmd = [
         claude, "-p",
         "--output-format", "stream-json", "--verbose", "--include-partial-messages",
-        "--tools", "",                      # no shell, file or web tools: REAPER only
+        # No shell, file or web tools: REAPER only. ToolSearch only loads creaper's own
+        # tool schemas when the model needs them: with every one of them up front a
+        # conversation started at about 100k tokens; deferred, about 7k.
+        "--tools", TOOL_SEARCH,
         "--mcp-config", mcp_config, "--strict-mcp-config",
-        "--allowedTools", TOOL_PREFIX.rstrip("_"),
+        "--allowedTools", f"{TOOL_PREFIX.rstrip('_')},{TOOL_SEARCH}",
         "--permission-mode", "dontAsk",     # anything not allowed is refused, never prompted
         "--append-system-prompt-file", prompt_file,   # checked against `claude --help`, 2.1.322
     ]
@@ -282,6 +288,9 @@ MCP_START_TIMEOUT_MS = "120000"
 def claude_env() -> dict[str, str]:
     env = dict(os.environ)
     env.setdefault("MCP_TIMEOUT", MCP_START_TIMEOUT_MS)
+    # Defer the tool schemas whatever the model's context size ("auto" defers only when
+    # they pass 10 % of it, which a 1M-token model's wouldn't).
+    env.setdefault("ENABLE_TOOL_SEARCH", "true")
     return env
 
 

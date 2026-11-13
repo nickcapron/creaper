@@ -145,8 +145,9 @@ SESSION = "73e7216f-1dbf-4381-847c-df359cb6a7ef"
 
 def test_command_only_allows_creaper_tools():
     cmd = chat.build_command("claude", "mcp.json", SESSION, None)
-    assert cmd[cmd.index("--tools") + 1] == ""
-    assert cmd[cmd.index("--allowedTools") + 1] == "mcp__creaper"
+    # Only ToolSearch of Claude Code's own tools: it loads creaper's tool schemas on demand.
+    assert cmd[cmd.index("--tools") + 1] == "ToolSearch"
+    assert cmd[cmd.index("--allowedTools") + 1] == "mcp__creaper,ToolSearch"
     assert cmd[cmd.index("--permission-mode") + 1] == "dontAsk"
     assert "--strict-mcp-config" in cmd
     assert cmd[cmd.index("--resume") + 1] == SESSION
@@ -290,3 +291,13 @@ def test_keep_awake_lets_go_even_when_the_turn_fails(monkeypatch):
         with chat.KeepAwake():
             raise RuntimeError("boom")
     assert calls == [0x80000003, 0x80000000]       # continuous + system + display, then continuous alone
+
+
+def test_tool_schemas_are_deferred_and_loading_them_isnt_shown():
+    assert chat.claude_env()["ENABLE_TOOL_SEARCH"] in ("true", "auto", "false")
+    shown = []
+    tr = chat.Translator(lambda **e: shown.append(e))
+    tr.feed({"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "id": "a", "name": "ToolSearch", "input": {"query": "select:mcp__creaper__get_scale"}},
+        {"type": "tool_use", "id": "b", "name": "mcp__creaper__get_scale", "input": {"key": "A dorian"}}]}})
+    assert [e["summary"] for e in shown if e["t"] == "tool"] == [chat.describe_tool("mcp__creaper__get_scale", {"key": "A dorian"})]
