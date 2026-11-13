@@ -577,17 +577,19 @@ def test_a_kick_from_a_bass_folder_or_with_no_punch_is_marked_down():
 
 
 def test_the_kit_crash_is_chosen_by_tone_not_the_longest_wash(monkeypatch):
+    from pathlib import Path
     from creaper import sample_tools, samplelib
+    root = Path("/lib")   # native paths: a D:\ path is one folder name on Linux and macOS
     v = samplelib.ANALYSIS_VERSION
     lib = [
-        {"path": r"D:\Samples\Ambient\AMBCRASH.wav", "name": "AMBCRASH",
+        {"path": str(root / "Samples" / "Ambient" / "AMBCRASH.wav"), "name": "AMBCRASH",
          "analysis": {"v": v, "kind": "one-shot", "decay_s": 6.0, "brightness_hz": 11000}},
-        {"path": r"D:\Samples\Acoustic\Crash 16.wav", "name": "Crash 16",
+        {"path": str(root / "Samples" / "Acoustic" / "Crash 16.wav"), "name": "Crash 16",
          "analysis": {"v": v, "kind": "one-shot", "decay_s": 2.2, "brightness_hz": 6200}},
-        {"path": r"D:\SILA\LinnDrum\Crash_Lindrum.wav", "name": "Crash_Lindrum",
+        {"path": str(root / "SILA" / "LinnDrum" / "Crash_Lindrum.wav"), "name": "Crash_Lindrum",
          "analysis": {"v": v, "kind": "one-shot", "decay_s": 1.8, "brightness_hz": 6800}},
     ]
     monkeypatch.setattr(sample_tools.library, "search", lambda role=None, **kw: lib)
-    assert sample_tools._kit_crash({"kick": r"D:\Samples\Acoustic\Kick.wav"})["name"] == "Crash 16"
-    assert sample_tools._kit_crash({"kick": r"D:\SILA\LinnDrum\BD_Lindrum.wav"})["name"] == "Crash_Lindrum"
+    assert sample_tools._kit_crash({"kick": str(root / "Samples" / "Acoustic" / "Kick.wav")})["name"] == "Crash 16"
+    assert sample_tools._kit_crash({"kick": str(root / "SILA" / "LinnDrum" / "BD_Lindrum.wav")})["name"] == "Crash_Lindrum"
     assert sample_tools._kit_crash({})["name"] != "AMBCRASH"
