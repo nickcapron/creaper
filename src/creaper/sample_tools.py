@@ -268,11 +268,6 @@ class Layer(BaseModel):
         "Its level against the lane's main sample (negative = quieter); a layer plays on every velocity"))
 
 
-# A lane's samples within this many dB of each other are alternatives, played in turn;
-# further apart they're velocity layers, softest on the lowest velocities.
-ROUND_ROBIN_SPREAD_DB = 3.0
-
-
 def velocity_bands(n: int) -> list[tuple[int, int]]:
     """MIDI velocity 1-127 split into n bands, softest first."""
     edges = [1 + round(i * 127 / n) for i in range(n + 1)]
@@ -638,13 +633,6 @@ def build_drum_kit(
                 except Exception:  # noqa: BLE001
                     levels[x] = 0.0
             paths.sort(key=lambda x: levels[x])
-            if max(levels.values()) - min(levels.values()) <= ROUND_ROBIN_SPREAD_DB:
-                # About the same level: not soft and loud hits but alternatives. As velocity
-                # bands, a kick lane at 97-103 only ever played the top one.
-                pads.append({"note": note, "path": paths[0], "files": paths,
-                             "name": f"{lane} - {Path(paths[0]).stem} (+{len(paths) - 1} in turn)"})
-                setup.append({"lane": lane, "min_vel": 1, "max_vel": 127, "gain_db": 0.0, "layer": False})
-                paths = []
         for x, (lo, hi) in zip(paths, velocity_bands(len(paths)) if len(paths) > 1 else [(1, 127)]):
             pads.append({"note": note, "path": x, "name": f"{lane} - {Path(x).stem}"})
             setup.append({"lane": lane, "min_vel": lo, "max_vel": hi, "gain_db": 0.0, "layer": False})
@@ -673,9 +661,6 @@ def build_drum_kit(
     kit: dict = {}
     for p, cfg in zip(pads, setup):
         entry = kit.setdefault(cfg["lane"], {"key": f"{theory.midi_to_note(p['note'])} ({p['note']})", "samples": []})
-        if len(p.get("files") or []) > 1:
-            entry["samples"] += [f"{Path(f).stem} (in turn)" for f in p["files"]]
-            continue
         entry["samples"].append(Path(p["path"]).stem + (
             f" (layer, {cfg['gain_db']:+g} dB)" if cfg["layer"] else
             f" (velocity {cfg['min_vel']}-{cfg['max_vel']})" if (cfg["min_vel"], cfg["max_vel"]) != (1, 127) else ""))
@@ -791,7 +776,9 @@ def layered_zones(roots: list[tuple[str, float]], names: dict[str, tuple[str, in
                   reach: int, low: int | None, high: int | None) -> list[dict]:
     """Zones for samples whose names mark velocity layers (pp, mf, ff, soft, v2...) and
     round robins (rr1, rr2...): the key ranges from one sample of each pitch, each of a
-    pitch's layers its share of the velocities, the round robins of a zone in turn."""
+    pitch's layers its share of the velocities, a zone's round robins in one sampler,
+    which picks among them by velocity (RS5k's round-robin setting changed nothing in a
+    REAPER 7.58 render, 2026-11-12)."""
     by_base: dict[str, list[tuple[str, float, int | None, int | None]]] = {}
     for path, root in roots:
         base, rank, rr = names[path]
