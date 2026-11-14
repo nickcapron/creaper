@@ -241,7 +241,19 @@ function reaper.OnStopButton()
     for _, t in ipairs(F.tracks) do
       if t.v.I_RECARM == 1 then
         local length = math.max(0.5, F.play_position - F.recording_from)
-        F.new_audio_item(t, F.recording_from, length, F.recorded_file)
+        -- F.trims_behind: like REAPER recording over an item, only the stretch past it shows.
+        local covered = 0
+        if F.trims_behind then
+          for _, old in ipairs(t.items) do
+            local fin = old.v.D_POSITION + old.v.D_LENGTH
+            if old.v.D_POSITION <= F.recording_from and fin > F.recording_from then
+              covered = math.min(length - 0.01, fin - F.recording_from)
+            end
+          end
+        end
+        local item = F.new_audio_item(t, F.recording_from + covered, length - covered, F.recorded_file)
+        item.takes[1].v.D_STARTOFFS = covered
+        item.takes[1].length = length
       end
     end
   end
@@ -387,6 +399,17 @@ function reaper.GetActiveTake(item) return item.takes[1] end
 function reaper.TakeIsMIDI(take) return take.midi end
 function reaper.GetMediaItemTake_Source(take) return take end
 function reaper.GetMediaSourceFileName(source) return source.file end
+-- The right-hand piece, as REAPER returns it; nil when the position isn't inside the item.
+function reaper.SplitMediaItem(item, position)
+  local pos, len = item.v.D_POSITION, item.v.D_LENGTH
+  if position <= pos or position >= pos + len then return nil end
+  local right = F.new_audio_item(item.track, position, pos + len - position, item.takes[1].file)
+  right.takes[1].v.D_STARTOFFS = item.takes[1].v.D_STARTOFFS + (position - pos)
+  right.takes[1].name = item.takes[1].name
+  item.v.D_LENGTH = position - pos
+  return right
+end
+function reaper.GetMediaSourceLength(source) return source.length or 0, false end
 function reaper.GetMediaItemTakeInfo_Value(take, key)
   if key == "D_PLAYRATE" then return take.v[key] or 1.0 end
   if key ~= "D_STARTOFFS" then error("fake reaper has no take value " .. tostring(key), 2) end

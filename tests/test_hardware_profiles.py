@@ -408,3 +408,30 @@ def test_a_discarded_recording_takes_its_peaks_with_it(tmp_path):
     other.write_bytes(b"x")
     hst._discard(str(wav))
     assert not wav.exists() and not beside.exists() and not in_folder.exists() and other.exists()
+
+
+def test_the_level_check_says_which_knob_and_how_far():
+    # Live, 2026-11-13: a whole song printed with input 1 thirty dB under input 2 (one ear only).
+    advice = hst.level_advice([-45.6, -24.9], 1, "microKORG")
+    assert "Input 1 gets next to nothing" in advice[0] and "L/MONO" in advice[0] and "LINE" in advice[0]
+    assert "Input 2 is low (peak -25 dBFS): turn its gain up about 9 dB" in advice[1]
+    assert hst.level_advice([-15.5, -16.5], 1, "microKORG") == []                   # the user's fourth round: good
+    assert hst.level_advice([-13.0, -12.2], 1, "microKORG") == []                      # in the window, matched
+    assert "Input 3 is 3 dB under the other" in hst.level_advice([-17.0, -14.0], 3, "x")[0]
+    # Live: with the test sound at -12.6 a distorted lead printed at -5.5. -9 leaves it no room.
+    assert "Input 1 is hot" in hst.level_advice([-9.0, -9.5], 1, "x")[0]
+    assert "clips" in hst.level_advice([0.0, -9.0], 1, "x")[0]
+    assert "turn its gain down about 13 dB" in hst.level_advice([-3.0], 1, "x")[0]   # one input: a mono synth
+    quiet = hst.level_advice([-40.0, -41.0], 1, "microKORG")
+    assert "volume knob" in quiet[0] and "Input 1 is low" in quiet[1]
+
+
+def test_a_one_sided_recording_is_called_that(korg):  # noqa: F811
+    import numpy as np
+    link = hst._link("microKORG")
+    link.device["stereo"] = True
+    audio = np.zeros((4800, 2), dtype="float32")
+    audio[:, 0], audio[:, 1] = 0.005, 0.2
+    assert "one-sided" in hst._level_problem(audio, link) and "action='level'" in hst._level_problem(audio, link)
+    audio[:, 0] = 0.15
+    assert hst._level_problem(audio, link) is None

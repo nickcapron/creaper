@@ -274,6 +274,32 @@ def test_a_print_take_mutes_the_synths_other_tracks_and_puts_everything_back(rig
     assert names(rig) == ["Vocals", "Same synth", "Other synth", "MK Lead (MIDI)", "MK Lead"]
 
 
+def test_a_reprint_over_an_older_print_is_the_whole_recording(rig, bridge):
+    """Motel Neon MK, 2026-11-13: REAPER showed only what the old item didn't cover, so a
+    reprinted bass was a 10 ms item at the song's end and the mix had no bass."""
+    hardware_part(rig, bridge)
+    audio = rig.f.track("MK Lead")
+    rig.f.new_audio_item(audio, 4.0, 4.0)                # the first print, the same stretch
+    rig.f.trims_behind = True
+    bridge.call("hardware_take_start", track="MK Lead", start_seconds=4, end_seconds=8)
+    rig.f.play_position = 8.0
+    finished = bridge.call("hardware_take_finish", mute_midi=True, replace=True, latency_seconds=0.25)
+    (new,) = items(rig, "MK Lead")
+    assert new.v["D_POSITION"] == 4.0 and new.v["D_LENGTH"] == 3.75 and new.takes[1].v["D_STARTOFFS"] == 0.25
+    assert finished["items"][0]["length_seconds"] == 3.75
+
+
+def test_a_reprint_of_some_bars_keeps_the_rest_of_the_older_print(rig, bridge):
+    hardware_part(rig, bridge)
+    audio = rig.f.track("MK Lead")
+    rig.f.new_audio_item(audio, 0.0, 20.0, "whole song.wav")
+    bridge.call("hardware_take_start", track="MK Lead", start_seconds=4, end_seconds=8)
+    rig.f.play_position = 8.0
+    bridge.call("hardware_take_finish", mute_midi=True, replace=True)
+    kept = sorted((i.v["D_POSITION"], i.v["D_LENGTH"], i.takes[1].file, i.takes[1].v["D_STARTOFFS"]) for i in items(rig, "MK Lead"))
+    assert kept == [(0.0, 4.0, "whole song.wav", 0.0), (4.0, 4.0, "take.wav", 0.0), (8.0, 12.0, "whole song.wav", 8.0)]
+
+
 def test_a_print_reads_as_printed_until_the_part_changes(rig, bridge):
     hardware_part(rig, bridge)
     midi, audio = rig.f.track("MK Lead (MIDI)"), rig.f.track("MK Lead")

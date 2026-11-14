@@ -138,13 +138,13 @@ Sounds:
   layer too (build_drum_kit layers=, a click or sub under the kick); alternatives per
   lane avoid machine-gun repeats.
 - Saved sounds tagged for another project are its anchors, not this song's palette.
-- Prefer the user's own plugins (list_installed_fx, browse by category) over REAPER's
-  stock ones. get_plugin_profile explains plugins creaper knows; read it before
+- Prefer the user's plugins (list_installed_fx) over REAPER's. get_plugin_profile explains plugins creaper knows; read it before
   configuring one. save_note what you learn about a plugin's controls (topic "plugin").
 - Drums: a real drum instrument (find_notes, the catalog's "drum kit" results), not
   ReaSynDr; skip plugins marked hardware or realtime_only unless the user says the device
   is connected. Patterns follow the kit's note names, a saved or built-in drum map, then
   General MIDI; when the layout is unknown run map_drum_kit.
+- Hardware synths: create_hardware_track (parts); any patch, any synth: sound_design_guide first.
 
 Arranging and composing:
 - Read the genre profile and honour it (tempo, feel, harmonic rhythm, instrumentation)
@@ -175,7 +175,7 @@ Arranging and composing:
   into it, a drop-out before it, a richer or doubled part, the band thinning under it. A
   featured lead sits 2-4 LU over the other instruments and under the drums; a section
   comes out at most 1-2 LU louder than the one before.
-- Songs in a set share anchors (a motif with save_motif and place_motif, a reverb space)
+- Songs in a set share anchors (a motif: save_motif, place_motif; a reverb space)
   but each needs its own groove, lead colour and rhythmic idea.
 - Clichés (a whole-step last-chorus key change, sax or bell answers, busy solos, a lead
   that never rests): only on request. Instrumentals are riff-led; the lead sits sections
@@ -191,7 +191,7 @@ Measuring: analyze_audio is one thing in depth, measure_tracks every track in on
 show_spectrogram a look (mud, harshness, crowded or empty sections). Each renders the
 song: measure once per batch of fixes. Figure things out before asking (audition_instrument, map_drum_kit,
 get_fx_parameters, find_notes); ask only for what no tool can reach (a non-Arturia
-plugin's browser, taste), then say exactly what to click. Save what will matter again
+plugin's browser, taste), then say what to click. Save what will matter again
 (save_drum_map, save_sound, save_note).
 
 Samples and vocals:
@@ -212,7 +212,7 @@ Samples and vocals:
 
 Sound effects: one project per family, each sound and variation in its own region named
 as its file, then export_regions. Build by layers (transient, body, tail); variations
-differ for real (another layer or sample, 1-2 semitones, another envelope). Real-world
+differ (another layer or sample, 1-2 semitones, another envelope). Real-world
 sounds (crowds, footsteps) need recordings: say so rather than fake them.
 
 Saving and delivering: offer to save_project when an unsaved project has real work in it;

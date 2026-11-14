@@ -24,7 +24,7 @@ import numpy as np
 import soundfile as sf
 from pydantic import BaseModel, Field
 
-from . import convstate, hardware_profiles, jsonstore, listen, server
+from . import convstate, hardware_profiles, jsonstore, listen, server, sound_design
 from . import hardware_setup as setup
 from . import hardware_tools as hw
 from .bridge import STOP_PROMPT_WAIT, BridgeError
@@ -269,7 +269,7 @@ def hardware_profile(
         "parameters = every sound parameter by name with its values; recipes = ready starting points (artist-style "
         "sounds, game sound effects) and the maker's presets worth knowing; setup = the synth's MIDI settings, read "
         "from it now"))] = "parameters",
-    kind: Annotated[Literal["artist", "sfx"] | None, Field(description="With show='recipes': only this kind")] = None,
+    kind: Annotated[Literal["artist", "sfx", "song"] | None, Field(description="With show='recipes': only this kind")] = None,
 ) -> dict:
     """What creaper knows about a hardware synth: its sound parameters (the names
     set_hardware_params takes), its recipes (load_hardware_sound recipe=...), or its
@@ -295,6 +295,96 @@ def hardware_profile(
     return {"device": link.name, **p.describe(), "live_control": (
         "set_hardware_params live=true moves knob parameters with control changes (no gap in the sound); everything "
         "else is set by loading the whole patch into the edit buffer.")}
+
+
+@tool(annotations=READ_ONLY)
+def sound_design_guide(
+    sound: Annotated[str | None, Field(description=(
+        "A kind of sound ('string pad', 'acid bass', 'sync lead', 'bell', 'riser', 'synth kick'...) or a technique "
+        "('detune', 'glide', 'pulse width', 'key tracking'...); leave out for the method and the list of both"))] = None,
+    synth: Annotated[str | None, Field(description=(
+        "A hardware synth from list_hardware: with a profile (hardware_profile works on it) the blueprint also "
+        "comes as that synth's own parameter values"))] = None,
+    blueprint: Annotated[dict | None, Field(description=(
+        "With synth: a blueprint of your own in the same fields and real units (a built-in one changed, or built "
+        "from techniques), e.g. {'voices': 'mono', 'glide_ms': 90, 'osc2': {'wave': 'saw', 'cents': 12}, 'filter': "
+        "{'cutoff_hz': 1800, 'env_octaves': 2.5}, 'amp_env': {'attack_ms': 5, 'release_ms': 200}}: it comes back as "
+        "that synth's parameter values"))] = None,
+) -> dict:
+    """How to design a sound on a synthesizer: creaper's sound-design knowledge. Read it
+    before building or changing a patch on ANY synth, hardware or plugin, instead of
+    guessing values.
+
+    With no sound: the method (design against numbers that can be measured, in what
+    order to build, how to check) and the names of every blueprint and technique.
+    With a sound: what it is, its blueprint in real units (milliseconds, hertz, cents,
+    octaves: oscillators, filter, envelopes, modulation, effects), how to play it,
+    what a recording of it should measure, and what to change when it doesn't.
+    With a technique: what it does and the amounts that work. With a family ('pad',
+    'bass', 'lead', 'keys', 'fx', 'drums'): its sounds and what each is.
+    With synth: the blueprint translated into that synth's parameter values through
+    its measured calibration ('on_this_synth': pass params to set_hardware_params with
+    start_from='init', then audition_hardware with the 'play' phrase and compare with
+    'check'), what was set by rule of thumb, what the synth can't do, and the synth's
+    calibration (what its 0-127 values are in real units) for working out any other
+    value. For a plugin synth, set the nearest controls by name (get_fx_parameters,
+    set_fx_parameters display_value takes real units) and measure with
+    audition_instrument. An advanced patch is a blueprint plus techniques: start from
+    the nearest sound, change its blueprint in real units, and pass it as blueprint=
+    with synth= for the values (don't work out 0-127 values by eye: the controls aren't
+    even), one step at a time."""
+    if blueprint is not None:
+        if synth is None:
+            raise ValueError("blueprint needs synth: the hardware synth whose parameter values it should become")
+        unknown = sound_design.unknown_fields(blueprint)
+        if unknown:
+            raise ValueError(f"not blueprint fields: {', '.join(unknown)}. The fields: "
+                             + "; ".join(f"{part or 'top level'}: {', '.join(sorted(names))}"
+                                         for part, names in sound_design.FIELDS.items()))
+        return {"blueprint": blueprint, "on_this_synth": _on_synth(synth, blueprint)}
+    if sound is None:
+        out = sound_design.index()
+        out["next"] = ("sound_design_guide(sound=...) for a blueprint or a technique; add synth=<a hardware synth> "
+                       "for its own parameter values.")
+        return out
+    technique = sound_design.find_technique(sound)
+    found = sound_design.find(sound)
+    asked = " ".join(sound.lower().replace("-", " ").split())
+    if technique is not None and technique[0] == asked and (found is None or found[0] != asked):
+        found = None          # "detune" is the technique, not the detuned bass that mentions it
+    listed = sound_design.family(sound) if found is None and technique is None else None
+    if listed is not None:
+        return {"family": listed[0], "sounds": listed[1], "next": "sound_design_guide(sound=<one of these>) for its blueprint"}
+    if found is None and technique is None:
+        raise ValueError(f"no blueprint or technique named '{sound}'. Sounds: {', '.join(sound_design.SOUNDS)}. "
+                         f"Techniques: {', '.join(sound_design.TECHNIQUES)}. For anything else, start from the "
+                         "nearest sound and apply techniques to it.")
+    if found is None:
+        return {"technique": technique[0], "how": technique[1]}
+    name, entry = found
+    out = {"sound": name, **{k: v for k, v in entry.items() if k != "aka"}, "also_known_as": entry.get("aka")}
+    if technique is not None:
+        out["technique"] = {technique[0]: technique[1]}
+    if synth is not None:
+        out["on_this_synth"] = _on_synth(synth, entry["blueprint"])
+    return out
+
+
+def _on_synth(synth: str, blueprint: dict) -> dict | str:
+    """A blueprint as one hardware synth's parameter values, or why creaper can't say."""
+    link = _link(synth)
+    p = link.profile
+    if p is None or not hasattr(p, "from_design"):
+        return (f"creaper has no profile for {link.name}, so it can't set these values on it: the user sets the sound "
+                "on the synth from the blueprint, and audition_hardware measures the result against 'check'.")
+    made = p.from_design(blueprint)
+    return {
+        "device": link.name, **made,
+        "how": (f"set_hardware_params(name={link.name!r}, params=<these>, start_from='init'), then "
+                "audition_hardware with a phrase from 'play', and compare with 'check'. These values come "
+                "from this model's measured calibration: a starting point, tuned by measuring."),
+        "calibration": p.calibration_summary(),
+    }
 
 
 @tool(annotations=READ_ONLY)
@@ -362,6 +452,25 @@ def set_hardware_params(
                {"was": {k: v for k, v in before.items() if k.split(".")[-1] in params and after.get(k) != v}})}
 
 
+def _part_notes(track: str | int, written: dict) -> list[dict]:
+    """The notes a sound written into the song will play: from its bar to the part's next
+    sound (or the end), positions in quarter notes of the song."""
+    try:
+        part = call("hardware_tracks", track=track)["hardware_tracks"][0]
+        start = float(written["part_starts"]["qn"])
+        later = [float(s["start"]["qn"]) for s in part.get("sounds") or [] if float(s["start"]["qn"]) > float(written["sends_at"]["qn"]) + 0.01]
+        end = min(later) if later else float("inf")
+        notes = []
+        for item in part.get("parts") or []:
+            at = float(item["start"]["qn"])
+            for n in call("get_midi_notes", item_id=item["id"]).get("notes", []):
+                if start - 0.01 <= at + n["start"] < end:
+                    notes.append({"pitch": n["pitch"], "start": at + n["start"], "length": n["length"]})
+        return notes
+    except (BridgeError, KeyError, TypeError, ValueError):
+        return []     # the fit is advice: a part that can't be read just gets none
+
+
 Tags = Annotated[list[str] | None, Field(description="Role and character, e.g. ['lead', 'glide'] or ['sfx', 'laser']")]
 
 
@@ -410,7 +519,10 @@ def load_hardware_sound(
     tempo stored in the patch: it's set to the project's tempo (at that bar, when the
     sound is written into the song) and the result says so under 'tempo', with what
     the synth's clock setting means for it. An arpeggio written into the song also gets
-    its key sync turned on, so it starts with the part's first note. A recipe that names its own tempo (an
+    its key sync turned on, so it starts with the part's first note.
+    A recipe written into the song is checked against the part's notes from that bar
+    to the part's next sound: 'fit' says when notes lie outside the register the sound
+    works in or the part plays more notes at once than the sound has voices. A recipe that names its own tempo (an
     effect's speed) and a backup loaded without a track keep theirs."""
     if sum(x is not None for x in (sound, recipe, program, backup)) != 1:
         raise ValueError("give exactly one of sound, recipe, program or backup")
@@ -493,6 +605,10 @@ def load_hardware_sound(
         written = call("hardware_patch_item", track=track, start_bar=bar, name=label, lead_seconds=PATCH_LEAD_S,
                        sysex=p.program_dump(link.channel, data))
         out["written_into_song"] = written
+        if recipe is not None and hasattr(p, "part_fit"):
+            fit = p.part_fit(made, _part_notes(track, written))
+            if fit:
+                out["fit"] = fit
         if not written.get("loads_before_the_part"):
             out["warning"] = ("The part starts at the very beginning of the project, so on playback the sound loads "
                               "as the first note plays. print_hardware sends it ahead and isn't affected; for live "
@@ -642,6 +758,25 @@ def _silence_cause(link: Link, peak_db: float) -> str:
             f"(test_hardware), then {link.name}'s volume knob, its audio cables, and the interface's input gain.")
 
 
+# Where the test sound should peak: noise far below, and room above for the sounds that
+# are louder than it (live, 2026-11-13: with the test sound at -12.6 dBFS a distorted lead
+# printed at -5.5, 7 dB hotter). Wide on purpose: the same setting read 1-2 dB apart from one
+# test note to the next (detuned saws beat), and a user sent back to the knobs for half a dB
+# stops trusting the check.
+LEVEL_WINDOW = (-20.0, -12.0)
+LEVEL_AIM = -16.0
+NOTHING_DBFS = -50.0           # a channel under this while the test sound plays gets next to nothing
+ONE_SIDED_DB = 12.0            # two inputs of a stereo pair this far apart: the part sits in one ear
+MATCH_DB = 1.5
+
+
+def _peaks_db(audio: np.ndarray) -> list[float]:
+    """Each channel's peak in dBFS."""
+    if not audio.size:
+        return []
+    return [round(20 * math.log10(p), 1) if p > 0 else -200.0 for p in np.max(np.abs(audio), axis=0)]
+
+
 def _level_problem(audio: np.ndarray, link: Link) -> str | None:
     peak = float(np.max(np.abs(audio))) if audio.size else 0.0
     peak_db = 20 * math.log10(peak) if peak > 0 else -200.0
@@ -649,8 +784,111 @@ def _level_problem(audio: np.ndarray, link: Link) -> str | None:
         return _silence_cause(link, peak_db)
     if peak_db > HOT_DBFS:
         return ("The recording clips: the interface's input gain is too high for this sound. Ask the user to turn "
-                "it down and record again.")
+                f"it down and record again; setup_hardware(name={link.name!r}, action='level') measures how far.")
+    peaks = _peaks_db(audio)
+    if link.device.get("stereo") and len(peaks) == 2 and abs(peaks[0] - peaks[1]) > ONE_SIDED_DB:
+        first = int(link.device.get("audio_input") or 1)
+        quiet = first + (0 if peaks[0] < peaks[1] else 1)
+        return (f"The recording is one-sided: interface input {first} peaks at {peaks[0]:.0f} dBFS and input "
+                f"{first + 1} at {peaks[1]:.0f}, so it plays from one speaker (unless the sound is panned hard on "
+                f"purpose). Input {quiet}'s gain is far below the other's, or its cable is loose. "
+                f"setup_hardware(name={link.name!r}, action='level') measures both inputs and says how far to turn "
+                "each; then record this again.")
     return None
+
+
+def level_advice(peaks: list[float], first_input: int, synth: str) -> list[str]:
+    """What to turn, from each input's peak while the synth plays about its loudest sound.
+    Nothing to say = the level is right."""
+    said = []
+    lo, hi = LEVEL_WINDOW
+    for i, peak in enumerate(peaks):
+        n = first_input + i
+        if peak > HOT_DBFS:
+            said.append(f"Input {n} clips: turn its gain down about a quarter turn.")
+        elif peak < NOTHING_DBFS or (len(peaks) == 2 and peak < max(peaks) - 20):
+            # Dead, or far under its partner: not a matter of a few dB on the knob.
+            jack = ("L/MONO" if i == 0 else "R") if len(peaks) == 2 else "output"
+            said.append(f"Input {n} gets next to nothing (peak {peak:.0f} dBFS): its gain knob is at the bottom, the "
+                        f"cable from the {synth}'s {jack} jack is loose or missing, or the input is switched to the "
+                        "wrong kind (LINE for a synth, not instrument/Hi-Z, and no pad).")
+        elif peak < lo:
+            said.append(f"Input {n} is low (peak {peak:.0f} dBFS): turn its gain up about {LEVEL_AIM - peak:.0f} dB.")
+        elif peak > hi:
+            said.append(f"Input {n} is hot (peak {peak:.0f} dBFS): turn its gain down about {peak - LEVEL_AIM:.0f} dB.")
+    if len(peaks) == 2 and not said and abs(peaks[0] - peaks[1]) > MATCH_DB:
+        low = first_input + (0 if peaks[0] < peaks[1] else 1)
+        said.append(f"Input {low} is {abs(peaks[0] - peaks[1]):.0f} dB under the other: nudge its gain up to match, "
+                    "or the synth leans to one side.")
+    if said and peaks and max(peaks) < -30:
+        said.insert(0, f"First turn the {synth}'s own volume knob up to about three quarters: a quiet synth into a "
+                       "lot of gain is noisier than a loud synth into a little.")
+    return said
+
+
+def check_input_level(name: str) -> dict:
+    """setup_hardware's 'level' action: plays the synth's loudest sound (or, without a
+    profile, the sound it has), records it and says how far to turn each input's gain."""
+    link = _link(name)
+    if not link.device.get("audio_input"):
+        raise ValueError(f"creaper doesn't know which interface inputs {link.name}'s audio comes back on: "
+                         "save_hardware it again with audio_input (list_inputs names them)")
+    checked = setup.preflight(link.name, link.device)
+    own = _reads(link)
+    confirm_with_user(f"play a loud two-second test note on the {link.name} and record it to check the interface's "
+                      "input level" + (" (its sound is put back afterwards)" if own else ""))
+    notes = [{"pitch": 48, "at": 0.3, "length": 2.0, "velocity": 127}]
+    current = _read_program(link) if own else None
+    if own:
+        loud = link.profile.level_patch(current)
+        _load(link, loud, "the level test sound", current=current, ask=False)
+    try:
+        items, _ = _take(_scratch(link, notes, 3.8), {})
+    finally:
+        if own:
+            _load(link, current, "the sound from before the level test", current=loud, keep=False, ask=False)
+    audio, fs, _, path = _audio_of(items, link)
+    _discard(path)
+    peaks = _peaks_db(audio)
+    first = int(link.device["audio_input"])
+    advice = level_advice(peaks, first, link.name)
+    # Well after the note: what the input does with nothing playing. Only with the test sound,
+    # which stops dead: a sound of the user's may still be ringing or echoing there.
+    quiet = audio[-int(0.6 * fs):] if own else audio[:0]
+    floor = round(20 * math.log10(max(1e-9, float(np.sqrt(np.mean(quiet ** 2))))), 1) if quiet.size else None
+    measured_at = setup.signature(checked.status)
+    with jsonstore.updating(hw._store_path(), lambda: {"version": 1, "devices": {}}, indent=2) as data:
+        data["devices"][link.name]["input_level"] = {
+            "peaks_dbfs": peaks, "ok": not advice, "at": measured_at,
+            "time": dt.datetime.now().isoformat(timespec="seconds")}
+    out: dict[str, Any] = {
+        "device": link.name, "level_ok": not advice,
+        "inputs": {f"input {first + i}": f"{p:.1f} dBFS peak" for i, p in enumerate(peaks)},
+        "aim": (f"this test sound peaking between {LEVEL_WINDOW[0]:.0f} and {LEVEL_WINDOW[1]:.0f} dBFS on every input: "
+                "distorted and resonant sounds come out up to 8 dB louder, and still must not clip"),
+        "noise_floor_dbfs": floor,
+        "measured_with": ("a loud plain sound (four saws in unison, filter open)" if own else
+                          "the sound the synth had (creaper has no profile to set a loud one): have the user "
+                          "choose its loudest sound first, or leave a few dB more room"),
+    }
+    if advice:
+        out["turn"] = advice
+        out["next"] = ("Tell the user exactly these, one knob at a time, on the interface's front panel; when they "
+                       "say it's done, call this again. Repeat until level_ok (usually two or three rounds).")
+    else:
+        out["next"] = "The input level is right; it's kept with the device. Carry on."
+    return checked.onto(out)
+
+
+def level_note(link: Link, st: dict | None) -> str | None:
+    """A reminder when this device's input level was never set on these audio settings."""
+    kept = link.device.get("input_level") or {}
+    if kept.get("ok") and kept.get("at") == setup.signature(st):
+        return None
+    return (f"The interface's input level for {link.name} hasn't been set"
+            + (" (the last check found it off)" if kept and not kept.get("ok") else "")
+            + f": setup_hardware(name={link.name!r}, action='level') plays a test note and says how far to turn each "
+            "gain knob. Do it with the user before recording parts, so prints aren't quiet, clipped or one-sided.")
 
 
 def _scratch(link: Link, notes: list[dict], seconds: float) -> dict:
@@ -943,7 +1181,15 @@ def create_hardware_track(
     time, so parts are printed one after another. (Two tracks rather than ReaInsert:
     ReaInsert forces every render to run in real time, and creaper measures and mixes
     with offline renders.) Any saved MIDI device gets a pair; on one creaper has no
-    profile for, the user sets the sound on the synth before the print."""
+    profile for, the user sets the sound on the synth before the print.
+    A whole song with the synth: set_tempo first (sounds take the tempo), then a pair
+    for every part it plays, named Bass, Pad, Lead and Counter, BEFORE build_song, which
+    then writes those parts onto them. hardware_profile show='recipes' lists sounds by
+    role with the register each works in and the notes it plays at once; give each
+    part one at its first bar, and another at any section where the sound should
+    change (a darker bass under the verse, a solo sound for the instrumental), and act
+    on the 'fit' each load reports. Print the parts one after another, then mix as
+    usual: the printed audio tracks are the parts."""
     link = _link(name)
     if not link.device.get("audio_input"):
         raise ValueError(f"creaper doesn't know which interface inputs {link.name}'s audio comes back on: "
@@ -960,6 +1206,9 @@ def create_hardware_track(
     if not link.device.get("latency_ms"):
         made["note"] = (f"{link.name}'s latency hasn't been measured: calibrate_hardware_latency once, so prints "
                         "line up with the other tracks.")
+    level = level_note(link, checked.status)
+    if level:
+        made["input_level"] = level
     return checked.onto(made)
 
 
@@ -1021,12 +1270,23 @@ def print_hardware(
                            "take_name": f"{part['audio_track']['name']} (printed)"})
     audio, fs, _, _ = _audio_of(items, link)
     peak = float(np.max(np.abs(audio))) if audio.size else 0.0
+    shown = sum(float(i.get("length_seconds") or 0) for i in items)
+    if shown < 0.9 * length - latency:
+        # Live, 2026-11-13: the recordings were whole and the items 10 ms long, so the mix had no bass.
+        out["problem"] = (f"The recording is {length:.0f} seconds long but its item in the project shows only "
+                          f"{shown:.1f}: the part will be missing from the song. Look at the item on "
+                          f"'{part['audio_track']['name']}' (get_track_details), delete it and print again; if it "
+                          "happens again, tell the user: something in REAPER trims new recordings.")
     out.update({"printed": part["audio_track"], "items": [{k: i[k] for k in ("id", "start", "length_seconds")} for i in items],
                 "peak_dbfs": round(20 * math.log10(peak), 1) if peak > 0 else None,
                 "latency_compensated_ms": round(latency * 1000, 1), "midi_track": "muted (unmute it to edit and reprint)"})
-    problem = _level_problem(audio, link)
+    out["peaks_dbfs"] = _peaks_db(audio)
+    problem = out.get("problem") or _level_problem(audio, link)
     if problem:
         out["problem"] = problem
+    level = level_note(link, checked.status)
+    if level and not problem:
+        out["input_level"] = level
     if not latency:
         out["note"] = "This device's latency isn't measured (calibrate_hardware_latency), so the print may sit late."
     if prompt:

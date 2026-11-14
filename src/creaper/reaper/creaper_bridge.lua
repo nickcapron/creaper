@@ -2805,6 +2805,32 @@ function commands.hardware_take_finish(p)
     end
     local out = {}
     local latency = tonumber(p.latency_seconds) or 0
+    if not take.scratch and #old > 0 then
+      -- Recorded over an older print, REAPER shows only the stretch the old item didn't cover
+      -- (one piece each side of it). The file holds the whole pass: one item, all of it.
+      local whole, seen = {}, {}
+      for _, item in ipairs(items) do
+        local tk = reaper.GetActiveTake(item)
+        local src = tk and reaper.GetMediaItemTake_Source(tk)
+        local file = src and reaper.GetMediaSourceFileName(src) or ""
+        if file ~= "" and seen[file] then
+          reaper.DeleteTrackMediaItem(audio, item)
+        else
+          if file ~= "" then
+            seen[file] = true
+            local soffs = reaper.GetMediaItemTakeInfo_Value(tk, "D_STARTOFFS")
+            local full = reaper.GetMediaSourceLength(src)
+            if soffs > 0.001 or reaper.GetMediaItemInfo_Value(item, "D_LENGTH") < full - 0.001 then
+              reaper.SetMediaItemInfo_Value(item, "D_POSITION", reaper.GetMediaItemInfo_Value(item, "D_POSITION") - soffs)
+              reaper.SetMediaItemTakeInfo_Value(tk, "D_STARTOFFS", 0)
+              reaper.SetMediaItemInfo_Value(item, "D_LENGTH", full)
+            end
+          end
+          whole[#whole + 1] = item
+        end
+      end
+      items = whole
+    end
     for _, item in ipairs(items) do
       local tk = reaper.GetActiveTake(item)
       local src = tk and reaper.GetMediaItemTake_Source(tk)
@@ -2831,11 +2857,17 @@ function commands.hardware_take_finish(p)
       end
     else
       if #items > 0 and p.replace and audio then
-        -- The new print replaces older ones over the same stretch.
+        -- The new print replaces older ones over the same stretch, and only there: what an
+        -- older print holds before and after the pass stays (a reprint of one section).
         for _, item in ipairs(old) do
           local pos = reaper.GetMediaItemInfo_Value(item, "D_POSITION")
           local fin = pos + reaper.GetMediaItemInfo_Value(item, "D_LENGTH")
-          if pos < take.end_t - 0.001 and fin > take.start_t + 0.001 then reaper.DeleteTrackMediaItem(audio, item) end
+          if pos < take.end_t - 0.001 and fin > take.start_t + 0.001 then
+            local under = item
+            if pos < take.start_t - 0.01 then under = reaper.SplitMediaItem(item, take.start_t) end
+            if under and fin > take.end_t + 0.01 then reaper.SplitMediaItem(under, take.end_t) end
+            if under then reaper.DeleteTrackMediaItem(audio, under) end
+          end
         end
       end
       if audio then reaper.SetMediaTrackInfo_Value(audio, "I_RECARM", 0) end

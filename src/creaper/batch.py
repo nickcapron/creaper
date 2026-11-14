@@ -384,7 +384,7 @@ def _calibrate_group(jobs: list[dict], idx: list[int], span: tuple, passes: int,
         j = jobs[i]
         where = {"measured_on_bars": [lo_bar, hi_bar]} if j.get("span") and j.get("report_span", True) else {}
         audio = dry[j["track"]]
-        if float(abs(audio).max()) <= 1e-6:
+        if float(abs(audio).max()) <= 1e-3:      # under -60 dBFS: a sliver or a noise floor, not a part
             raise ValueError("that range is silent, so there's nothing to calibrate a compressor on")
         base = analysis.envelope_range(audio, fs)
         if base is None:

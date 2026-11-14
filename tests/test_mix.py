@@ -35,6 +35,14 @@ def channel(name, role, level, **kw):
             "spectrum": {"bands": {"low mids (250-500 Hz)": {"share_pct": 20}}}, "pan": 0, **kw}
 
 
+def test_a_part_that_is_not_sounding_is_called_missing_not_quiet():
+    """Motel Neon MK, 2026-11-13: a bass at -107 LUFS (its item was 10 ms long) 'wanted +90.5 dB'."""
+    plan = plan_mix([channel("Drums", "drums", -23), channel("Bass", "bass", -107), channel("Pad", "pad", -45)],
+                    {"family": "rock"})
+    by = {a["name"]: a for a in plan["channels"]}
+    assert "isn't sounding" in by["Bass"]["missing"] and "missing" not in by["Pad"] and "capped" in by["Pad"]
+
+
 def test_plan_sets_levels_relative_to_the_drums_for_the_genre():
     chans = [channel("Kick", "kick", -10), channel("Bass", "bass", -6), channel("Pad", "pad", -8),
              channel("Vocal", "vocal", -15)]

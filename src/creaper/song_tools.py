@@ -612,20 +612,29 @@ def _find_tracks(overview: dict, parts: list[str]) -> dict[str, dict]:
     Lead' a pad). A track serves one part only; a 'counter' track only the counter."""
     from .mix_tools import role_of
 
-    tracks = overview.get("tracks", [])
+    # A hardware synth's part is two tracks: notes go on the one that plays the synth
+    # ("Bass (MIDI)"), under the part's name ("Bass"); the one that records it never gets any.
+    # (Seen live: the bass, lead and counter lines were written onto the audio tracks.)
+    tracks, label = [], {}
+    for t in overview.get("tracks", []):
+        role = str((t.get("hardware") or {}).get("role") or "")
+        if role.startswith("records"):
+            continue
+        tracks.append(t)
+        label[t["name"]] = (t["hardware"].get("pair") or t["name"]) if role.startswith("plays") else t["name"]
     claimed: set = set()
     out: dict[str, dict] = {}
     for part in parts:
-        t = next((t for t in tracks if t["name"].lower() == PART_TRACK[part].lower()), None)
+        t = next((t for t in tracks if label[t["name"]].lower() == PART_TRACK[part].lower()), None)
         if t is not None:
             out[part] = t
             claimed.add(t["name"])
     for part in [p for p in ("counter", "drums", "bass", "chords", "lead") if p in parts and p not in out]:
         for t in tracks:
-            name = t["name"].lower()
+            name = label[t["name"]].lower()
             if t["name"] in claimed or ("counter" in name) != (part == "counter"):
                 continue
-            if part == "counter" or role_of(t["name"]) in PART_ROLES[part]:
+            if part == "counter" or role_of(label[t["name"]]) in PART_ROLES[part]:
                 out[part] = t
                 claimed.add(t["name"])
                 break

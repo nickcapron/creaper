@@ -84,6 +84,7 @@ WIDTH_FX = "JS: Stereo Width"
 PEAKY_MIX_PLR_DB = 12.0  # a mix whose peaks sit further over its loudness needs density before mastering
 # Loudness (K-weighted) underrates sub-bass, so a sustained sub drone measured "quiet"
 # and got boosted +6 to +12 dB until it was most of the mix: boosts are capped.
+MISSING_LU = 30.0     # this far under its place a part isn't quiet, it's not sounding
 MAX_BOOST_DB, MAX_BOOST_LOW_DB = 6.0, 2.0
 LOW_HEAVY_PCT = 50   # sub + bass share above which a part counts as low-heavy
 
@@ -413,6 +414,13 @@ def plan_mix(channels: list[dict], style: dict | None = None) -> dict:
             # Said, not silent: a layered bass that wanted +14 got +2 and stayed buried.
             a["capped"] = (f"wanted {want - c['level']:+.1f} dB, boosts stop at {boost:+g}: check it with "
                            "measure_tracks(per_section=True) and raise it by hand if it's buried")
+            if want - c["level"] > MISSING_LU:
+                # Live, 2026-11-13: a bass whose item was 10 ms long "wanted +90.5 dB" in a note
+                # nobody read, and the song was mixed, mastered and exported without it.
+                a["missing"] = (f"{c['name']} is {want - c['level']:.0f} dB under where a {c['role']} sits: that isn't "
+                                "a quiet part, it's a part that isn't sounding (an empty or cut-off item, a muted "
+                                "source, an instrument that didn't load, an effect swallowing it). Find out with "
+                                "get_track_details and measure_tracks before mixing further: this mix is without it.")
         if c["role"] in HIGHPASS_HZ and not c.get("has_eq"):
             hp = highpass_for(c["role"], c.get("spectrum"))
             if (c["role"] in ("keys", "pad") and low_share(c.get("spectrum")) > LOW_HEAVY_KEYS_PCT
@@ -1458,6 +1466,9 @@ def auto_mix(
               "roles_note": ("levels follow the roles: if a guess is wrong (the featured melody not 'lead', an "
                              "ambience as 'bass'), set those tracks' levels by hand, or pass roles= next time"),
               "plan": plan["channels"], "sidechains": plan["sidechains"]}
+    for a in plan["channels"]:
+        if a.get("missing"):
+            report.setdefault("warnings", []).append(a["missing"])
     from . import hardware_tools
     unprinted = hardware_tools.unprinted_warning(call)   # a hardware part that isn't printed isn't in this mix
     if unprinted:

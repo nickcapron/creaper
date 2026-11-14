@@ -17,6 +17,7 @@ Nothing in this module talks to REAPER: hardware_sound_tools does."""
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any
 
@@ -256,7 +257,9 @@ TIMBRE = [
     Param("osc2_mod", 12, "ring = metallic, sync = tearing sweeps when osc2 pitch moves", shift=4, bits=2,
           choices=("off", "ring", "sync", "ring+sync"), knob=5),
     Param("osc2_semitone", 13, "osc2 pitch against osc1, semitones", lo=-24, hi=24, center=64),
-    Param("osc2_tune", 14, "osc2 fine detune (small values fatten)", lo=-63, hi=63, center=64, knob=7),
+    Param("osc2_tune", 14, "osc2 detune, not even steps (measured): 3 = 2 cents, 6 = 9, 9 = 25, 12 = 60, 24 = over "
+                           "two semitones. 4-6 fattens and stays in tune; 9 and up sounds out of tune in chords",
+          lo=-63, hi=63, center=64, knob=7),
     Param("portamento", 15, "glide time between notes", bits=7, knob=0),
     Param("osc1_level", 16, knob=8),
     Param("osc2_level", 17, knob=9),
@@ -599,6 +602,14 @@ def describe() -> dict:
         "vocoder": [p.describe() for p in VOCODER] + [
             {"name": "band1_level .. band8_level", "range": [0, 127], "what": "level of each of the 8 band pairs"},
             {"name": "band1_pan .. band8_pan", "range": [-63, 63]}],
+        "measured_on_one": [
+            "one cutoff step is one semitone; filter_kbd_track +48 follows the keys exactly",
+            "with resonance at 127 the filter rings as a note: at cutoff 24 on the key played, 12 more per octave",
+            "portamento over about 30 hasn't reached the note an eighth note later at 120 BPM",
+            "osc2_tune isn't even: 3 = 2 cents, 6 = 9, 9 = 25, 12 = 60 (a pad at 12 was heard as out of tune)",
+            "an arpeggio starts with its note only with arp_key_sync on",
+            "sounds differ in level by 20 dB and more: compare level_db between sounds for one song",
+        ],
         "modulation": {"sources": list(SOURCES), "destinations": list(DESTS),
                        "how": "four patches: patchN_source moves patchN_dest by patchN_int. EG1 or an LFO to "
                               "pitch makes zaps, risers and sirens; LFO s/h makes random bleeps."},
@@ -619,18 +630,22 @@ RECIPES: dict[str, dict] = {
         "evidence": "Forum posts name factory program b.14 (Phaser Lead); Keyboard (Oct 2005) hears detuned unison "
                     "saws, heavy glide and heavy phaser. No interview confirms the preset.",
         "play": "Mono line with octave jumps so the glide is heard; overlap notes for legato.",
-        "params": {"assign_mode": "unison", "unison_detune": 14, "trigger_mode": "single", "portamento": 45,
-                   "osc2_level": 127, "osc2_tune": 8, "cutoff": 105, "resonance": 20, "eg2_release": 20,
+        "role": "lead", "range": ["C4", "C6"], "voices": 1,
+        # portamento 45 was still sliding half a second into each note (measured); at 28 an
+        # octave jump arrives within a tenth of a tone by the next eighth note at 120 BPM.
+        "params": {"assign_mode": "unison", "unison_detune": 14, "trigger_mode": "single", "portamento": 28,
+                   "osc2_level": 127, "osc2_tune": 6, "cutoff": 105, "resonance": 20, "eg2_release": 20,
                    "mod_type": "phaser", "mod_depth": 100, "mod_speed": 22, "delay_depth": 25, "delay_time": 50},
     },
     "glide distortion lead": {
         "kind": "artist", "style_of": "The Killers, \"Smile Like You Mean It\" lead riff", "factory": "A.28",
         "evidence": "Forum posts name factory program A.28 (Hard House Lead), one adding 'an octave up'; Keyboard "
                     "(Oct 2005) hears a delayed, distorted lead leaning on glide. No interview confirms the preset.",
-        "play": "Mono melody around C5-C6, notes overlapped so they slide.",
-        "params": {"assign_mode": "mono", "trigger_mode": "single", "portamento": 55, "osc2_wave": "square",
-                   "osc2_level": 110, "osc2_tune": 6, "cutoff": 95, "resonance": 30, "distortion": "on",
-                   "eg2_release": 25, "delay_sync": "on", "delay_division": "1/8", "delay_depth": 70,
+        "play": "Mono melody written C3-C5 (it sounds an octave up), notes overlapped so they slide.",
+        "role": "lead", "range": ["C3", "C5"], "voices": 1,
+        "params": {"assign_mode": "mono", "trigger_mode": "single", "portamento": 35, "osc2_wave": "square",
+                   "osc2_level": 110, "osc2_tune": 6, "cutoff": 85, "resonance": 30, "distortion": "on",
+                   "eg2_release": 25, "delay_sync": "on", "delay_division": "1/8", "delay_depth": 55,
                    "transpose": 12},
     },
     "eighth-note saw bass": {
@@ -638,17 +653,57 @@ RECIPES: dict[str, dict] = {
         "style_of": "The Killers, \"Mr. Brightside\" pre-chorus counter-bass (as Keyboard describes it)",
         "evidence": "Keyboard (Oct 2005): saw + pulse with a quick envelope, in eighth notes. No source says this "
                     "part was a microKORG (the band also used a Nord Lead).",
-        "play": "Steady eighth notes on the chord roots, C2-C3.",
-        "params": {"assign_mode": "mono", "osc2_wave": "square", "osc2_level": 100, "cutoff": 55, "resonance": 25,
-                   "filter_eg_int": 35, "eg1_decay": 40, "eg1_sustain": 20, "eg2_decay": 60, "eg2_sustain": 90,
-                   "eg2_release": 10},
+        "play": "Steady eighth notes on the chord roots, C1-C3 (fills to C4).",
+        "role": "bass", "range": ["C1", "C4"], "voices": 1,
+        "params": {"assign_mode": "mono", "osc2_wave": "square", "osc2_level": 100, "osc2_tune": 4, "cutoff": 62,
+                   "resonance": 30, "filter_eg_int": 50, "eg1_decay": 45, "eg1_sustain": 30, "eg2_decay": 60,
+                   "eg2_sustain": 90, "eg2_release": 10, "eq_low_freq": 6, "eq_low_gain": 3},
     },
     "octave unison saw solo": {
         "kind": "artist", "style_of": "The Killers, \"Mr. Brightside\" solo (as Keyboard describes it)",
         "evidence": "Keyboard (Oct 2005): unison-detuned saws stacked in octaves. No source says it was a microKORG.",
-        "play": "Mono melody, C4-C6.",
+        "play": "Mono melody, C4-C7 (thin and piercing at the very top).",
+        "role": "solo", "range": ["C4", "C7"], "voices": 1,
         "params": {"assign_mode": "unison", "unison_detune": 18, "osc2_level": 127, "osc2_semitone": 12,
                    "cutoff": 110, "eg2_release": 30, "mod_type": "ensemble", "mod_depth": 40, "delay_depth": 30},
+    },
+    "square bass": {
+        "kind": "artist", "style_of": "The Killers, \"Andy, You're a Star\" bass (as Keyboard describes it)",
+        "evidence": "Keyboard (Oct 2005): a bass from two square oscillators with a fast-opening filter. No source "
+                    "says it was a microKORG.",
+        "play": "Mono bass line, C1-C3 (fills to C4): held notes growl, short ones punch.",
+        "role": "bass", "range": ["C1", "C4"], "voices": 1,
+        "params": {"assign_mode": "mono", "osc1_wave": "pulse", "osc1_ctrl1": 0, "osc2_wave": "square",
+                   "osc2_level": 127, "osc2_tune": 5, "cutoff": 46, "resonance": 35, "filter_eg_int": 55,
+                   "eg1_decay": 55, "eg1_sustain": 50, "eg2_decay": 70, "eg2_sustain": 100, "eg2_release": 8},
+    },
+    "dual saw strings": {
+        "kind": "artist", "style_of": "The Killers, \"Smile Like You Mean It\" string pad (as Keyboard describes it)",
+        "evidence": "Keyboard (Oct 2005): a dual-saw string sound. No source says it was a microKORG.",
+        "play": "Held chords of up to 4 notes (the synth has 4 voices), C2-C6; it swells in over a fifth of a second.",
+        "role": "pad", "range": ["C2", "C6"], "voices": 4,
+        "params": {"assign_mode": "poly", "osc2_level": 127, "osc2_tune": 6, "cutoff": 100, "resonance": 5,
+                   "filter_kbd_track": 20, "eg2_attack": 40, "eg2_decay": 80, "eg2_sustain": 115, "eg2_release": 55,
+                   "mod_type": "ensemble", "mod_depth": 90, "mod_speed": 20, "eq_high_freq": 16, "eq_high_gain": 3},
+    },
+    "saw stab chords": {
+        "kind": "song",
+        "play": "Short chord stabs or pumping eighth-note chords of up to 4 notes, C2-C5: it speaks at once, where "
+                "the strings swell.",
+        "role": "chords", "range": ["C2", "C5"], "voices": 4,
+        "params": {"assign_mode": "poly", "osc2_level": 120, "osc2_tune": 5, "filter_type": "12lpf", "cutoff": 66,
+                   "resonance": 15, "filter_eg_int": 40, "eg1_decay": 45, "eg1_sustain": 0, "eg1_release": 30,
+                   "eg2_decay": 70, "eg2_sustain": 80, "eg2_release": 22, "mod_depth": 35, "mod_speed": 25},
+    },
+    "synth pluck": {
+        "kind": "song",
+        "play": "Sixteenth-note broken chords written as MIDI notes, C3-C6 (up to 4 ring at once); a dotted-eighth "
+                "echo fills the gaps, at the song's tempo.",
+        "role": "arp", "range": ["C3", "C6"], "voices": 4,
+        "params": {"assign_mode": "poly", "osc1_wave": "pulse", "osc1_ctrl1": 40, "osc2_wave": "saw", "osc2_level": 80,
+                   "osc2_tune": 5, "filter_type": "12lpf", "cutoff": 48, "resonance": 30, "filter_eg_int": 45,
+                   "eg1_decay": 42, "eg1_sustain": 0, "eg1_release": 40, "eg2_decay": 55, "eg2_sustain": 0,
+                   "eg2_release": 45, "delay_sync": "on", "delay_division": "3/16", "delay_depth": 40},
     },
     "noise helicopter": {
         "kind": "artist", "style_of": "The Killers, \"Jenny Was a Friend of Mine\" helicopter noise",
@@ -683,6 +738,7 @@ RECIPES: dict[str, dict] = {
         "evidence": "Liam Howlett, Korg interview 2004: sub bass on \"Memphis Bells\" and \"Wake Up\" came from a "
                     "microKORG. No preset or settings are given: this is a plain sine sub.",
         "play": "Mono, C1-C2, under another bass.",
+        "role": "bass", "range": ["C1", "C2"], "voices": 1,
         "params": {"assign_mode": "mono", "trigger_mode": "single", "osc1_wave": "sine", "cutoff": 60,
                    "eg2_release": 15, "transpose": -12},
     },
@@ -802,13 +858,47 @@ def find_recipe(name: str) -> tuple[str, dict]:
     raise ValueError(f"no microKORG recipe named '{name}'; there are: {', '.join(RECIPES)}")
 
 
+def part_fit(recipe: dict, notes: list[dict]) -> list[str]:
+    """What a part asks that this recipe's sound can't do: notes outside its range, more
+    notes at once than it has voices. notes: [{pitch, start, length}] in any one time unit."""
+    from .theory import midi_to_note, note_to_midi
+
+    said = []
+    if not notes:
+        return said
+    if recipe.get("range"):
+        lo, hi = (note_to_midi(n) for n in recipe["range"])
+        low = [n for n in notes if n["pitch"] < lo]
+        high = [n for n in notes if n["pitch"] > hi]
+        for group, word, edge in ((low, "below", lo), (high, "above", hi)):
+            if len(group) > max(2, len(notes) // 25):          # a few stray notes aren't worth a line
+                worst = min(n["pitch"] for n in group) if word == "below" else max(n["pitch"] for n in group)
+                said.append(f"{len(group)} of {len(notes)} notes are {word} where this sound works "
+                            f"({midi_to_note(edge)}; the part goes to {midi_to_note(worst)}): move them an octave, "
+                            "or choose a sound for that register")
+    voices = int(recipe.get("voices") or 0)
+    if voices:
+        events = sorted([(n["start"] + 0.03, 1) for n in notes] + [(n["start"] + n["length"] - 0.03, -1) for n in notes])
+        most = now = 0
+        for _, step in events:
+            now += step
+            most = max(most, now)
+        if voices == 1 and most > 1:
+            said.append(f"the part plays up to {most} notes at once and this sound plays one (the latest note wins): "
+                        "fine for a line doubled in octaves, wrong for chords")
+        elif most > voices:
+            said.append(f"the part plays up to {most} notes at once and this sound has {voices} voices: notes will "
+                        "be cut off; thin the chords to {voices} notes".replace("{voices}", str(voices)))
+    return said
+
+
 def describe_recipes(kind: str | None = None) -> list[dict]:
     out = []
     for name, r in RECIPES.items():
         if kind and r["kind"] != kind:
             continue
         entry = {"recipe": name, "kind": r["kind"], "play": r["play"]}
-        for key in ("style_of", "evidence", "factory"):
+        for key in ("role", "range", "voices", "style_of", "evidence", "factory"):
             if r.get(key):
                 entry[{"factory": "factory_program"}.get(key, key)] = r[key]
         out.append(entry)
@@ -888,6 +978,15 @@ def click_patch(current: bytes | None) -> bytes:
     return apply(init_program(current, name="click"),
                  {"osc1_wave": "pulse", "osc1_ctrl1": 0, "cutoff": 127, "eg2_attack": 0, "eg2_decay": 40,
                   "eg2_sustain": 0, "eg2_release": 0, "assign_mode": "mono"})
+
+
+def level_patch(current: bytes | None) -> bytes:
+    """A loud plain sound (four detuned saws in unison, filter open) for setting the
+    interface's input gain. Not the loudest there is: a distorted lead measured 7 dB over
+    it, which is why the level check aims it well under full scale."""
+    return apply(init_program(current, name="level"),
+                 {"assign_mode": "unison", "unison_detune": 10, "osc2_level": 127, "osc2_tune": 5, "cutoff": 127,
+                  "eg2_attack": 0, "eg2_sustain": 127, "eg2_release": 0})
 
 
 def brief(data: bytes) -> dict:
@@ -1002,3 +1101,240 @@ def clock_note(setup: dict | None) -> str:
     return ("The patch's tempo only counts while the microKORG is on its own clock: with its Clock setting on "
             f"External (or Auto with MIDI clock arriving) it follows MIDI clock instead ({change}; hardware_profile "
             "show='setup' reads the setting).")
+
+
+# What the 0-127 values are in real units, measured on one microKORG through an SSL 2+ on
+# 2026-11-13 (notes/hardware/calibrate_microkorg.py: each value loaded, played, recorded,
+# measured). Other units will differ a little; the shapes won't. Times are: attack to 90%
+# of full level; decay and release to fall 20 dB. None = not measurable that way.
+CALIBRATION: dict[str, Any] = {
+    "measured": "one microKORG, 2026-11-13",
+    # value 0 is quicker than could be timed; decay and release 0 are a click's length
+    "eg_attack_ms": {0: 1, 16: 64, 32: 158, 48: 338, 64: 621, 80: 898, 96: 1164, 112: 3806, 127: 14780},
+    "eg_decay_ms": {0: 5, 16: 27, 32: 78, 48: 187, 64: 333, 80: 480, 96: 635, 112: 2097, 127: 12972},
+    "eg_release_ms": {0: 5, 16: 32, 32: 89, 48: 195, 64: 341, 80: 490, 96: 641, 112: 2100, 127: 12986},
+    # keyboard tracking off: a semitone a step up to about 6 kHz, then it flattens to a ceiling near 18 kHz
+    "cutoff_hz": {0: 65, 20: 207, 40: 658, 60: 2089, 80: 6109, 100: 13690, 127: 18000},
+    "cutoff_ref": (60, 2089.0),
+    # how far a fully open EG1 moves the cutoff: about 0.13 octave a step (16 and 32 measured,
+    # the rest on that line: the filter's ceiling hid them)
+    "filter_eg_octaves": {0: 0.0, 16: 2.05, 32: 4.26, 48: 6.4, 63: 8.4},
+    # filter_kbd_track: 16 = a third, 32 = two thirds, 48 = follows the keys exactly, 63 = twice as fast
+    "kbd_track_full": 48,
+    "kbd_track_ratio": {16: 0.33, 32: 0.67, 48: 1.0, 63: 2.0},
+    # both LFOs alike. Under 0.3 Hz couldn't be timed in a 6 s recording: 0 and 20 are the
+    # manual's 0.01 Hz and the measurement's upper bound
+    "lfo1_hz": {0: 0.01, 20: 0.26, 40: 1.75, 60: 4.33, 80: 12.97, 100: 41.2, 127: 65.7},
+    "lfo2_hz": {0: 0.01, 20: 0.26, 40: 1.75, 60: 4.33, 80: 12.97, 100: 41.2, 127: 65.7},
+    # time for an octave to arrive (within 60 cents)
+    "portamento_ms_per_octave": {0: 0, 10: 40, 20: 75, 30: 125, 40: 170, 55: 275, 70: 550, 90: 1120},
+    # oscillator 2 against oscillator 1: nothing like even steps
+    "osc2_tune_cents": {0: 0, 2: 2.2, 3: 2.5, 4: 3.6, 5: 5.0, 6: 9.4, 7: 15.1, 8: 19.4, 9: 25.0, 10: 37.8, 12: 59.5,
+                        15: 90.5, 18: 150, 21: 225, 30: 450, 40: 800, 48: 1200, 63: 2400},
+    # the unsynced delay: 0 is under 15 ms; past 100 the echo was too long or faint to time
+    "delay_time_ms": {0: 10, 20: 78, 40: 142, 60: 206, 80: 332, 100: 475},
+    # a modulation patch's intensity to pitch: the whole swing of an LFO, the rise of a full EG1
+    "lfo_pitch_semitones": {0: 0.0, 4: 0.1, 8: 0.41, 16: 2.0, 32: 10.0, 48: 24.0, 63: 48.0},
+    "eg_pitch_semitones": {0: 0.0, 4: 0.04, 8: 0.21, 16: 1.0, 32: 5.0, 48: 12.0, 63: 24.0},
+}
+
+
+def calibration_summary() -> dict:
+    """The calibration for the model: each parameter's values in real units, to work out any
+    value a blueprint doesn't give."""
+    c = CALIBRATION
+    def curve(name: str) -> dict:
+        return {str(v): r for v, r in c[name].items()}
+    return {
+        "measured_on": c["measured"],
+        "eg_attack (ms to 90%)": curve("eg_attack_ms"),
+        "eg_decay (ms to fall 20 dB)": curve("eg_decay_ms"),
+        "eg_release (ms to fall 20 dB)": curve("eg_release_ms"),
+        "cutoff (Hz, keyboard tracking off)": curve("cutoff_hz"),
+        "filter_eg_int (octaves a full envelope moves the cutoff; 16 and 32 measured, 48 and 63 on that line)":
+            curve("filter_eg_octaves"),
+        "filter_kbd_track (cutoff octaves per keyboard octave)": curve("kbd_track_ratio"),
+        "lfo1_freq and lfo2_freq (Hz)": curve("lfo1_hz"),
+        "portamento (ms for an octave)": curve("portamento_ms_per_octave"),
+        "osc2_tune (cents)": curve("osc2_tune_cents"),
+        "delay_time (ms, unsynced)": curve("delay_time_ms"),
+        "patch_int to pitch from an LFO (semitones, whole swing)": curve("lfo_pitch_semitones"),
+        "patch_int to pitch from EG1 (semitones)": curve("eg_pitch_semitones"),
+        "not measured": "unison_detune, pulse width, velocity amounts, effect speeds: set, audition, adjust",
+    }
+
+
+# ------------------------------------------------- a design in real units, as parameters
+# sound_design.py describes sounds in milliseconds, hertz, cents and octaves. CALIBRATION
+# (measured on one microKORG, notes/hardware/calibrate_microkorg.py) says what this synth's
+# 0-127 values are in those units; from_design turns a blueprint into parameters with it.
+
+def _value_for(curve: dict[int, float], want: float) -> int:
+    """The parameter value whose measured result is nearest `want`, between measured points
+    by straight lines (in the logarithm for results that span decades)."""
+    points = sorted((v, r) for v, r in curve.items() if r is not None)
+    if want <= min(r for _, r in points):
+        return min(points, key=lambda p: p[1])[0]
+    if want >= max(r for _, r in points):
+        return max(points, key=lambda p: p[1])[0]
+    logs = all(r > 0 for _, r in points) and max(r for _, r in points) / min(r for _, r in points) > 20
+    scale = math.log if logs else (lambda x: x)
+    for (v0, r0), (v1, r1) in zip(points, points[1:]):
+        if min(r0, r1) <= want <= max(r0, r1) and r0 != r1:
+            return int(round(v0 + (v1 - v0) * (scale(want) - scale(r0)) / (scale(r1) - scale(r0))))
+    return min(points, key=lambda p: abs(p[1] - want))[0]
+
+
+def cutoff_for(hz: float) -> int:
+    """The cutoff value for a frequency (keyboard tracking off): one step is one semitone."""
+    return _value_for(CALIBRATION["cutoff_hz"], max(hz, 1.0))
+
+
+_WAVE1 = {"saw": "saw", "pulse": "pulse", "square": "pulse", "triangle": "triangle", "sine": "sine", "noise": "noise"}
+_WAVE2 = {"saw": "saw", "square": "square", "pulse": "square", "triangle": "triangle", "sine": "triangle"}
+_FILTER = {"lp24": "24lpf", "lp12": "12lpf", "bp": "12bpf", "hp": "12hpf"}
+_LFO_SHAPES = {1: {"triangle": "triangle", "sine": "triangle", "saw": "saw", "square": "square", "random": "s/h"},
+               2: {"sine": "sine", "triangle": "sine", "saw": "saw", "square": "square+", "random": "s/h"}}
+
+
+def from_design(blueprint: dict) -> dict:
+    """A sound_design blueprint as this synth's parameters: {"params": for set_hardware_params
+    start_from='init', "approximate": what was set by rule of thumb, not measurement,
+    "left_out": what this synth can't do}. The result is a starting point to audition."""
+    cal = CALIBRATION
+    p: dict[str, Any] = {}
+    approximate: list[str] = []
+    left_out: list[str] = []
+    slots = iter((1, 2, 3, 4))
+
+    def patch(source: str, dest: str, amount: int, what: str) -> None:
+        n = next(slots, None)
+        if n is None:
+            left_out.append(f"{what}: all four modulation patches are in use")
+            return
+        p[f"patch{n}_source"], p[f"patch{n}_dest"] = source, dest
+        p[f"patch{n}_int"] = int(max(-63, min(63, amount)))
+
+    voices = blueprint.get("voices")
+    if voices:
+        p["assign_mode"] = voices
+    if blueprint.get("unison_cents") is not None:
+        p["unison_detune"] = int(min(99, round(blueprint["unison_cents"])))
+        approximate.append("unison_detune is taken as cents, as Korg labels it (not measured)")
+    if blueprint.get("legato") is not None:
+        p["trigger_mode"] = "single" if blueprint["legato"] else "multi"
+    if blueprint.get("glide_ms"):
+        p["portamento"] = _value_for(cal["portamento_ms_per_octave"], blueprint["glide_ms"])
+
+    o1 = blueprint.get("osc1") or {}
+    if o1.get("wave"):
+        p["osc1_wave"] = _WAVE1[o1["wave"]]
+        if o1["wave"] == "square":
+            p["osc1_ctrl1"] = 0
+    if "level" in o1:
+        p["osc1_level"] = int(round(127 * o1["level"]))
+    if o1.get("width") is not None and p.get("osc1_wave", "saw") == "pulse":
+        p["osc1_ctrl1"] = int(max(0, min(127, round((o1["width"] - 0.5) / 0.5 * 127))))
+    if o1.get("pwm"):
+        p["osc1_ctrl2"] = int(round(127 * o1["pwm"]))       # how far LFO1 moves the wave shape
+
+    o2 = blueprint.get("osc2") or {}
+    if o2:
+        if o2.get("wave"):
+            p["osc2_wave"] = _WAVE2[o2["wave"]]
+            if o2["wave"] == "sine":
+                approximate.append("oscillator 2 has no sine: a triangle stands in")
+        p["osc2_level"] = int(round(127 * o2.get("level", 1.0)))
+        if o2.get("semitones"):
+            p["osc2_semitone"] = int(max(-24, min(24, o2["semitones"])))
+        if o2.get("cents"):
+            cents = abs(o2["cents"])
+            p["osc2_tune"] = int(math.copysign(_value_for(cal["osc2_tune_cents"], cents), o2["cents"]))
+    if blueprint.get("osc_mod"):
+        p["osc2_mod"] = blueprint["osc_mod"]
+    if blueprint.get("noise") is not None:
+        p["noise_level"] = int(round(127 * blueprint["noise"]))
+
+    f = blueprint.get("filter") or {}
+    if f.get("type"):
+        p["filter_type"] = _FILTER[f["type"]]
+    if f.get("cutoff_hz"):
+        p["cutoff"] = cutoff_for(f["cutoff_hz"])
+    if f.get("resonance") is not None:
+        p["resonance"] = int(round(127 * f["resonance"]))
+    if f.get("env_octaves"):
+        p["filter_eg_int"] = int(math.copysign(_value_for(cal["filter_eg_octaves"], abs(f["env_octaves"])), f["env_octaves"]))
+    if f.get("key_track") is not None:
+        p["filter_kbd_track"] = int(round(cal["kbd_track_full"] * f["key_track"]))
+    if f.get("velocity"):
+        p["filter_velocity"] = int(round(63 * f["velocity"]))
+        approximate.append("filter_velocity is scaled 0-63 by rule of thumb")
+
+    for name, eg in (("filter_env", "eg1"), ("amp_env", "eg2")):
+        env = blueprint.get(name) or {}
+        if "attack_ms" in env:
+            p[f"{eg}_attack"] = _value_for(cal["eg_attack_ms"], env["attack_ms"])
+        if env.get("decay_ms"):
+            p[f"{eg}_decay"] = _value_for(cal["eg_decay_ms"], env["decay_ms"])
+        if "sustain" in env:
+            p[f"{eg}_sustain"] = int(round(127 * env["sustain"]))
+        if "release_ms" in env:
+            p[f"{eg}_release"] = _value_for(cal["eg_release_ms"], env["release_ms"])
+
+    for n in (1, 2):
+        lfo = blueprint.get(f"lfo{n}") or {}
+        if not lfo:
+            continue
+        if lfo.get("shape"):
+            p[f"lfo{n}_wave"] = _LFO_SHAPES[n][lfo["shape"]]
+        if lfo.get("sync"):
+            p[f"lfo{n}_tempo_sync"], p[f"lfo{n}_division"] = "on", lfo["sync"]
+        elif lfo.get("hz"):
+            p[f"lfo{n}_freq"] = _value_for(cal[f"lfo{n}_hz"], lfo["hz"])
+        if lfo.get("retrigger"):
+            p[f"lfo{n}_key_sync"] = "voice"
+        to, depth = lfo.get("to"), lfo.get("depth") or 0
+        if to == "width":
+            if n == 1:
+                p["osc1_ctrl2"] = int(round(127 * depth))
+            else:
+                left_out.append("only LFO1 moves the pulse width on this synth: put the width movement on lfo1")
+        elif to == "pitch" and depth:
+            patch(f"lfo{n}", "pitch", _value_for(cal["lfo_pitch_semitones"], depth), "LFO to pitch")
+        elif to == "cutoff" and depth:
+            patch(f"lfo{n}", "cutoff", _value_for(cal["filter_eg_octaves"], depth), "LFO to cutoff")
+            approximate.append("LFO-to-cutoff depth uses the filter envelope's measured scale")
+        elif to in ("amp", "pan") and depth:
+            patch(f"lfo{n}", to, int(round(63 * depth)), f"LFO to {to}")
+
+    pe = blueprint.get("pitch_env") or {}
+    if pe.get("semitones"):
+        amount = int(math.copysign(_value_for(cal["eg_pitch_semitones"], abs(pe["semitones"])), pe["semitones"]))
+        patch("eg1", "osc2 pitch" if pe.get("to") == "osc2" else "pitch", amount, "pitch envelope")
+        if pe.get("decay_ms"):
+            p["eg1_attack"], p["eg1_sustain"] = 0, 0
+            p["eg1_decay"] = p["eg1_release"] = _value_for(cal["eg_decay_ms"], pe["decay_ms"])
+            if blueprint.get("filter_env") or f.get("env_octaves"):
+                approximate.append("the pitch envelope is EG1, which is also the filter envelope: they share one "
+                                   "shape (the pitch envelope's times were used)")
+    if blueprint.get("velocity_to_amp"):
+        p["amp_velocity"] = int(round(63 * blueprint["velocity_to_amp"]))
+
+    fx = blueprint.get("fx") or {}
+    kinds = [k for k in ("chorus", "ensemble", "phaser") if fx.get(k)]
+    if kinds:
+        p["mod_type"] = {"chorus": "chorus/flanger", "ensemble": "ensemble", "phaser": "phaser"}[kinds[0]]
+        p["mod_depth"] = int(round(127 * fx[kinds[0]]))
+        if len(kinds) > 1:
+            left_out.append(f"one modulation effect at a time: {kinds[0]} kept, {', '.join(kinds[1:])} dropped")
+    delay = fx.get("delay") or {}
+    if delay:
+        p["delay_depth"] = int(round(127 * delay.get("mix", 0.25)))
+        if delay.get("sync"):
+            p["delay_sync"], p["delay_division"] = "on", delay["sync"]
+        elif delay.get("ms"):
+            p["delay_time"] = _value_for(cal["delay_time_ms"], delay["ms"])
+    if fx.get("distortion"):
+        p["distortion"] = "on"
+    apply(init_program(), p)     # every name and value is one this synth takes, or this raises
+    return {"params": p, "approximate": approximate, "left_out": left_out}

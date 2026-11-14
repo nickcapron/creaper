@@ -48,6 +48,9 @@ class FakeKorg:
         self.take = None
         self.tone_delay = 0.0          # seconds the "synth" answers late
         self.silent = False
+        self.gain = 1.0                # the interface's input gain, both inputs
+        self.item_seconds = None       # what the project shows of a recording; None = all of it
+        self.left_gain = 1.0           # the first input against the second: 0.03 = a plug not making contact
         self.noise_dbfs = None
         self.reaper = Reaper()
         self.patch_items: list[dict] = []
@@ -110,7 +113,7 @@ class FakeKorg:
         if self.noise_dbfs is not None:      # the hiss of an open analog input
             audio += np.random.default_rng(1).uniform(-1, 1, audio.size) * 10 ** (self.noise_dbfs / 20)
         path = self.directory / f"take{len(self.commands)}.wav"
-        sf.write(str(path), np.column_stack([audio, audio]).astype(np.float32), fs, subtype="FLOAT")
+        sf.write(str(path), (np.column_stack([audio * self.left_gain, audio]) * self.gain).astype(np.float32), fs, subtype="FLOAT")
         return str(path)
 
     def call(self, cmd, params=None, timeout=30.0, on_user_wait=None):
@@ -129,14 +132,15 @@ class FakeKorg:
         if cmd == "hardware_take_start":
             start = 100.0 if params.get("scratch") else params["start_seconds"]
             end = start + params["seconds"] if params.get("scratch") else params["end_seconds"]
-            self.take = {"file": self._record(params), "scratch": bool(params.get("scratch"))}
+            self.take = {"file": self._record(params), "scratch": bool(params.get("scratch")), "seconds": end - start}
             return {"recording": True, "start_seconds": start, "end_seconds": end}
         if cmd == "recording_status":
             return {"recording": False, "playing": False}
         if cmd == "hardware_take_finish":
             take, self.take = self.take, None
             return {"items": [{"id": "{REC}", "file": take["file"], "file_starts_at_seconds": 0.0,
-                               "start": {"bar": 3, "beat": 1}, "length_seconds": 6.0}], "scratch": take["scratch"]}
+                               "start": {"bar": 3, "beat": 1},
+                               "length_seconds": self.item_seconds or take["seconds"]}], "scratch": take["scratch"]}
         if cmd == "create_hardware_tracks":
             return {"midi_track": {"number": 5, "name": params["name"] + " (MIDI)"},
                     "audio_track": {"number": 6, "name": params["name"]}, "monitoring": params["monitor"]}
@@ -247,7 +251,29 @@ def test_every_recipe_builds_and_says_what_it_is_based_on():
         if recipe["kind"] == "artist":
             assert recipe["style_of"] and recipe["evidence"]
     kinds = {r["kind"] for r in mk.RECIPES.values()}
-    assert kinds == {"artist", "sfx"}
+    assert kinds == {"artist", "sfx", "song"}
+    # A song needs a sound for every job, each saying where it works and how many notes it plays.
+    roles = {r["role"] for r in mk.RECIPES.values() if r.get("role")}
+    assert {"bass", "lead", "pad", "chords", "arp", "solo"} <= roles
+    for recipe in mk.RECIPES.values():
+        if recipe.get("role"):
+            assert len(recipe["range"]) == 2 and recipe["voices"] in (1, 4)
+
+
+def test_a_sound_says_when_it_does_not_fit_the_part():
+    bass = mk.RECIPES["eighth-note saw bass"]                       # C1-C4, one voice
+    line = [{"pitch": 28 + (i % 3), "start": i * 0.5, "length": 0.42} for i in range(60)]
+    assert mk.part_fit(bass, line) == []
+    low = mk.part_fit(bass, [{**n, "pitch": 21} for n in line[:20]] + line[20:])
+    assert len(low) == 1 and "20 of 60 notes are below" in low[0] and "A0" in low[0]
+    assert mk.part_fit(bass, line + [{"pitch": 21, "start": 40, "length": 0.4}]) == []     # one stray note
+    doubled = mk.part_fit(bass, line + [{**n, "pitch": n["pitch"] + 12} for n in line])
+    assert "2 notes at once and this sound plays one" in doubled[0]
+    strings = mk.RECIPES["dual saw strings"]                        # four voices
+    chord = lambda size: [{"pitch": 60 + 3 * i, "start": 0, "length": 4} for i in range(size)]  # noqa: E731
+    assert mk.part_fit(strings, chord(4)) == []
+    assert "5 notes at once and this sound has 4 voices" in mk.part_fit(strings, chord(5))[0]
+    assert mk.part_fit(mk.RECIPES["laser zap"], chord(5)) == []     # an effect: no register, no count
     assert mk.find_recipe("somebody told me")[0] == "phaser glide lead"
     for needed in ("laser zap", "power-up", "alarm", "explosion", "ui blip", "sci-fi drone", "robot voice"):
         assert needed in mk.RECIPES
@@ -691,3 +717,94 @@ def test_a_channel_that_is_not_one_stops_every_hardware_sound_tool(korg):
         with pytest.raises(ValueError, match="isn't a channel"):
             tool()
     assert korg.sent == []
+
+
+# ------------------------------------------------- input level, with the user
+# Live, 2026-11-13: a song's parts were printed with input 1 thirty dB under input 2 (a plug
+# not seated) and nothing said so; the user asked for creaper to help set the level first.
+
+def test_the_level_check_plays_the_loudest_sound_and_puts_the_users_back(korg):
+    mine = korg.buffer
+    assert "Input 1 is hot" in hw.setup_hardware("microKORG", action="level")["turn"][0]   # -6: no room for a louder sound
+    korg.gain = 0.3
+    result = hw.setup_hardware("microKORG", action="level")
+    assert result["level_ok"] and result["inputs"] == {"input 1": "-16.5 dBFS peak", "input 2": "-16.5 dBFS peak"}
+    assert "turn" not in result and "loud plain sound" in result["measured_with"]
+    assert korg.buffer == mine                                              # the user's sound is back
+    loaded = [mk.unpack(mk.parse_message(m)[1]) for m in korg.sent if (mk.parse_message(m) or (0,))[0] == mk.F_CURRENT_DUMP]
+    assert mk.decode_program(loaded[0])["timbre1"]["assign_mode"] == "unison"   # the test sound went first
+    assert any("loud two-second test note" in a for a in korg.asked)
+    kept = hw._devices()["microKORG"]["input_level"]
+    assert kept["ok"] and kept["peaks_dbfs"] == [-16.5, -16.5]
+
+
+def test_a_dead_input_is_named_with_its_causes_and_prints_say_so_too(korg):
+    korg.left_gain = 0.03
+    result = hw.setup_hardware("microKORG", action="level")
+    assert not result["level_ok"] and "Input 1 gets next to nothing" in result["turn"][0]
+    assert "one knob at a time" in result["next"] and not hw._devices()["microKORG"]["input_level"]["ok"]
+    printed = hst.print_hardware("MK Lead")
+    assert "one-sided" in printed["problem"] and printed["peaks_dbfs"][0] < printed["peaks_dbfs"][1] - 25
+    heard = hst.audition_hardware("microKORG")
+    assert "one-sided" in heard["problem"]
+
+
+def test_a_part_made_before_the_level_was_set_says_so(korg):
+    made = hst.create_hardware_track("microKORG", "MK Lead")
+    assert "action='level'" in made["input_level"] and "hasn't been set" in made["input_level"]
+    korg.gain = 0.3
+    hw.setup_hardware("microKORG", action="level")
+    assert "input_level" not in hst.create_hardware_track("microKORG", "MK Bass")
+    assert "input_level" not in hst.print_hardware("MK Lead")
+    with pytest.raises(ValueError, match="level needs the device's name"):
+        hw.setup_hardware(action="level")
+
+
+def test_a_print_whose_item_is_a_sliver_of_the_recording_says_so(korg):
+    """Motel Neon MK, 2026-11-13: three parts printed with healthy peaks (read from the
+    files) while their items were 10-30 ms long, and the mix had no bass or pad."""
+    assert "problem" not in hst.print_hardware("MK Lead")
+    korg.item_seconds = 0.01
+    printed = hst.print_hardware("MK Lead")
+    assert "shows only 0.0" in printed["problem"] and "missing from the song" in printed["problem"]
+
+
+# ------------------------------------------------------------ the design guide
+
+def test_the_guide_lists_what_it_knows_and_gives_a_blueprint():
+    listed = hst.sound_design_guide()
+    assert "string pad" in listed["sounds"]["pad"] and "detune" in listed["techniques"] and len(listed["method"]) >= 6
+    strings = hst.sound_design_guide("strings")
+    assert strings["sound"] == "string pad" and strings["blueprint"]["osc2"]["cents"] == 8 and "on_this_synth" not in strings
+    assert strings["check"] and strings["if"]
+    assert "cents" in hst.sound_design_guide("detune")["how"]
+    with pytest.raises(ValueError, match="no blueprint or technique named 'a kazoo'.*string pad"):
+        hst.sound_design_guide("a kazoo")
+    pads = hst.sound_design_guide("pads")                       # a family by name lists it
+    assert pads["family"] == "pad" and "string pad" in pads["sounds"] and "sub bass" not in pads["sounds"]
+    assert hst.sound_design_guide("tremolo")["technique"] == "vibrato and tremolo"
+    with pytest.raises(ValueError, match="no blueprint or technique named 'envelope'"):   # two techniques: neither
+        hst.sound_design_guide("envelope")
+
+
+def test_a_blueprint_of_ones_own_becomes_the_synths_values(korg):
+    """The pad that was heard as out of tune came from a 0-127 value worked out by eye."""
+    mine = {"voices": "mono", "glide_ms": 90, "osc2": {"wave": "saw", "cents": 9}, "amp_env": {"attack_ms": 158}}
+    on = hst.sound_design_guide(synth="microKORG", blueprint=mine)["on_this_synth"]
+    assert on["params"]["osc2_tune"] == 6 and on["params"]["eg2_attack"] == 32 and on["params"]["assign_mode"] == "mono"
+    with pytest.raises(ValueError, match="not blueprint fields: cutoff, osc2.detune"):
+        hst.sound_design_guide(synth="microKORG", blueprint={"osc2": {"detune": 9}, "cutoff": 60})
+    with pytest.raises(ValueError, match="blueprint needs synth"):
+        hst.sound_design_guide(blueprint=mine)
+
+
+def test_the_guide_gives_a_synths_own_values_and_they_load(korg):
+    guide = hst.sound_design_guide("acid bass", synth="microKORG")
+    on = guide["on_this_synth"]
+    assert on["device"] == "microKORG" and on["params"]["assign_mode"] == "mono" and on["params"]["resonance"] == 89
+    assert "start_from='init'" in on["how"] and "osc2_tune (cents)" in on["calibration"]
+    hst.set_hardware_params("microKORG", on["params"], start_from="init")
+    now = mk.decode_program(korg.buffer)
+    assert now["timbre1"]["distortion"] == "on" and now["timbre1"]["trigger_mode"] == "single"
+    hw.save_hardware("Box", midi_output="UM-ONE", audio_input=1)                 # a synth creaper has no profile for
+    assert "no profile" in hst.sound_design_guide("pluck", synth="Box")["on_this_synth"]

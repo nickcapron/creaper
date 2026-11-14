@@ -75,6 +75,7 @@ class Profile(Protocol):
     def apply(self, data: bytes, params: dict[str, Any], timbre: int | str = 1) -> bytes: ...
     def init_program(self, template: bytes | None = None, name: str = "creaper") -> bytes: ...
     def click_patch(self, current: bytes | None) -> bytes: ...                     # for calibrate_hardware_latency
+    def level_patch(self, current: bytes | None) -> bytes: ...                     # about its loudest: for input gain
     def brief(self, data: bytes) -> dict: ...                                      # facts every result carries
     def flat(self, prog: dict) -> dict: ...                                        # decode_program's dict, one level
     def describe(self) -> dict: ...                                                # every parameter, for the model
@@ -94,6 +95,11 @@ class Profile(Protocol):
     def tempo(self, data: bytes) -> int: ...
     def with_tempo(self, data: bytes, bpm: float) -> tuple[bytes, int]: ...        # (patch, the tempo it got)
     def clock_note(self, setup: dict | None) -> str: ...                           # when that tempo counts
+    # ---- sound design in real units (sound_design.py's blueprints), through the synth's calibration
+    CALIBRATION: dict                                                              # measured: value -> ms, Hz, cents...
+    def from_design(self, blueprint: dict) -> dict: ...                            # {params, approximate, left_out}
+    def calibration_summary(self) -> dict: ...                                     # the curves, for the model
+
     def start_on_the_note(self, data: bytes) -> tuple[bytes, str | None]: ...      # (patch whose arpeggio starts
     #                                                                                with the note, what changed or None)
 

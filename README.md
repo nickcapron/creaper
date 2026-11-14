@@ -166,6 +166,26 @@ needs a profile for the model, and the microKORG's is the only one so far.
   puts both back when it's done (REAPER 7.74 or newer). Working out which interface
   and driver a synth is on is Windows-only for now: on macOS and Linux creaper asks you
   which interface it is and checks REAPER against your answer.
+- **Sets the recording level with you.** `setup_hardware` with `action="level"` plays a
+  loud test sound, measures each interface input, and says which gain knob to turn
+  and about how far ("Input 2 is hot: turn its gain down about 6 dB"), or that an input
+  is getting next to nothing and why that usually is (a plug not seated, the wrong input
+  type). You turn, it measures again, until both inputs sit in the window (-20 to -12 dBFS
+  for the test sound: a distorted lead comes out some 7 dB louder and still mustn't clip). A recording
+  that comes back one-sided, clipped or silent is flagged with its cause, and creaper
+  reminds the model to set the level before the first print on a device.
+- **Knows how sounds are built.** `sound_design_guide` is creaper's sound-design
+  knowledge, for any synth: the method (design against numbers a recording can be
+  measured for), 17 techniques (detune, pulse width, filter envelopes, sync, key
+  tracking, glide...) and 27 blueprints from sub bass to string pad to bell to synth
+  kick, each in real units (milliseconds, hertz, cents, octaves) with how to play it,
+  what a recording of it should measure and what to change when it doesn't. For a synth
+  with a profile, the blueprint also comes as that synth's own knob values, through a
+  calibration measured on the instrument: on the microKORG, what every envelope, filter,
+  LFO, glide, detune and delay value is in real units (its detune knob, for one, is
+  nothing like even: 6 is 9 cents and 12 is 60). A blueprint of the model's own, in the
+  same real units, is translated the same way, so an advanced patch isn't a guess at
+  0-127 values.
 - **Sound design on the synth.** On a microKORG, creaper reads the current patch as named
   settings, changes them by name (as a whole patch into the edit buffer, or live as knob
   moves over MIDI), and keeps a backup of the sound it replaced. Writing to a program slot
@@ -178,7 +198,8 @@ needs a profile for the model, and the microKORG's is the only one so far.
   an audio track that records it. A part's sound is written into the song just before
   the part, so the synth is on the right patch whenever it plays. `print_hardware`
   records the part to audio in real time, after which mixing, mastering and export work
-  as with any other track. creaper remembers what each print was made from: if the
+  as with any other track; reprinting some bars replaces just those bars of an older
+  print, and a print whose item doesn't show the whole recording is reported. creaper remembers what each print was made from: if the
   notes or the sound change afterwards, the project overview shows the part as stale,
   and mixing and exporting say which parts need printing again (they don't refuse).
 - **In time.** A microKORG sound with an arpeggiator, a tempo-synced delay or a synced
@@ -187,10 +208,17 @@ needs a profile for the model, and the microKORG's is the only one so far.
   starts with the part's first note (measured on a microKORG at 97 BPM: a 4-bar print
   within 10 ms of the grid; with key sync off it sat 100 ms late). creaper doesn't send
   MIDI clock: it tells you what the synth's Clock setting means for the sound.
+- **A whole song on one synth.** Name the synth's parts Bass, Pad, Lead and Counter and
+  `build_song` writes onto them. Each part gets its sound at its first bar and can change
+  sound from section to section (a darker bass under the verse, a solo sound for the
+  instrumental); creaper says when a sound doesn't fit the part it's given (notes outside
+  the register it works in, more notes at once than the synth has voices). The parts are
+  printed one after another, then mixed like any other audio.
 - **Recipes.** Starting patches for game sound effects (laser, power-up, alarm, explosion,
-  UI blip, drones, a vocoder robot voice) and for sounds in the style of well-known
-  microKORG users, with the sources for each and the factory program when that's what a
-  source says was used. All 19 have been played and measured on a real microKORG;
+  UI blip, drones, a vocoder robot voice), for the jobs in a song (two basses, leads, a
+  solo sound, string pad, chord stab, pluck: each with its role, register and voices) and
+  for sounds in the style of well-known microKORG users, with the sources for each and
+  the factory program when that's what a source says was used. All have been played and measured on a real microKORG;
   they're still starting points to tune by ear.
 
 The hardware map is saved in `<REAPER resource path>/creaper/hardware.json`.

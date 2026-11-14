@@ -365,9 +365,10 @@ def unprinted_warning(ask: Any = None) -> str | None:
 @tool()
 def setup_hardware(
     name: Annotated[str | None, Field(description="A device in the hardware map; leave out before any is saved")] = None,
-    action: Annotated[Literal["check", "fix", "finish"], Field(description=(
+    action: Annotated[Literal["check", "fix", "level", "finish"], Field(description=(
         "check = what's set up and what isn't (changes nothing); fix = open the REAPER settings page of the first "
-        "problem and wait until the user has changed it; finish = hardware work is over, put REAPER's settings back"))] = "check",
+        "problem and wait until the user has changed it; level = play a loud test note and say how far to turn the "
+        "interface's input gain for each input; finish = hardware work is over, put REAPER's settings back"))] = "check",
 ) -> dict:
     """Gets REAPER ready for hardware synths, and is where to go whenever a hardware
     tool says the setup is wrong. Start a "set up my synth" request here.
@@ -381,7 +382,16 @@ def setup_hardware(
     page in REAPER and watches for up to two minutes; the moment the change is made
     it returns, so carry straight on without waiting for the user to say so. Call fix
     again while it reports another problem. Then scan_hardware, save_hardware,
-    calibrate_hardware_latency.
+    calibrate_hardware_latency, and level.
+
+    level sets the recording level WITH the user, before any part is recorded: the gain
+    knobs are on the interface, so creaper measures and the user turns. It plays a
+    loud test sound for two seconds, records it, and returns each input's peak
+    and what to do ('turn': "Input 1 is low: turn its gain up about 9 dB", a dead or
+    one-sided input with its likely causes). Say those to the user, wait for them to
+    do it, and call level again until level_ok. Run it for a new device, after the
+    user touches the interface, and whenever a recording comes back quiet, clipped
+    or one-sided.
 
     While hardware is worked on, creaper turns off two REAPER settings that get in the
     way (the save/delete window after each recording, and closing the audio device
@@ -394,6 +404,11 @@ def setup_hardware(
         return setup.finish()
     if action == "fix":
         return setup.guided_fix(key, device)
+    if action == "level":
+        if not key:
+            raise ValueError("level needs the device's name (list_hardware)")
+        from . import hardware_sound_tools   # here: that module imports this one
+        return hardware_sound_tools.check_input_level(key)
     return setup.check(key, device)
 
 

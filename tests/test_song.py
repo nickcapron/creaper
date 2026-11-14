@@ -936,3 +936,17 @@ def test_the_parts_stage_suggests_thinning_where_nothing_enters(reaper, tmp_path
     assert [(c["track"], c["bars"]) for c in out["cleared"]] == [("Arp", [1, 8])]
     again = song_tools.finish_stage(stage="parts")
     assert "nothing enters" not in [r["check"] for r in again["checks"]] and "suggest" not in again
+
+
+def test_a_hardware_part_is_written_on_the_track_that_plays_the_synth():
+    # Live, 2026-11-13: with pairs named Bass, Lead and Counter, build_song put those lines on
+    # the audio tracks (exact names) and only the pad on its MIDI track.
+    def pair(n, name):
+        return [{"number": n, "name": f"{name} (MIDI)", "hardware": {"role": "plays the synth (MIDI)", "pair": name}},
+                {"number": n + 1, "name": name, "hardware": {"role": "records the synth (audio)", "pair": f"{name} (MIDI)"}}]
+    overview = {"tracks": [{"number": 1, "name": "Drums"}, *pair(2, "Bass"), *pair(4, "Pad"), *pair(6, "Lead"),
+                           *pair(8, "Counter")]}
+    found = song_tools._find_tracks(overview, list(songmap.PARTS))
+    assert {part: t["name"] for part, t in found.items()} == {
+        "drums": "Drums", "bass": "Bass (MIDI)", "chords": "Pad (MIDI)", "lead": "Lead (MIDI)",
+        "counter": "Counter (MIDI)"}
