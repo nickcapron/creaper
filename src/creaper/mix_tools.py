@@ -85,6 +85,10 @@ PEAKY_MIX_PLR_DB = 12.0  # a mix whose peaks sit further over its loudness needs
 # Loudness (K-weighted) underrates sub-bass, so a sustained sub drone measured "quiet"
 # and got boosted +6 to +12 dB until it was most of the mix: boosts are capped.
 MISSING_LU = 30.0     # this far under its place a part isn't quiet, it's not sounding
+# Styles whose band is the synthesizers: at the usual balance (a pad 10 LU under the kit) a
+# new wave song made on one synth was heard as "really thin" (2026-11-13).
+SYNTH_LED_STYLES = {"new wave", "synth-pop", "synthwave", "darkwave", "italo disco"}
+SYNTH_LED_LEVELS = {"pad": -6, "keys": -4, "arp": -8, "lead": -3}
 MAX_BOOST_DB, MAX_BOOST_LOW_DB = 6.0, 2.0
 LOW_HEAVY_PCT = 50   # sub + bass share above which a part counts as low-heavy
 
@@ -203,12 +207,15 @@ def harsh_beds(harsh: dict[str, float | None], roles: dict[str, str]) -> list[st
     return out
 
 
-def section_balance(levels: dict[str, dict[str, float | None]], roles: dict[str, str]) -> list[str]:
+def section_balance(levels: dict[str, dict[str, float | None]], roles: dict[str, str],
+                    places: dict[str, float] | None = None) -> list[str]:
     """Parts out of place in each section. levels: {section: {track: LUFS while it
-    plays}}; roles: {track: role}. Each part is judged against ROLE_LEVELS from the
+    plays}}; roles: {track: role}; places: role_levels(style) for the song's genre
+    (default: the plain table). Each part is judged against its place from the
     drums in that section (a section without drums: from the parts' median). Parts
     far under their place (spill) and quiet risers or impacts aren't called buried."""
     out = []
+    places = places or ROLE_LEVELS
     for section, tracks in levels.items():
         playing = {t: v for t, v in tracks.items() if v is not None}
         if len(playing) < 2:
@@ -219,13 +226,13 @@ def section_balance(levels: dict[str, dict[str, float | None]], roles: dict[str,
         judged = {t: v for t, v in playing.items() if drums or roles.get(t) not in ("kick", "drums")}
         if len(judged) < 2:
             continue
-        anchor = max(drums) if drums else float(sorted(v - ROLE_LEVELS.get(roles.get(t, "other"), -7)
+        anchor = max(drums) if drums else float(sorted(v - places.get(roles.get(t, "other"), -7)
                                                        for t, v in judged.items())[len(judged) // 2])
         for t, v in playing.items():
             role = roles.get(t, "other")
             if role in ("kick", "drums") and (v == anchor or not drums):
                 continue
-            place = ROLE_LEVELS.get(role, -7)
+            place = places.get(role, -7)
             off = v - (anchor + place)
             where = (f"about {abs(place):g} LU {'over' if place > 0 else 'under'} the drums" if drums
                      else "in line with the rest")
@@ -365,13 +372,7 @@ def _kick_bass_carve(channels: list[dict]) -> dict[str, dict]:
     return out
 
 
-def plan_mix(channels: list[dict], style: dict | None = None) -> dict:
-    """What to do to each channel. channels: name, role, level (max short-term LUFS),
-    peak_db, crest_db, spectrum, pan, has_eq, has_comp. style: a genre profile's mix
-    (low_end) and family. Returns per-channel actions and project-wide ones."""
-    style = style or {}
-    offsets = dict(ROLE_LEVELS)
-    low_end = (style.get("mix") or {}).get("low_end")
+def _styled(offsets: dict, style: dict, low_end: str | None) -> dict:
     if low_end in ("heavy", "very heavy"):
         offsets["bass"] += 1 if low_end == "heavy" else 2
         offsets["kick"] += 0 if low_end == "heavy" else 1
@@ -386,6 +387,9 @@ def plan_mix(channels: list[dict], style: dict | None = None) -> dict:
         offsets["keys"] = max(offsets["keys"], -3)
         offsets["guitar"] = max(offsets["guitar"], -3)
         offsets["lead"] = max(offsets["lead"], -3)
+    if str(style.get("name") or "").lower() in SYNTH_LED_STYLES:
+        for role, level in SYNTH_LED_LEVELS.items():
+            offsets[role] = max(offsets[role], level)
     if style.get("family") in ACOUSTIC_FAMILIES:
         # The acoustic guitar is the band: it sits just under the voice, and an organ or
         # string pad stays behind it (a Zach Bryan-style song came out "more pop than country"
@@ -396,6 +400,36 @@ def plan_mix(channels: list[dict], style: dict | None = None) -> dict:
         # A cue's solo melody leads over its drone: the dance-music bass level (3 LU over
         # the lead) put a solo flute under the drone in an ambient game cue.
         offsets["bass"] = min(offsets["bass"], offsets["lead"] - BED_UNDER_LEAD_LU)
+    return offsets
+
+
+def style_of(genre: str | None) -> dict | None:
+    """A genre's name as the style plan_mix and role_levels take; None for no or an unknown genre."""
+    if not genre:
+        return None
+    try:
+        g = genres.find(genre)
+    except ValueError:
+        return None
+    return {"family": g.family, "mix": {"low_end": g.mix.low_end, "width": g.mix.width}, "name": g.name}
+
+
+def role_levels(style: dict | None = None) -> dict[str, float]:
+    """Where each role sits against the drums (LU) in this style: ROLE_LEVELS, moved by
+    the genre. The mix sets levels by it and the balance checks judge by it: with two
+    tables a pad mixed where new wave wants it was reported 4 LU over its place."""
+    style = style or {}
+    offsets = dict(ROLE_LEVELS)
+    low_end = (style.get("mix") or {}).get("low_end")
+    return _styled(offsets, style, low_end)
+
+
+def plan_mix(channels: list[dict], style: dict | None = None) -> dict:
+    """What to do to each channel. channels: name, role, level (max short-term LUFS),
+    peak_db, crest_db, spectrum, pan, has_eq, has_comp. style: a genre profile's mix
+    (low_end) and family. Returns per-channel actions and project-wide ones."""
+    style = style or {}
+    offsets = role_levels(style)
     playing = [c for c in channels if c.get("level") is not None]
     carve = _kick_bass_carve(playing)
     anchors = [c for c in playing if c["role"] in ("kick", "drums")]
@@ -1203,6 +1237,102 @@ def _delay_return(bpm: float) -> dict:
     return out
 
 
+# ------------------------------------------------------------ a part through effects
+# A hardware synth recorded dry is one voice in the middle of the picture: next to plugin
+# instruments with their own choruses and reverbs it reads as thin. What each role gets,
+# from the classic boxes: the chorus plugin, its settings, reverb and delay send levels, why.
+PART_FX: dict[str, dict] = {
+    "pad": {"chorus": "Chorus JUN-6", "set": [("Chorus Mode", {"display_text": "Mode 1 + 2"}), ("Mix", {"value": 0.6})],
+            "reverb_db": -7, "delay_db": None,
+            "why": "both Juno chorus modes at once: the widest, thickest setting, the sound of an 80s string pad"},
+    "keys": {"chorus": "Chorus JUN-6", "set": [("Chorus Mode", {"display_text": "Mode 1"}), ("Mix", {"value": 0.5})],
+             "reverb_db": -12, "delay_db": None, "why": "the slow Juno chorus: width without wobble on chords"},
+    "arp": {"chorus": "Chorus JUN-6", "set": [("Chorus Mode", {"display_text": "Mode 1"}), ("Mix", {"value": 0.5})],
+            "reverb_db": -16, "delay_db": -14, "why": "a little chorus, and the shared echo to fill the gaps between notes"},
+    "lead": {"chorus": "Chorus DIMENSION-D", "set": [("Dimension Mode", {"display_text": "2"}), ("Output Mix", {"value": 0.6})],
+             "reverb_db": -12, "delay_db": -12,
+             "why": "Dimension-D widens a single line without the pitch wobble a chorus puts on a melody"},
+    "bass": {"chorus": "Chorus DIMENSION-D", "set": [("Dimension Mode", {"display_text": "1"}), ("Output Mix", {"value": 0.3})],
+             "reverb_db": None, "delay_db": None,
+             "why": "the gentlest Dimension mode, mostly dry: a little spread on top while the low end stays in the "
+                    "middle (check it: compare_mix_to_style's low-end mono compatibility stays over 0.8)"},
+}
+
+
+NOT_SYNTH_PARTS = {"kick", "drums", "snare", "perc", "vocal", "fx"}
+
+
+def _return_track(kind: str) -> dict | None:
+    """An existing reverb or delay return: a track of that name holding the effect and no items."""
+    named = r"\b(reverb|verb|plate|hall)\b" if kind == "reverb" else r"\b(delay|echo)\b"
+    holds = r"rev|verb" if kind == "reverb" else r"delay|echo"
+    for t in call("get_project_overview")["tracks"]:
+        if (re.search(named, t["name"], re.I) and not t.get("item_count")
+                and any(re.search(holds, f, re.I) for f in t.get("fx", []))):
+            return t
+    return None
+
+
+@tool()
+def add_part_fx(
+    track: Annotated[str | int, Field(description="The part's audio track (for a hardware synth: the printed one, not '(MIDI)')")],
+    role: Annotated[Literal["bass", "pad", "keys", "arp", "lead"] | None, Field(description=(
+        "What the part is; default: from the track's name (Bass, Pad, Chords/Keys, Arp/Counter, Lead)"))] = None,
+) -> dict:
+    """Puts a dry synth part through the effects its role is known by, so it stops
+    sounding thin: a chorus for width and thickness (Juno chorus on pads, chords and
+    arpeggios, Dimension-D on leads and, mostly dry, on basses), and sends to the
+    song's reverb and delay returns when it has them (auto_mix makes them). For a
+    hardware synth's printed parts (print_hardware), which come back as one dry voice
+    in the middle, and for any plugin part that sounds small and mono next to the
+    rest. Run it after printing and before or after auto_mix; a chorus or send that is
+    already there is left as it is. Refuses drums, vocals and effects tracks unless
+    role says otherwise. Returns what was added, what it's for, and anything not set.
+    Then measure_tracks: the part shouldn't have become harsh or louder than its role."""
+    info = call("get_track_details", track=track)
+    name = info["name"]
+    if role is None:
+        guess = role_of(re.sub(r"\bcounter\b", "arp", name, flags=re.I))
+        if guess in NOT_SYNTH_PARTS:
+            raise ValueError(f"'{name}' reads as {guess}, which a chorus doesn't help: this is for synth parts. If it "
+                             "is one, say which with role= (bass, pad, keys, arp or lead).")
+        role = guess if guess in PART_FX else "keys"
+    plan = PART_FX[role]
+    out: dict = {"track": name, "role": role, "why": plan["why"]}
+    have = next((f for f in info.get("fx", []) if plan["chorus"].lower() in f["name"].lower()), None)
+    try:
+        fx = have or call("add_fx", track=info["number"], name=plan["chorus"])
+    except Exception as e:  # noqa: BLE001 - most often the plugin isn't installed; the reason is passed on
+        fx = None
+        out["not_added"] = (f"{plan['chorus']} couldn't be added ({str(e)[:120]}): if it isn't installed, add a chorus "
+                            "or ensemble of the user's (list_installed_fx category='Modulation') and set it wide and slow")
+    if have:
+        out["chorus"] = {"plugin": have["name"], "already_there": True, "settings": "left as they are"}
+    elif fx:
+        changes = [{"parameter": p, **how} for p, how in plan["set"]]
+        done = call("set_fx_parameters", track=info["number"], fx=fx["index"], changes=changes)
+        failed = [c.get("parameter") for c in done.get("results", []) if isinstance(c, dict) and c.get("error")]
+        out["chorus"] = {"plugin": fx["name"], "settings": {p: next(iter(how.values())) for p, how in plan["set"]},
+                         "already_there": False}
+        if failed:
+            out["not_set"] = failed
+    for kind in ("reverb", "delay"):
+        level = plan[f"{kind}_db"]
+        if level is None:
+            continue
+        ret = _return_track(kind)
+        if ret is None:
+            out.setdefault("no_return", []).append(f"no {kind} return in the project yet (auto_mix makes one): no {kind} send")
+            continue
+        sent = next((x for x in info.get("sends", []) if (x.get("destination") or {}).get("number") == ret["number"]), None)
+        if sent:
+            out[f"{kind}_send"] = {"to": ret["name"], "db": sent.get("volume_db"), "already_there": True}
+            continue
+        call("set_send", source=info["number"], destination=ret["number"], volume_db=level)
+        out[f"{kind}_send"] = {"to": ret["name"], "db": level}
+    return out
+
+
 ROOM_DB = {"snare": -14, "perc": -18, "drums": -16, "kick": -24}   # drum sends to the short room
 MIX_GLUE_DB = 1.0        # what the mix-bus compressor takes off (gentle: glue, not squash)
 
@@ -1402,8 +1532,8 @@ def auto_mix(
     those points."""
     profile = None
     if style:
-        g = genres.find(style)
-        profile = {"family": g.family, "mix": {"low_end": g.mix.low_end, "width": g.mix.width}, "name": g.name}
+        genres.find(style)          # an unknown style is an error here, not a plain mix
+        profile = style_of(style)
     channels = _channels()
     if not channels:
         raise ValueError("no tracks with sound to mix")

@@ -1188,8 +1188,9 @@ def create_hardware_track(
     role with the register each works in and the notes it plays at once; give each
     part one at its first bar, and another at any section where the sound should
     change (a darker bass under the verse, a solo sound for the instrumental), and act
-    on the 'fit' each load reports. Print the parts one after another, then mix as
-    usual: the printed audio tracks are the parts."""
+    on the 'fit' each load reports. Print the parts one after another, add_part_fx on
+    each printed track (dry prints sound thin), then mix as usual: the printed audio
+    tracks are the parts."""
     link = _link(name)
     if not link.device.get("audio_input"):
         raise ValueError(f"creaper doesn't know which interface inputs {link.name}'s audio comes back on: "
@@ -1287,6 +1288,10 @@ def print_hardware(
     level = level_note(link, checked.status)
     if level and not problem:
         out["input_level"] = level
+    if not out.get("problem"):
+        out["next"] = (f"A song part printed dry is one voice in the middle: add_part_fx(track="
+                       f"{part['audio_track']['name']!r}) puts it through the chorus and sends its role is known by "
+                       "(once per track; not for sound effects).")
     if not latency:
         out["note"] = "This device's latency isn't measured (calibrate_hardware_latency), so the print may sit late."
     if prompt:

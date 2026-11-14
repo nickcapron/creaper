@@ -191,6 +191,12 @@ needs a profile for the model, and the microKORG's is the only one so far.
   moves over MIDI), and keeps a backup of the sound it replaced. Writing to a program slot
   asks first, every time, in creaper's chat panel; outside the panel, where creaper can't
   ask, it's refused (see Security notes). The synth's own write protect is respected.
+- **Through your effects.** A synth recorded dry is one voice in the middle and sounds thin
+  next to plugin instruments. `add_part_fx` gives a printed part the chorus its role is
+  known by (Arturia's Chorus JUN-6 on pads, chords and arpeggios, Chorus DIMENSION-D on
+  leads and, mostly dry, on basses) and sends to the song's reverb and delay; it works on
+  any small-sounding part. In synth-led styles (new wave, synth-pop, synthwave, darkwave,
+  italo disco) `auto_mix` carries pads, keys and arpeggios higher against the drums.
 - **Hears it.** `audition_hardware` plays a phrase, records it from the interface and
   measures pitch, tuning, envelope, brightness and level. `calibrate_hardware_latency`
   measures how late the synth's audio comes back, so recordings land on the grid.

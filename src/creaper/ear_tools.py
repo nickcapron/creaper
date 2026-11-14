@@ -16,6 +16,17 @@ from . import analysis, asr, genres, harmony, perception, structure
 from .server import READ_ONLY, Bar, BridgeError, bridge, call, drop_renders, tool
 from . import vocal_tools  # the module, not its names: it may still be loading (circular import)
 
+
+def _song_places() -> dict | None:
+    """Where each role sits in this song's genre (from its plan), as auto_mix set it; None
+    without a plan: the plain table."""
+    from . import mix_tools, song_tools
+    try:
+        style = mix_tools.style_of(song_tools._plan()[0].get("genre"))
+    except Exception:  # noqa: BLE001 - no plan, or one that can't be read: the plain table
+        return None
+    return mix_tools.role_levels(style) if style else None
+
 try:  # mcp 2.x
     from mcp.server.mcpserver import Image
 except ImportError:  # mcp 1.x
@@ -647,7 +658,8 @@ def measure_tracks(
     if per_section and sections:
         out["sections"] = {sec: {t: v for t, v in levels.items()} for sec, levels in by_section.items()}
         out["roles"] = roles
-        out["balance"] = mix_tools.section_balance(by_section, roles) or ["every part sits where its role puts it"]
+        out["balance"] = (mix_tools.section_balance(by_section, roles, _song_places())
+                          or ["every part sits where its role puts it"])
         if kits:
             out["drum_kits"] = kits
     return out

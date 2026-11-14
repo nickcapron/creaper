@@ -2768,8 +2768,18 @@ function commands.hardware_take_start(p)
         reaper.SetMediaTrackInfo_Value(t, "I_RECARM", 0)
       end
     end
+    -- What the track holds before the pass: each item's takes, and every file in use.
+    -- Afterwards the new recording is told by its file (REAPER can put it inside old items).
+    take.files = {}
     for i = 0, reaper.CountTrackMediaItems(audio) - 1 do
-      take.before[item_guid(reaper.GetTrackMediaItem(audio, i))] = true
+      local item = reaper.GetTrackMediaItem(audio, i)
+      take.before[item_guid(item)] = reaper.CountTakes(item)
+      for k = 0, reaper.CountTakes(item) - 1 do
+        local tk = reaper.GetTake(item, k)
+        local src = tk and reaper.GetMediaItemTake_Source(tk)
+        local file = src and reaper.GetMediaSourceFileName(src) or ""
+        if file ~= "" then take.files[file] = true end
+      end
     end
     reaper.SetMediaTrackInfo_Value(audio, "I_RECMODE", 0)
     reaper.SetMediaTrackInfo_Value(audio, "I_RECARM", 1)
@@ -2797,17 +2807,43 @@ function commands.hardware_take_finish(p)
   return with_undo("hardware take", function()
     local midi, audio = hw_track_by_guid(take.midi), hw_track_by_guid(take.audio)
     local items, old = {}, {}
+    if audio and not take.scratch and p.replace then
+      -- Recorded over an older print, REAPER (by default: "splits existing items and creates
+      -- new takes") splits the old item at both ends of the pass, puts the recording into
+      -- the piece under it as a second take, and gives the pieces outside an empty take
+      -- lane. Every item that gained a take is cut back to its active one: the recording
+      -- under the pass, the older print outside it.
+      local grown = {}
+      for i = 0, reaper.CountTrackMediaItems(audio) - 1 do
+        local item = reaper.GetTrackMediaItem(audio, i)
+        if reaper.CountTakes(item) > (take.before[item_guid(item)] or 1) then grown[#grown + 1] = item end
+      end
+      if #grown > 0 then
+        local selected = {}
+        for i = 0, reaper.CountSelectedMediaItems(0) - 1 do selected[#selected + 1] = reaper.GetSelectedMediaItem(0, i) end
+        reaper.SelectAllMediaItems(0, false)
+        for _, item in ipairs(grown) do reaper.SetMediaItemSelected(item, true) end
+        reaper.Main_OnCommand(40131, 0) -- Take: Crop to active take in items
+        reaper.SelectAllMediaItems(0, false)
+        for _, item in ipairs(selected) do reaper.SetMediaItemSelected(item, true) end
+      end
+    end
     if audio then
       for i = 0, reaper.CountTrackMediaItems(audio) - 1 do
         local item = reaper.GetTrackMediaItem(audio, i)
-        if take.before[item_guid(item)] then old[#old + 1] = item else items[#items + 1] = item end
+        local tk = reaper.GetActiveTake(item)
+        local src = tk and reaper.GetMediaItemTake_Source(tk)
+        local file = src and reaper.GetMediaSourceFileName(src) or ""
+        local new
+        if file ~= "" then new = not take.files[file] else new = not take.before[item_guid(item)] end
+        if new then items[#items + 1] = item else old[#old + 1] = item end
       end
     end
     local out = {}
     local latency = tonumber(p.latency_seconds) or 0
-    if not take.scratch and #old > 0 then
-      -- Recorded over an older print, REAPER shows only the stretch the old item didn't cover
-      -- (one piece each side of it). The file holds the whole pass: one item, all of it.
+    if not take.scratch and p.replace then
+      -- A pass can still come back in pieces (one under an old item, one past its end).
+      -- The file holds the whole pass: one item, all of it.
       local whole, seen = {}, {}
       for _, item in ipairs(items) do
         local tk = reaper.GetActiveTake(item)
@@ -2867,6 +2903,23 @@ function commands.hardware_take_finish(p)
             if pos < take.start_t - 0.01 then under = reaper.SplitMediaItem(item, take.start_t) end
             if under and fin > take.end_t + 0.01 then reaper.SplitMediaItem(under, take.end_t) end
             if under then reaper.DeleteTrackMediaItem(audio, under) end
+          end
+        end
+        -- The new item ends the device's latency early (that much of it was skipped), which
+        -- can leave a hole of silence before the older print carries on: the older piece
+        -- starts that much sooner, from its own recording.
+        local new_end = 0
+        for _, item in ipairs(items) do
+          new_end = math.max(new_end, reaper.GetMediaItemInfo_Value(item, "D_POSITION") + reaper.GetMediaItemInfo_Value(item, "D_LENGTH"))
+        end
+        for i = 0, reaper.CountTrackMediaItems(audio) - 1 do
+          local item = reaper.GetTrackMediaItem(audio, i)
+          local tk = reaper.GetActiveTake(item)
+          local gap = reaper.GetMediaItemInfo_Value(item, "D_POSITION") - new_end
+          if tk and gap > 0.0005 and gap < 0.1 and reaper.GetMediaItemTakeInfo_Value(tk, "D_STARTOFFS") >= gap then
+            reaper.SetMediaItemInfo_Value(item, "D_POSITION", new_end)
+            reaper.SetMediaItemInfo_Value(item, "D_LENGTH", reaper.GetMediaItemInfo_Value(item, "D_LENGTH") + gap)
+            reaper.SetMediaItemTakeInfo_Value(tk, "D_STARTOFFS", reaper.GetMediaItemTakeInfo_Value(tk, "D_STARTOFFS") - gap)
           end
         end
       end

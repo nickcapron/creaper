@@ -232,6 +232,15 @@ function reaper.Main_OnCommand(id)
     F.play_state = 5
     F.recording_from = F.cursor
     F.play_position = F.cursor
+  elseif id == 40131 then -- Take: Crop to active take in items
+    for _, t in ipairs(F.tracks) do
+      for _, item in ipairs(t.items) do
+        if item.selected then
+          item.takes = { item.takes[item.active or 1] }
+          item.active = nil
+        end
+      end
+    end
   end
 end
 
@@ -241,19 +250,44 @@ function reaper.OnStopButton()
     for _, t in ipairs(F.tracks) do
       if t.v.I_RECARM == 1 then
         local length = math.max(0.5, F.play_position - F.recording_from)
-        -- F.trims_behind: like REAPER recording over an item, only the stretch past it shows.
-        local covered = 0
-        if F.trims_behind then
-          for _, old in ipairs(t.items) do
-            local fin = old.v.D_POSITION + old.v.D_LENGTH
-            if old.v.D_POSITION <= F.recording_from and fin > F.recording_from then
-              covered = math.min(length - 0.01, fin - F.recording_from)
+        local from, to = F.recording_from, F.recording_from + length
+        local function piece(a, b)
+          local item = F.new_audio_item(t, a, b - a, F.recorded_file)
+          item.takes[1].v.D_STARTOFFS = a - from
+          item.takes[1].length = length
+          return item
+        end
+        if not F.adds_takes then
+          piece(from, to)
+        else
+          -- REAPER's default for a recording over older items ("splits existing items and
+          -- creates new takes"), as read from REAPER 7.85 on 2026-11-14: the old item is
+          -- split at both ends of the pass, the piece under it gets the recording as a
+          -- second, active take, the pieces outside get an empty take lane, and what no
+          -- old item covered becomes an item of its own.
+          local olds = {}
+          for _, old in ipairs(t.items) do olds[#olds + 1] = old end
+          table.sort(olds, function(a, b) return a.v.D_POSITION < b.v.D_POSITION end)
+          local at = from
+          for _, old in ipairs(olds) do
+            local pos, fin = old.v.D_POSITION, old.v.D_POSITION + old.v.D_LENGTH
+            if pos < to and fin > from then
+              local mid = old
+              if pos < from then
+                mid = reaper.SplitMediaItem(old, from)
+                old.takes[2] = F.EMPTY
+              end
+              if fin > to then reaper.SplitMediaItem(mid, to).takes[2] = F.EMPTY end
+              if mid.v.D_POSITION > at then piece(at, mid.v.D_POSITION) end
+              local new = piece(mid.v.D_POSITION, mid.v.D_POSITION + mid.v.D_LENGTH)
+              table.remove(t.items)              -- its take moves into the old piece
+              mid.takes[#mid.takes + 1] = new.takes[1]
+              mid.active = #mid.takes
+              at = mid.v.D_POSITION + mid.v.D_LENGTH
             end
           end
+          if at < to then piece(at, to) end
         end
-        local item = F.new_audio_item(t, F.recording_from + covered, length - covered, F.recorded_file)
-        item.takes[1].v.D_STARTOFFS = covered
-        item.takes[1].length = length
       end
     end
   end
@@ -393,9 +427,11 @@ end
 
 ----------------------------------------------------------------------- takes
 
+F.EMPTY = { empty = true, events = {}, notes = {}, v = {} }  -- an empty take lane: REAPER hands back nil for it
+local function real(take) if take ~= F.EMPTY then return take end end
 function reaper.CountTakes(item) return #item.takes end
-function reaper.GetTake(item, i) return item.takes[i + 1] end
-function reaper.GetActiveTake(item) return item.takes[1] end
+function reaper.GetTake(item, i) return real(item.takes[i + 1]) end
+function reaper.GetActiveTake(item) return real(item.takes[item.active or 1]) end
 function reaper.TakeIsMIDI(take) return take.midi end
 function reaper.GetMediaItemTake_Source(take) return take end
 function reaper.GetMediaSourceFileName(source) return source.file end

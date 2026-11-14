@@ -120,8 +120,9 @@ TECHNIQUES: dict[str, str] = {
     "layering": "Two timbres for two jobs: a body (dark, steady) and a top (bright, short), or a pad with a "
                 "slow twin an octave up. On a small synth a layer halves the voices: fine for leads and "
                 "basses, costly for chords.",
-    "width": "Chorus and ensemble make a mono synth wide; unsynced LFOs to pan do too. Basses stay mono: no "
-             "chorus on anything that carries the low end. Width is measured (stereo_width_db), not assumed.",
+    "width": "Chorus and ensemble make a mono synth wide; unsynced LFOs to pan do too. Basses stay mono in the low end: no "
+             "ordinary chorus on anything that carries it (at most a mostly dry Dimension-style widener, with the "
+             "mix's low-end mono compatibility checked after). Width is measured (stereo_width_db), not assumed.",
     "tempo": "Synced delays (1/8, dotted 1/8 = 3/16), synced LFOs and arpeggios must run at the song's "
              "tempo: a patch carries its own tempo on most hardware. Dotted-eighth delay under sixteenth "
              "plucks is the instant 'more notes than you played' trick.",

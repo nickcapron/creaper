@@ -764,3 +764,89 @@ def test_an_arp_is_texture_under_the_lead_and_a_biting_bed_is_cut():
     assert [b.split(" ")[0] for b in biting] == ["Arp", "Counter"]
     assert mix_tools.section_balance({"Chorus": {"Drums": -20, "Arp": -26}}, {"Drums": "drums", "Arp": "arp"}) == [
         "Chorus: Arp is 5.0 LU over its place (a arp part sits about 11 LU under the drums)"]
+
+
+# ------------------------------------------------------------ a part through effects
+# 2026-11-13: a new wave song with every part from one hardware synth, printed dry and mixed
+# with pads 10 LU under the kit, was heard as "really thin".
+
+def test_synth_led_styles_carry_their_synths_higher():
+    chans = [channel("Drums", "drums", -20), channel("Pad", "pad", -20), channel("Arp", "arp", -20)]
+    usual = {a["name"]: a["gain_db"] for a in plan_mix(chans, {"family": "rock", "name": "indie rock"})["channels"]}
+    wave = {a["name"]: a["gain_db"] for a in plan_mix(chans, {"family": "rock", "name": "new wave"})["channels"]}
+    assert (usual["Pad"], usual["Arp"]) == (-10.0, -11.0) and (wave["Pad"], wave["Arp"]) == (-6.0, -8.0)
+
+
+def _part_fx_project(monkeypatch, installed=True, returns=True, sends=None):
+    calls = []
+    fx = {"Pad": [{"index": 1, "name": "VST: ReaEQ (Cockos)"}], "Lead": [], "Counter": [], "Bass": [], "Drums": []}
+    numbers = {"Pad": 6, "Lead": 8, "Counter": 10, "Bass": 4, "Drums": 1}
+
+    def fake_call(command, **a):
+        calls.append((command, a))
+        if command == "get_track_details":
+            name = a["track"] if isinstance(a["track"], str) else next(n for n, i in numbers.items() if i == a["track"])
+            return {"name": name, "number": numbers[name], "fx": list(fx[name]), "sends": (sends or {}).get(name, [])}
+        if command == "add_fx":
+            if not installed:
+                raise ValueError("no plugin matches")
+            name = next(n for n, i in numbers.items() if i == a["track"])
+            made = {"index": len(fx[name]) + 1, "name": f"VST3: {a['name']} (Arturia)"}
+            fx[name].append(made)
+            return made
+        if command == "set_fx_parameters":
+            return {"results": [{"parameter": c["parameter"]} for c in a["changes"]]}
+        if command == "get_project_overview":
+            both = [{"name": "Reverb", "number": 13, "fx": ["VST3: Rev PLATE-140 (Arturia)"], "item_count": 0},
+                    {"name": "Delay", "number": 14, "fx": ["VST3: Delay TAPE-201 (Arturia)"], "item_count": 0}]
+            return {"tracks": both if returns else []}
+        return {}
+
+    monkeypatch.setattr(mix_tools, "call", fake_call)
+    return calls
+
+
+def test_a_dry_part_gets_the_chorus_and_sends_of_its_role(monkeypatch):
+    calls = _part_fx_project(monkeypatch)
+    pad = mix_tools.add_part_fx("Pad")
+    assert pad["role"] == "pad" and "JUN-6" in pad["chorus"]["plugin"] and not pad["chorus"]["already_there"]
+    assert pad["chorus"]["settings"] == {"Chorus Mode": "Mode 1 + 2", "Mix": 0.6}
+    assert pad["reverb_send"] == {"to": "Reverb", "db": -7} and "delay_send" not in pad
+    lead = mix_tools.add_part_fx("Lead")
+    assert "DIMENSION-D" in lead["chorus"]["plugin"] and lead["delay_send"] == {"to": "Delay", "db": -12}
+    assert mix_tools.add_part_fx("Counter")["role"] == "arp"                 # a counter line is treated as an arpeggio
+    bass = mix_tools.add_part_fx("Bass")
+    assert bass["chorus"]["settings"]["Output Mix"] == 0.3 and "reverb_send" not in bass and "delay_send" not in bass
+    # A second run finds the chorus and leaves it, and its settings, alone.
+    before = [c for c, _ in calls if c in ("add_fx", "set_fx_parameters")]
+    again = mix_tools.add_part_fx("Pad")
+    assert again["chorus"]["already_there"] and again["chorus"]["settings"] == "left as they are"
+    assert [c for c, _ in calls if c in ("add_fx", "set_fx_parameters")] == before
+
+
+def test_part_fx_is_for_synth_parts_and_keeps_a_send_that_is_there(monkeypatch):
+    calls = _part_fx_project(monkeypatch, sends={"Lead": [{"destination": {"number": 13, "name": "Reverb"}, "volume_db": -20}]})
+    with pytest.raises(ValueError, match="'Drums' reads as drums.*role="):
+        mix_tools.add_part_fx("Drums")
+    assert mix_tools.add_part_fx("Drums", role="keys")["role"] == "keys"          # said to be one: done
+    lead = mix_tools.add_part_fx("Lead")
+    assert lead["reverb_send"] == {"to": "Reverb", "db": -20, "already_there": True} and lead["delay_send"]["db"] == -12
+    assert [a["destination"] for c, a in calls if c == "set_send" and a["source"] == 8] == [14]
+
+
+def test_the_balance_check_judges_by_the_style_the_mix_used():
+    levels = {"Chorus": {"Drums": -20.0, "Pad": -26.0, "Lead": -24.0}}
+    roles = {"Drums": "drums", "Pad": "pad", "Lead": "lead"}
+    assert "Pad is 4.0 LU over" not in " ".join(mix_tools.section_balance(levels, roles))     # 4.0 isn't over 4.0
+    levels["Chorus"]["Pad"] = -25.0
+    assert "Pad is 5.0 LU over its place" in mix_tools.section_balance(levels, roles)[0]
+    wave = mix_tools.role_levels(mix_tools.style_of("new wave"))
+    assert wave["pad"] == -6 and mix_tools.section_balance(levels, roles, wave) == []
+    assert mix_tools.style_of("no such genre") is None and mix_tools.style_of(None) is None
+
+
+def test_part_fx_says_what_it_could_not_do(monkeypatch):
+    _part_fx_project(monkeypatch, installed=False, returns=False)
+    lead = mix_tools.add_part_fx("Lead")
+    assert "couldn't be added (no plugin matches)" in lead["not_added"] and "chorus" not in lead
+    assert len(lead["no_return"]) == 2 and "auto_mix makes one" in lead["no_return"][0]

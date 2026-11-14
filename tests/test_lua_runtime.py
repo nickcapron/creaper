@@ -275,29 +275,61 @@ def test_a_print_take_mutes_the_synths_other_tracks_and_puts_everything_back(rig
 
 
 def test_a_reprint_over_an_older_print_is_the_whole_recording(rig, bridge):
-    """Motel Neon MK, 2026-11-13: REAPER showed only what the old item didn't cover, so a
+    """Motel Neon MK, 2026-11-13: REAPER put the reprint into the old item as a second take
+    and showed only the tail past it as a new item; the old item was deleted, so a
     reprinted bass was a 10 ms item at the song's end and the mix had no bass."""
     hardware_part(rig, bridge)
     audio = rig.f.track("MK Lead")
-    rig.f.new_audio_item(audio, 4.0, 4.0)                # the first print, the same stretch
-    rig.f.trims_behind = True
+    rig.f.new_audio_item(audio, 4.0, 3.0)                # the first print, ending a second sooner
+    rig.f.adds_takes = True
     bridge.call("hardware_take_start", track="MK Lead", start_seconds=4, end_seconds=8)
     rig.f.play_position = 8.0
     finished = bridge.call("hardware_take_finish", mute_midi=True, replace=True, latency_seconds=0.25)
     (new,) = items(rig, "MK Lead")
+    assert len(list(new.takes.values())) == 1 and new.takes[1].file == "take.wav"
     assert new.v["D_POSITION"] == 4.0 and new.v["D_LENGTH"] == 3.75 and new.takes[1].v["D_STARTOFFS"] == 0.25
     assert finished["items"][0]["length_seconds"] == 3.75
 
 
-def test_a_reprint_of_some_bars_keeps_the_rest_of_the_older_print(rig, bridge):
+@pytest.mark.parametrize("adds_takes", [False, True])
+def test_a_reprint_of_some_bars_keeps_the_rest_of_the_older_print(rig, bridge, adds_takes):
+    """Live, 2026-11-14 (REAPER's default take mode): the piece of the old print after the
+    reprinted bars was taken for the new recording and stretched over the rest of the song."""
     hardware_part(rig, bridge)
     audio = rig.f.track("MK Lead")
     rig.f.new_audio_item(audio, 0.0, 20.0, "whole song.wav")
+    rig.f.adds_takes = adds_takes
     bridge.call("hardware_take_start", track="MK Lead", start_seconds=4, end_seconds=8)
     rig.f.play_position = 8.0
-    bridge.call("hardware_take_finish", mute_midi=True, replace=True)
+    finished = bridge.call("hardware_take_finish", mute_midi=True, replace=True)
+    assert all(len(list(i.takes.values())) == 1 for i in items(rig, "MK Lead"))   # no take lanes left behind
     kept = sorted((i.v["D_POSITION"], i.v["D_LENGTH"], i.takes[1].file, i.takes[1].v["D_STARTOFFS"]) for i in items(rig, "MK Lead"))
     assert kept == [(0.0, 4.0, "whole song.wav", 0.0), (4.0, 4.0, "take.wav", 0.0), (8.0, 12.0, "whole song.wav", 8.0)]
+    assert [(i["start"]["seconds"], i["length_seconds"]) for i in finished["items"]] == [(4.0, 4.0)]
+
+
+def test_a_reprint_of_some_bars_leaves_no_hole_before_the_older_print_carries_on(rig, bridge):
+    """Live, 2026-11-14: the new item ends the latency early, and the old one started 16 ms later."""
+    hardware_part(rig, bridge)
+    rig.f.new_audio_item(rig.f.track("MK Lead"), 0.0, 20.0, "whole song.wav")
+    rig.f.adds_takes = True
+    bridge.call("hardware_take_start", track="MK Lead", start_seconds=4, end_seconds=8)
+    rig.f.play_position = 8.0
+    bridge.call("hardware_take_finish", mute_midi=True, replace=True, latency_seconds=0.0625)
+    kept = sorted((i.v["D_POSITION"], i.v["D_LENGTH"], i.takes[1].v["D_STARTOFFS"]) for i in items(rig, "MK Lead"))
+    assert kept == [(0.0, 4.0, 0.0), (4.0, 3.9375, 0.0625), (7.9375, 12.0625, 7.9375)]
+
+
+def test_a_take_nobody_asked_to_replace_keeps_the_older_take_beside_it(rig, bridge):
+    hardware_part(rig, bridge)
+    audio = rig.f.track("MK Lead")
+    rig.f.new_audio_item(audio, 4.0, 4.0)
+    rig.f.adds_takes = True
+    bridge.call("hardware_take_start", track="MK Lead", start_seconds=4, end_seconds=8)
+    rig.f.play_position = 8.0
+    bridge.call("hardware_take_finish")
+    (item,) = items(rig, "MK Lead")
+    assert [t.file for t in item.takes.values()] == ["old.wav", "take.wav"]
 
 
 def test_a_print_reads_as_printed_until_the_part_changes(rig, bridge):
