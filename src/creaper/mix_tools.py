@@ -1322,7 +1322,8 @@ def add_part_fx(
             continue
         ret = _return_track(kind)
         if ret is None:
-            out.setdefault("no_return", []).append(f"no {kind} return in the project yet (auto_mix makes one): no {kind} send")
+            out.setdefault("no_return", []).append(f"no {kind} return in the project yet: no {kind} send. auto_mix makes the returns; call add_part_fx "
+                                                   "again after it and the send is added (the chorus is left as it is)")
             continue
         sent = next((x for x in info.get("sends", []) if (x.get("destination") or {}).get("number") == ret["number"]), None)
         if sent:

@@ -765,6 +765,7 @@ def _silence_cause(link: Link, peak_db: float) -> str:
 # stops trusting the check.
 LEVEL_WINDOW = (-20.0, -12.0)
 LEVEL_AIM = -16.0
+LEVEL_SLACK = 1.0         # a gain knob isn't set to the dB: this close to the window is in it
 NOTHING_DBFS = -50.0           # a channel under this while the test sound plays gets next to nothing
 ONE_SIDED_DB = 12.0            # two inputs of a stereo pair this far apart: the part sits in one ear
 MATCH_DB = 1.5
@@ -812,9 +813,9 @@ def level_advice(peaks: list[float], first_input: int, synth: str) -> list[str]:
             said.append(f"Input {n} gets next to nothing (peak {peak:.0f} dBFS): its gain knob is at the bottom, the "
                         f"cable from the {synth}'s {jack} jack is loose or missing, or the input is switched to the "
                         "wrong kind (LINE for a synth, not instrument/Hi-Z, and no pad).")
-        elif peak < lo:
+        elif peak < lo - LEVEL_SLACK:
             said.append(f"Input {n} is low (peak {peak:.0f} dBFS): turn its gain up about {LEVEL_AIM - peak:.0f} dB.")
-        elif peak > hi:
+        elif peak > hi + LEVEL_SLACK:
             said.append(f"Input {n} is hot (peak {peak:.0f} dBFS): turn its gain down about {peak - LEVEL_AIM:.0f} dB.")
     if len(peaks) == 2 and not said and abs(peaks[0] - peaks[1]) > MATCH_DB:
         low = first_input + (0 if peaks[0] < peaks[1] else 1)
@@ -1291,7 +1292,8 @@ def print_hardware(
     if not out.get("problem"):
         out["next"] = (f"A song part printed dry is one voice in the middle: add_part_fx(track="
                        f"{part['audio_track']['name']!r}) puts it through the chorus and sends its role is known by "
-                       "(once per track; not for sound effects).")
+                       "(not for sound effects). Its reverb and delay sends need the returns auto_mix makes: "
+                       "call it again after auto_mix and it adds them.")
     if not latency:
         out["note"] = "This device's latency isn't measured (calibrate_hardware_latency), so the print may sit late."
     if prompt:

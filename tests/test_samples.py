@@ -593,3 +593,44 @@ def test_the_kit_crash_is_chosen_by_tone_not_the_longest_wash(monkeypatch):
     assert sample_tools._kit_crash({"kick": str(root / "Samples" / "Acoustic" / "Kick.wav")})["name"] == "Crash 16"
     assert sample_tools._kit_crash({"kick": str(root / "SILA" / "LinnDrum" / "BD_Lindrum.wav")})["name"] == "Crash_Lindrum"
     assert sample_tools._kit_crash({})["name"] != "AMBCRASH"
+
+
+def test_a_kit_built_again_replaces_the_lanes_it_names(tmp_path, monkeypatch):
+    """Live, 2026-11-14: a kit rebuilt twice left three kits' samplers on the track, so
+    every snare hit played four samples and the mix came out piercing."""
+    import soundfile as sf
+    from creaper import server  # noqa: F401
+    from creaper import sample_tools
+    snare = tmp_path / "707 Snare.wav"
+    sf.write(str(snare), _hat(), FS44)
+    calls = []
+    there = [{"index": 1, "name": "kick - 707 Kick"}, {"index": 2, "name": "snare - Bike Lock Click"},
+             {"index": 3, "name": "snare layer - Clap"}, {"index": 4, "name": "VST: ReaEQ (Cockos)"},
+             {"index": 5, "name": "Snare - 8-Bit Snare"}]
+
+    def fake_call(cmd, **kw):
+        calls.append((cmd, kw))
+        if cmd == "get_project_overview":
+            return {"tracks": [{"name": "Drums"}]}
+        if cmd == "get_track_details":
+            return {"fx": there}
+        if cmd == "build_sampler_kit":
+            return {"track": {"name": "Drums"}, "pads": [{"fx": 9, "note": p["note"]} for p in kw["pads"]]}
+        return {}
+    monkeypatch.setattr(sample_tools, "call", fake_call)
+    out = sample_tools.build_drum_kit(track="Drums", samples={"snare": str(snare)}, trim_silence=False, fill_gaps=False)
+    removed = [kw["fx"] for cmd, kw in calls if cmd == "remove_fx"]
+    assert removed == [5, 3, 2]                                  # last first; the kick and the EQ stay
+    assert out["replaced"] == ["snare - Bike Lock Click", "snare layer - Clap", "Snare - 8-Bit Snare"]
+    order = [cmd for cmd, _ in calls]
+    assert order.index("remove_fx") < order.index("build_sampler_kit")
+
+
+def test_a_sample_named_for_the_drum_comes_before_one_that_only_sounds_like_it():
+    from creaper import server  # noqa: F401
+    from creaper import sample_tools
+    assert sample_tools._name_says(["snare"], "snare") is None
+    assert sample_tools._name_says([], "snare") == "nothing"       # 'Bike Lock Click', heard as a snare
+    assert sample_tools._name_says(["snare"], "tom") == "snare"    # '707 Snare', heard as a tom
+    assert sample_tools._name_says(["closed hat"], "hat") is None
+    assert sample_tools._name_says([], "pad") is None              # not a drum lane: names aren't judged

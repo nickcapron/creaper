@@ -849,4 +849,4 @@ def test_part_fx_says_what_it_could_not_do(monkeypatch):
     _part_fx_project(monkeypatch, installed=False, returns=False)
     lead = mix_tools.add_part_fx("Lead")
     assert "couldn't be added (no plugin matches)" in lead["not_added"] and "chorus" not in lead
-    assert len(lead["no_return"]) == 2 and "auto_mix makes one" in lead["no_return"][0]
+    assert len(lead["no_return"]) == 2 and "again after it" in lead["no_return"][0]

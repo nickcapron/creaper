@@ -69,6 +69,24 @@ _OTHER_ROLE_WORDS = {
 }
 
 
+_DRUM_LANE = {"closed hat": "hat", "open hat": "hat", "hat": "hat", "hats": "hat", "hihat": "hat", "hi-hat": "hat",
+              "hh": "hat", "rim": "snare"}
+_DRUM_ROLES = {"kick", "snare", "clap", "hat", "crash", "ride", "tom", "shaker", "percussion"}
+
+
+def _name_says(roles: list[str], lane: str) -> str | None:
+    """How a sample's name stands to the drum lane asked for: None = it names that lane (or
+    the lane isn't a drum), another drum's name, or 'nothing' (matched by ear alone). Live,
+    2026-11-14: a 'Bike Lock Click' led the snares and '707 Snare' the toms."""
+    if lane not in _DRUM_ROLES:
+        return None
+    named = {_DRUM_LANE.get(r.lower(), r.lower()) for r in roles}
+    if lane in named:
+        return None
+    other = sorted(named & _DRUM_ROLES)
+    return other[0] if other else "nothing"
+
+
 def _other_role_folder(folder: str, lane: str) -> str | None:
     """The word in a sample's folder that says it's something other than lane."""
     import re
@@ -118,8 +136,7 @@ def find_samples(
         from .genres import palettes
 
         g = genres.find(style)
-        lane = {"closed hat": "hat", "open hat": "hat", "hat": "hat", "hats": "hat", "hihat": "hat", "hi-hat": "hat",
-                "hh": "hat", "rim": "snare"}.get(role.lower(), role.lower())
+        lane = _DRUM_LANE.get(role.lower(), role.lower())
         target = palettes.drum_target(g, lane)   # the genre's own, its family's, or the general one
         lofi_ok = any(w in f"{g.name} {g.family} {' '.join(g.aliases)}".lower()
                       for w in ("lo-fi", "lofi", "chiptune", "boom bap", "8-bit", "vaporwave"))
@@ -152,8 +169,16 @@ def find_samples(
             if other:
                 fit += 3.0
                 why = why + [f"its folder says {other}"]
+            named = _name_says(f.get("roles") or [], lane)
+            if named:
+                fit += 3.0 if named != "nothing" else 1.0
+                why = why + [f"its name says {named}" if named != "nothing" else
+                             f"only sounds like a {lane}: its name doesn't say what it is"]
             f["_fit"], f["_why"] = fit, why
         hits = sorted(pool, key=lambda f: f["_fit"]) + rest
+    elif role:
+        lane = _DRUM_LANE.get(role.lower(), role.lower())
+        hits = sorted(hits, key=lambda f: {None: 0, "nothing": 1}.get(_name_says(f.get("roles") or [], lane), 2))
     shown = []
     for f in hits[:max_results]:
         entry = {"path": f["path"], "name": f["name"], "folder": f["folder"], "duration_s": f.get("duration_s"),
@@ -567,6 +592,22 @@ def kit_warnings(samples: dict[str, str | list[str]], layers: dict[str, list[Lay
     return out
 
 
+def _remove_lanes(track: str | int, lanes: set[str]) -> list[str]:
+    """Removes the samplers an earlier build_drum_kit left on the track for these lanes
+    (named '<lane> - <sample>' or '<lane> layer - <sample>'), and says which. Live,
+    2026-11-14: a kit rebuilt twice played four samples on every snare hit."""
+    wanted = {lane.strip().lower() for lane in lanes}
+    old = []
+    for f in call("get_track_details", track=track).get("fx", []):
+        lane, sep, _ = str(f.get("name", "")).partition(" - ")
+        lane = lane.strip().lower()
+        if sep and (lane in wanted or (lane.endswith(" layer") and lane[:-6] in wanted)):
+            old.append(f)
+    for f in sorted(old, key=lambda f: f["index"], reverse=True):   # last first: the others keep their numbers
+        call("remove_fx", track=track, fx=f["index"])
+    return [f["name"] for f in old]
+
+
 @tool()
 def build_drum_kit(
     track: Annotated[str | int, Field(description="An empty track, or one without another instrument")],
@@ -597,8 +638,9 @@ def build_drum_kit(
     each hit (weight and snap a single sample lacks). Works with any samples, including
     the ones other instruments ship with; find_samples(role=..., style=...) picks ones
     that fit the genre. A missing crash lane and a kick with no attack are filled from
-    the library (fill_gaps). Building again on the same track adds samplers to it; to
-    swap a lane's sample later, change its sampler (get_track_details lists them by lane)."""
+    the library (fill_gaps). Building again on the same track replaces the lanes named
+    this time (their old samplers are removed, the result lists them under 'replaced')
+    and keeps the others, so one lane can be swapped by building just that lane."""
     samples = dict(samples)
     layers = {k: list(v) for k, v in (layers or {}).items()}
     added = fill_kit_gaps(samples, layers) if fill_gaps else []
@@ -646,8 +688,11 @@ def build_drum_kit(
     levels = kit_levels(pads, setup) if balance else {}
     for cfg in setup:
         cfg["gain_db"] = round(cfg["gain_db"] + levels.get(cfg["lane"], {}).get("set_db", 0.0), 1)
+    replaced: list[str] = []
     if isinstance(track, str) and not any(t["name"] == track for t in call("get_project_overview").get("tracks", [])):
         call("create_track", name=track)
+    else:
+        replaced = _remove_lanes(track, {cfg["lane"] for cfg in setup})
     result = call("build_sampler_kit", timeout=120.0, track=track, pads=pads, velocity_db=velocity_db, release_s=release_s)
     for pad, cfg in zip(result.get("pads", []), setup):
         changes = []
@@ -680,6 +725,8 @@ def build_drum_kit(
                       "varied velocities so they alternate")
     if added:
         out["added"] = added
+    if replaced:
+        out["replaced"] = replaced
     warnings = kit_warnings(samples, layers)
     if warnings:
         out["warnings"] = warnings

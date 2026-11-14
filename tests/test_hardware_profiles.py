@@ -417,6 +417,7 @@ def test_the_level_check_says_which_knob_and_how_far():
     assert "Input 2 is low (peak -25 dBFS): turn its gain up about 9 dB" in advice[1]
     assert hst.level_advice([-15.5, -16.5], 1, "microKORG") == []                   # the user's fourth round: good
     assert hst.level_advice([-13.0, -12.2], 1, "microKORG") == []                      # in the window, matched
+    assert hst.level_advice([-11.6, -12.8], 1, "microKORG") == []       # half a dB over: nobody is sent to the knob
     assert "Input 3 is 3 dB under the other" in hst.level_advice([-17.0, -14.0], 3, "x")[0]
     # Live: with the test sound at -12.6 a distorted lead printed at -5.5. -9 leaves it no room.
     assert "Input 1 is hot" in hst.level_advice([-9.0, -9.5], 1, "x")[0]

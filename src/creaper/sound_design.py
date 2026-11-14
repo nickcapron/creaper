@@ -64,6 +64,12 @@ METHOD = [
     "chord of as many notes as the part plays (voices run out), and at the song's tempo for anything synced.",
     "Match levels between the sounds of one song before judging them: louder reads as better. A sound 15 dB "
     "under the others isn't weak, it's quiet.",
+    "Measure chords as well as single notes before setting a level: four notes of a pad peak 8-12 dB over "
+    "one, so a level set on a single note clips on the chord.",
+    "A patch that measures well alone can still be the harsh part of a mix. Before a song uses it, look at "
+    "how much of its energy sits at 2-5 kHz in the register the part plays (over about 15% in a part that "
+    "isn't the lead, 25% in a lead, reads as piercing), and fix that in the patch: it is quicker than "
+    "re-recording the part after the master refuses the mix.",
     "Keep what works: save the sound with its role, register and how to play it. Write down what you "
     "measured about the synth itself (a control that isn't linear, a range that stops early) in its profile "
     "or a note, so the next patch starts from facts.",
@@ -107,13 +113,21 @@ TECHNIQUES: dict[str, str] = {
                            "straight. Tremolo is the same LFO to level; to pan it becomes auto-pan.",
     "sync": "Oscillator 2 restarted by oscillator 1: its pitch then changes the tone, not the note. Sweep "
             "osc2's pitch with an envelope or LFO for the tearing 'sync lead'; turn osc1 down so only the "
-            "synced oscillator is heard.",
+            "synced oscillator is heard. It has a register: from about A4 up, the swept harmonics all land "
+            "at 2-5 kHz and the lead pierces (measured: 30% of its energy there at G#4-A5, 14% an octave "
+            "down). Write sync lines around G3-A4, or close the filter for higher ones.",
     "ring and cross modulation": "Multiplying or frequency-modulating two oscillators makes tones that "
                                  "aren't in the harmonic series: bells, metal, clangs. Tune osc2 to a fifth, "
                                  "an octave + fourth or a non-musical interval and listen; short envelopes "
-                                 "make bells and percussion, long ones make drones.",
+                                 "make bells and percussion, long ones make drones. Smooth waves into a ring "
+                                 "modulator make a dull thud; saws make metal. Cross-modulation depth from "
+                                 "velocity turns harsh fast in chords (an electric piano's 'bark' measured "
+                                 "half its energy at 2-5 kHz): keep velocity's share small and let an "
+                                 "envelope make the clang fade before the tone.",
     "noise": "A little noise (5-15%) is breath on a flute or lead and air on a pad. A lot, through a "
-             "band-pass or resonant filter with an envelope, is wind, surf, snares, hats and risers.",
+             "band-pass or resonant filter with an envelope, is wind, surf, snares, hats and risers. A "
+             "noise layer under a pitched one shouldn't follow the keyboard: up high it turns into hiss "
+             "louder than the note.",
     "velocity": "Harder notes brighter (velocity to cutoff) sounds more alive than harder notes only louder. "
                 "Parts written by a tool carry accents in their velocities: a patch that ignores velocity "
                 "flattens them.",
@@ -129,6 +143,12 @@ TECHNIQUES: dict[str, str] = {
     "making room": "A patch is judged in the song. Pads lose low end (the bass has it) and some 2-4 kHz "
                    "(the lead and voice have it); a lead is brighter than the pad under it; two sounds in "
                    "the same octave need different attacks or brightness to be told apart.",
+    "distortion": "Drive after the filter puts back the top the filter took off: closing the cutoff on a "
+                  "distorted bass doesn't make it less fizzy (measured: no change at 2-5 kHz). Turn the drive "
+                  "off, or cut the top after the synth, in the mix.",
+    "level": "When the amp is at its top and the patch is still quiet (sines, cross-modulation and digital "
+             "waves often are), an EQ can lift it: two shelves that meet at the same frequency, both raised, "
+             "are a gain stage. Then check a chord: it must still not clip.",
 }
 
 _PLUCK_ENV = {"attack_ms": 1, "decay_ms": 220, "sustain": 0.0, "release_ms": 180}
