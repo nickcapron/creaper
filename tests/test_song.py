@@ -757,6 +757,16 @@ def test_the_mix_stage_asks_for_auto_mix_and_a_sounding_vocal(monkeypatch, tmp_p
     monkeypatch.setattr(song_tools, "_song_paths", lambda: (plan, tmp_path / "checks.json"))
     song_tools.mark_mixed(["Drums", "Bass"])
     assert json.loads(plan.read_text())["auto_mix"]["tracks"] == ["Drums", "Bass"]
+    # The buses the mix made (drum room, parallel bus) are not parts added since: only the new part is.
+    song_tools.mark_mixed(["Drums", "Bass"], ["Drum Room", "Drum Bus"])
+    marked = json.loads(plan.read_text())
+    assert marked["auto_mix"]["buses"] == ["Drum Room", "Drum Bus"]
+    now = {"tracks": [{"name": n, "fx": [], "item_count": c} for n, c in
+                      (("Drums", 4), ("Bass", 4), ("Drum Room", 0), ("Drum Bus", 0), ("Drum Bus Parallel", 0), ("Lead", 2))]}
+    ctx = song_tools._Context("disco", marked)
+    ctx.overview = now
+    rows = song_tools._mix_rows(ctx)
+    assert [r["status"] for r in rows] == ["warn"] and rows[0]["detail"].endswith("unbalanced: Lead")
     monkeypatch.setattr(song_tools, "_song_paths", lambda: None)
     song_tools.mark_mixed(["Drums"])          # no saved project: nothing to mark, no error
 

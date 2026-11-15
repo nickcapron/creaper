@@ -414,14 +414,16 @@ HAND_MIX_FX = re.compile(r"rea(eq|comp|xcomp|limit|gate)|pro-[qcl]\b|fet-76|bus 
 VOCAL_PROBE_S = 6.0     # how much of a vocal track is rendered to hear whether it has a take
 
 
-def mark_mixed(channels: list[str]) -> None:
-    """auto_mix records that it ran (and which tracks it mixed) in the song plan, when
-    there is one: finish_stage("mix") asks for it."""
+def mark_mixed(channels: list[str], buses: list[str] | None = None) -> None:
+    """auto_mix records that it ran (which tracks it mixed, and the buses and returns
+    they play into) in the song plan, when there is one: finish_stage("mix") asks for
+    it. Live, 2026-11-14: its own Drum Room and Drums Parallel were reported as 'added
+    since the auto_mix run, so unbalanced'."""
     paths = _song_paths()
     if not paths or not paths[0].exists():
         return
     with jsonstore.updating(paths[0], dict, indent=2) as data:
-        data["auto_mix"] = {"at": time.strftime("%Y-%m-%d %H:%M"), "tracks": channels}
+        data["auto_mix"] = {"at": time.strftime("%Y-%m-%d %H:%M"), "tracks": channels, **({"buses": buses} if buses else {})}
 
 
 def mark_mastered(asked_lufs: float, target_lufs: float, lufs: float) -> None:
@@ -465,7 +467,9 @@ def _mix_rows(ctx: _Context) -> list[dict]:
             + (f"; the hand-set effects on {', '.join(by_hand[:6])} are what it does, from the measured mix" if by_hand else "")
             + "; then refine what measure_tracks still flags"))
     elif mark.get("tracks"):
-        unmixed = [t["name"] for t in tracks if t["name"] not in mark["tracks"] and not t.get("mute")
+        known = set(mark["tracks"]) | set(mark.get("buses") or [])
+        unmixed = [t["name"] for t in tracks if t["name"] not in known and not t.get("mute")
+                   and not (t["name"].endswith((" Parallel", " Duck")) and not t.get("item_count"))
                    and not str(t.get("name", "")).lower().startswith(("reverb", "delay", "fx "))]
         if unmixed:
             rows.append(songmap.row(

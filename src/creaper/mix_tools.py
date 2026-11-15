@@ -1485,6 +1485,19 @@ def _reverb_return(bpm: float = 120.0, family: str | None = None) -> str:
     return "Reverb"
 
 
+def _fed_tracks() -> list[str]:
+    """Tracks with no items of their own that other tracks play into: submix buses, the
+    drum room, the parallel bus, effects returns. The mix set them up (or mixed their
+    sources); they are not parts waiting for a balance."""
+    empty = {t["name"] for t in call("get_project_overview")["tracks"] if not t.get("item_count")}
+    fed = set()
+    for r in call("get_routing")["tracks"]:
+        for snd in r.get("sends") or []:
+            if not snd.get("note") and snd.get("to") in empty:
+                fed.add(snd["to"])
+    return sorted(fed)
+
+
 @tool(annotations=DESTRUCTIVE)
 def auto_mix(
     style: Annotated[str | None, Field(description="Genre (get_genre_profile) to balance for, e.g. 'house', 'pop'")] = None,
@@ -1718,7 +1731,7 @@ def auto_mix(
                              sidechain, glue, section_moves)
     try:   # finish_stage("mix") asks for this run
         from . import song_tools
-        song_tools.mark_mixed([a["name"] for a in plan["channels"] if not a.get("skipped")])
+        song_tools.mark_mixed([a["name"] for a in plan["channels"] if not a.get("skipped")], _fed_tracks())
     except Exception as e:  # noqa: BLE001 - the mix stands whether or not the plan could be marked
         report.setdefault("warnings", []).append(f"song plan not marked: {e}")
     return report
