@@ -140,8 +140,8 @@ Sounds:
 - Saved sounds tagged for another project are its anchors, not this song's palette.
 - Prefer the user's plugins (list_installed_fx) over REAPER's. get_plugin_profile explains plugins creaper knows; read it before
   configuring one. save_note what you learn about a plugin's controls (topic "plugin").
-- Drums: a real drum instrument (find_notes, the catalog's "drum kit" results), not
-  ReaSynDr; skip plugins marked hardware or realtime_only unless the user says the device
+- Drums: a real drum instrument (find_notes, catalog "drum kit" results, or
+  build_drum_kit(style=)), not ReaSynDr; skip plugins marked hardware or realtime_only unless the user says the device
   is connected. Patterns follow the kit's note names, a saved or built-in drum map, then
   General MIDI; when the layout is unknown run map_drum_kit.
 - Hardware synths: create_hardware_track (parts); any patch, any synth: sound_design_guide first.

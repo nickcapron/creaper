@@ -802,7 +802,8 @@ def build_song(
         "tracks": {p: t["name"] + (" (new)" if t.get("created") else "") for p, t in tracks.items()},
         "song_map": {"findings": mapped["findings"],
                      "density": {s["section"]: s["notes_per_bar"] for s in mapped["sections"]}},
-        "next": ("Listen, then: a sound for each track in needs_sound (audition_sounds), add_transitions(style), "
+        "next": ("Listen, then: a sound for each track in needs_sound (audition_sounds; for Drums from the user's "
+                 "samples, build_drum_kit(track, style=<genre>) picks a matched kit), add_transitions(style), "
                  "write_automation into the peaks, auto_mix(style), check_song. Re-write one section's part with "
                  "its tool (a new seed) rather than copying another section."),
     }

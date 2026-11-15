@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 
 import drum_synth as d
 import numpy as np
@@ -634,3 +635,94 @@ def test_a_sample_named_for_the_drum_comes_before_one_that_only_sounds_like_it()
     assert sample_tools._name_says(["snare"], "tom") == "snare"    # '707 Snare', heard as a tom
     assert sample_tools._name_says(["closed hat"], "hat") is None
     assert sample_tools._name_says([], "pad") is None              # not a drum lane: names aren't judged
+
+
+class _KitLibrary:
+    """A sample library as the kit chooser sees it: files with what was heard in them."""
+    def __init__(self, tmp_path):
+        import soundfile as sf
+        from creaper import samplelib
+        self.files = []
+
+        def add(name, folder, roles, found_as=None, **heard):
+            path = tmp_path / folder / f"{name}.wav"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            sf.write(str(path), _kick() if "kick" in roles else _hat(), FS44)
+            self.files.append({"path": str(path), "name": name, "folder": str(path.parent), "roles": roles,
+                               "found_as": found_as or roles,
+                               "analysis": {"v": samplelib.ANALYSIS_VERSION, "kind": "one-shot", "sub_share": 0.0,
+                                            "decay_s": 0.2, "brightness_hz": 3000, "punch_db": 6.0, **heard}})
+        m = "Machines"
+        add("707 Kick", m, ["kick"], sub_share=0.9)
+        add("707 Snare", m, ["snare"], found_as=["snare", "tom"])           # heard as a tom too
+        add("707 Closed Hihat", m, ["closed hat"], decay_s=0.05, brightness_hz=6000)
+        add("707 Open Hihat", m, ["open hat"], found_as=["open hat", "closed hat"], decay_s=0.6, brightness_hz=6000)
+        add("909 Kick", m, ["kick"], sub_share=0.9, punch_db=-1.0)          # no attack: a worse fit
+        add("909 Snare", m, ["snare"])
+        add("909 Closed Hihat", m, ["closed hat"], decay_s=0.05, brightness_hz=6000)
+        add("606 High Tom", m, ["tom"])
+        add("606 Low Tom", m, ["tom"])
+        add("Bike Lock Click", "Foley", [], found_as=["snare"])           # only sounds like a snare
+        add("Lonely Kick", "Odd", ["kick"], sub_share=0.9)                  # a folder with no snare or hat
+
+    def search(self, text=None, role=None, kind=None, *a, **k):
+        return [f for f in self.files if role is None or role in f["found_as"]]
+
+    def remember_many(self, analyses):
+        pass
+
+    def instruments(self, text=None, role=None):
+        return [{"name": "Black Pearl", "path": "C:/kits/black pearl.sfz"}]
+
+
+def test_a_kit_is_chosen_whole_for_the_genre(tmp_path, monkeypatch):
+    """Paper Satellites, 2026-11-14: a kit picked lane by lane from search results had a
+    bike-lock click for a snare, a snare for a tom, and took three tries."""
+    from creaper import server  # noqa: F401
+    from creaper import sample_tools
+    monkeypatch.setattr(sample_tools, "library", _KitLibrary(tmp_path))
+    kit = sample_tools.choose_kit("new wave")
+    names = {lane: [Path(x).stem for x in (v if isinstance(v, list) else [v])] for lane, v in kit["samples"].items()}
+    assert kit["kit"].startswith("707 (") and kit["fit"] <= 0.2
+    assert names["kick"] == ["707 Kick"] and names["snare"] == ["707 Snare"]
+    assert names["closed hat"] == ["707 Closed Hihat"] and names["open hat"] == ["707 Open Hihat"]
+    assert names["low tom"] == ["606 Low Tom"]                              # borrowed from its folder, the low one
+    assert kit["borrowed_from_its_folder"] == ["low tom: 606 Low Tom"]
+    assert "acoustic_kits" not in kit                                       # new wave is machines, whatever its family
+    second = sample_tools.choose_kit("new wave", choice=2)
+    assert second["kit"].startswith("909 (") and second["fit"] > kit["fit"]
+    assert kit["other_kits"][0].startswith("909 (")
+    rock = sample_tools.choose_kit("rock")
+    assert rock["acoustic_kits"] == [{"name": "Black Pearl", "sfz_path": "C:/kits/black pearl.sfz"}]
+    assert "build_sampled_instrument" in rock["acoustic_note"]
+
+
+def test_build_drum_kit_with_a_style_builds_the_chosen_kit(tmp_path, monkeypatch):
+    from creaper import server  # noqa: F401
+    from creaper import sample_tools
+    monkeypatch.setattr(sample_tools, "library", _KitLibrary(tmp_path))
+    calls = []
+
+    def fake_call(cmd, **kw):
+        calls.append((cmd, kw))
+        if cmd == "build_sampler_kit":
+            return {"track": {"name": "Drums"}, "pads": [{"fx": i + 1, "note": p["note"]} for i, p in enumerate(kw["pads"])]}
+        return {}
+    monkeypatch.setattr(sample_tools, "call", fake_call)
+    out = sample_tools.build_drum_kit(track="Drums", style="new wave", trim_silence=False)
+    pads = next(kw for cmd, kw in calls if cmd == "build_sampler_kit")["pads"]
+    assert [p["name"] for p in pads] == ["kick - 707 Kick", "snare - 707 Snare", "closed hat - 707 Closed Hihat",
+                                         "open hat - 707 Open Hihat", "low tom - 606 Low Tom"]
+    assert out["chosen"]["kit"].startswith("707 (") and out["chosen"]["other_kits"]
+    with pytest.raises(ValueError, match="style"):
+        sample_tools.build_drum_kit(track="Drums")
+
+
+def test_what_a_drum_samples_name_says_besides_its_drum():
+    from creaper import server  # noqa: F401
+    from creaper import sample_tools
+    assert sample_tools._kit_family("707 Snare") == "707"
+    assert sample_tools._kit_family("BIA 2-Drums-Snare") == "bia 2"
+    assert sample_tools._kit_family("SNAREA12") is None and sample_tools._kit_family("HHCLOSE1") is None
+    assert sample_tools._kit_root(r"C:\Packs\Hits\02. Snare") == r"C:\Packs\Hits"
+    assert sample_tools._kit_root(r"C:\Arturia\Emulator II V\Factory") == r"C:\Arturia\Emulator II V\Factory"

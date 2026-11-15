@@ -592,6 +592,168 @@ def kit_warnings(samples: dict[str, str | list[str]], layers: dict[str, list[Lay
     return out
 
 
+# ------------------------------------------------------------- choosing a kit
+
+# The lanes a chosen kit fills: (lane, the role to search, how many samples). A family
+# must have the first three to count as a kit.
+KIT_LANES = (("kick", "kick", 1), ("snare", "snare", 2), ("closed hat", "closed hat", 2), ("open hat", "open hat", 1),
+             ("clap", "clap", 1), ("low tom", "tom", 1), ("crash", "crash", 1))
+KIT_NEEDS = ("kick", "snare", "closed hat")
+KIT_PILE = 60             # more named samples than this in one lane: a folder of hits, not one kit
+# Styles a band plays: a sampled acoustic kit (.sfz) suits them better than a drum machine's hits,
+# unless the style's name says machines.
+KIT_ACOUSTIC_FAMILIES = {"rock", "blues", "country and folk", "jazz", "metal and punk", "funk and gospel"}
+KIT_MACHINE_WORDS = ("wave", "synth", "electro", "industrial", "disco", "dance")
+KIT_PILE_COST = 0.5
+KIT_MISSING_COST = 0.1    # per lane (open hat, tom, crash) the family can't fill itself: a neighbour's is borrowed
+KIT_FOLDER_COST = 0.15    # a whole folder as a kit: its samples may come from several machines
+KIT_LISTEN_PER_LANE = 6   # samples of a family's lane analysed when not yet heard
+KIT_LISTEN_MOST = 400
+_KIT_STEMS = ("kick", "snare", "snr", "hat", "hh", "clap", "tom", "crash", "cymb", "ride", "rim", "drum", "perc")
+_KIT_WORDS = {"bd", "sd", "oh", "ch", "low", "mid", "high", "hi", "lo", "floor", "closed", "close", "open", "long",
+              "short", "soft", "hard", "loud", "one", "shot"}
+
+
+def _kit_family(name: str) -> str | None:
+    """What a drum sample's name says besides which drum it is: '707 Snare' -> '707',
+    'BIA 2-Drums-Snare' -> 'bia 2', 'SNARE12' -> None. Samples that share it (in one
+    folder) were made to be played together."""
+    words = samplelib._words(name)
+    drum = [w in _KIT_WORDS or any(s in w for s in _KIT_STEMS) for w in words]
+    if True not in drum:
+        return None
+    first = drum.index(True)
+    kept = words[:first] + [w for w, d in zip(words[first:], drum[first:]) if not d and len(w) > 1 and not w.isdigit()]
+    return " ".join(kept) or None
+
+
+def _kit_root(folder: str) -> str:
+    """The folder a kit lives in: a leaf named for one drum ('02. Snare') is stepped out of."""
+    parts = re.split(r"[\\/]", folder.rstrip("\\/"))
+    leaf = " ".join(samplelib._words(parts[-1])) if parts else ""
+    if len(parts) > 1 and any(s in leaf for s in _KIT_STEMS):
+        parts = parts[:-1]
+    return "\\".join(parts)
+
+
+def choose_kit(style: str, choice: int = 1) -> dict:
+    """A whole drum kit for a genre from the sample library: samples that belong together
+    (one machine's hits in a folder, or one kit's folder), ranked by how well the kick,
+    snare and hat measure against the genre's drum targets. Every sample is named for its
+    lane. choice 2, 3... are the next-best kits. Live, 2026-11-14: a kit picked lane by
+    lane from search results had a bike-lock click for a snare and a snare for a tom."""
+    from . import genres
+    from .genres import palettes
+
+    g = genres.find(style)
+    lofi_ok = any(w in f"{g.name} {g.family} {' '.join(g.aliases)}".lower()
+                  for w in ("lo-fi", "lofi", "chiptune", "boom bap", "8-bit", "vaporwave"))
+    families: dict[tuple[str, str | None], dict[str, list[dict]]] = {}
+    for lane, role, _ in KIT_LANES:
+        norm = _DRUM_LANE.get(role, role)
+        for f in library.search(role=role, kind="one-shot"):
+            roles = f.get("roles") or []
+            if _name_says(roles, norm) is not None or _other_role_folder(f.get("folder") or "", norm):
+                continue
+            other = {"closed hat": "open hat", "open hat": "closed hat"}.get(lane)
+            if other and (other in roles or other.split()[0] in samplelib._words(f["name"])) and lane not in roles:
+                continue        # 'Open HiHat' is a hat, and not the closed one
+            root, token = _kit_root(f.get("folder") or ""), _kit_family(f["name"])
+            for key in ([(root, token)] if token else []) + [(root, None)]:
+                families.setdefault(key, {}).setdefault(lane, []).append(f)
+    whole = {k: v for k, v in families.items() if all(lane in v for lane in KIT_NEEDS)}
+    if not whole:
+        raise ValueError("the sample library has no folder or drum machine with a kick, a snare and a closed hat named as "
+                         "such: give build_drum_kit the samples lane by lane (find_samples(role=...) lists them)")
+    fresh: dict[str, dict] = {}
+
+    def heard(f: dict) -> dict | None:
+        a = f.get("analysis") or {}
+        if a.get("v") != samplelib.ANALYSIS_VERSION:
+            if len(fresh) >= KIT_LISTEN_MOST:
+                return None
+            try:
+                a = f["analysis"] = fresh[f["path"]] = samplelib.analyze(f["path"])
+            except Exception:  # noqa: BLE001
+                return None
+        return a if a.get("kind") == "one-shot" else None
+
+    def lane_fits(lane: str, role: str, files: list[dict]) -> list[tuple[float, list[str], dict]]:
+        target = None if lane == "open hat" else palettes.drum_target(g, _DRUM_LANE.get(role, role))
+        out = []
+        for f in files[:KIT_LISTEN_PER_LANE]:
+            a = heard(f)
+            if a is None:
+                continue
+            fit, why = samplelib.drum_fit(a, target) if target is not None and "sub_share" in a else (0.0, [])
+            if a.get("lofi") and not lofi_ok:
+                fit, why = fit + 2.0, why + ["lo-fi file"]
+            if lane == "crash" and _crash_fit(a) is None:
+                continue
+            out.append((fit, why, f))
+        low = lambda x: lane == "low tom" and not any(w in samplelib._words(x[2]["name"]) for w in ("low", "lo", "floor"))
+        return sorted(out, key=lambda x: (x[0], low(x)))
+
+    ranked = []
+    for key, lanes in whole.items():
+        fits = {lane: lane_fits(lane, role, lanes[lane]) for lane, role, _ in KIT_LANES if lane in lanes}
+        if any(not fits.get(lane) for lane in KIT_NEEDS):
+            continue
+        score = sum(fits[lane][0][0] for lane in KIT_NEEDS)
+        score += KIT_MISSING_COST * sum(1 for lane in ("open hat", "low tom", "crash") if not fits.get(lane))
+        if key[1] is None:
+            best = {_kit_family(fits[lane][0][2]["name"]) for lane in KIT_NEEDS}
+            if len(best) == 1 and None not in best:
+                continue        # the folder's best kit is one machine's: that machine is already a kit of its own
+            score += KIT_FOLDER_COST + (KIT_PILE_COST if max(len(lanes[lane]) for lane in KIT_NEEDS) > KIT_PILE else 0)
+        ranked.append((round(score, 2), key[1] is None, str(key), key, fits))
+    library.remember_many(fresh)
+    if not ranked:
+        raise ValueError("none of the library's kits could be measured: give build_drum_kit the samples lane by lane")
+    ranked.sort(key=lambda r: r[:3])
+    score, _, _, key, fits = ranked[min(max(choice, 1), len(ranked)) - 1]
+
+    def label(k: tuple[str, str | None]) -> str:
+        parts = [x for x in re.split(r"[\\/]", k[0]) if x][-3:]
+        where = " / ".join(x for i, x in enumerate(parts) if i == 0 or x != parts[i - 1])
+        return f"{k[1]} ({where})" if k[1] else where
+
+    borrowed = []
+    if key[1] is not None:
+        # What the machine has no sample for comes from its folder: a neighbour's tom or open hat.
+        folder = families.get((key[0], None)) or {}
+        for lane, role, _ in KIT_LANES:
+            if lane in ("open hat", "low tom", "crash") and not fits.get(lane) and folder.get(lane):
+                got = lane_fits(lane, role, folder[lane])
+                if got:
+                    fits[lane] = got[:1]
+                    borrowed.append(f"{lane}: {got[0][2]['name']}")
+        library.remember_many(fresh)
+
+    samples: dict[str, str | list[str]] = {}
+    off: dict[str, list[str]] = {}
+    for lane, _, n in KIT_LANES:
+        got = fits.get(lane) or []
+        if not got:
+            continue
+        keep = [x for x in got if x[0] <= got[0][0] + 1.0][:n]
+        samples[lane] = [x[2]["path"] for x in keep] if len(keep) > 1 else keep[0][2]["path"]
+        if keep[0][1]:
+            off[lane] = keep[0][1]
+    acoustic = []
+    if g.family in KIT_ACOUSTIC_FAMILIES and not any(w in g.name.lower() for w in KIT_MACHINE_WORDS):
+        acoustic = [{"name": i.get("name"), "sfz_path": i.get("path")} for i in library.instruments(role="drums")[:4]]
+    return {"kit": label(key), "style": g.name, "samples": samples, "fit": score,
+            **({"acoustic_kits": acoustic, "acoustic_note": (
+                f"{g.name} is usually played on a real kit, and the library has sampled ones: "
+                "build_sampled_instrument(track, sfz_path=...) with one of acoustic_kits sounds like a band. This "
+                "kit is drum-machine hits: right only for a programmed sound.")} if acoustic else {}),
+            **({"off": off} if off else {}), **({"borrowed_from_its_folder": borrowed} if borrowed else {}),
+            "other_kits": [label(r[3]) for r in ranked if r[3] != key][:4],
+            "note": "fit 0 = kick, snare and hat all measure inside the style's drum targets; choice=2, 3... build the "
+                    "other kits"}
+
+
 def _remove_lanes(track: str | int, lanes: set[str]) -> list[str]:
     """Removes the samplers an earlier build_drum_kit left on the track for these lanes
     (named '<lane> - <sample>' or '<lane> layer - <sample>'), and says which. Live,
@@ -611,12 +773,12 @@ def _remove_lanes(track: str | int, lanes: set[str]) -> list[str]:
 @tool()
 def build_drum_kit(
     track: Annotated[str | int, Field(description="An empty track, or one without another instrument")],
-    samples: Annotated[dict[str, str | list[str]], Field(description=(
-        "Drum lane -> sample file, or a list of 2-4 alternatives for the lane (velocity splits: the quietest "
+    samples: Annotated[dict[str, str | list[str]] | None, Field(description=(
+        "Leave out (with style) and creaper picks a matched kit from the library. Or: drum lane -> sample file, or a list of 2-4 alternatives for the lane (velocity splits: the quietest "
         "sample on the softest hits, so a humanised part alternates between them and accents hit harder), e.g. "
         "{'kick': 'C:/.../kick1.wav', 'snare': ['.../snare a.wav', '.../snare b.wav'], 'closed hat': '...'}. "
         "Lanes: kick, snare, clap, rim, closed hat, pedal hat, open hat, low/mid/high tom, crash, ride, "
-        "tambourine, cowbell, shaker, or any other name (placed from C4 up)"))],
+        "tambourine, cowbell, shaker, or any other name (placed from C4 up)"))] = None,
     layers: Annotated[dict[str, list[Layer]] | None, Field(description=(
         "Extra samples that play with every hit of a lane, at their own level: a click or a sub under the kick, "
         "a clap on the snare, e.g. {'kick': [{'path': '.../click.wav', 'gain_db': -8}]}"))] = None,
@@ -630,17 +792,28 @@ def build_drum_kit(
         "Set each lane's level from its sample's measured hit level so the kit comes out balanced (snare 2 dB "
         "under the kick, hats 10, cymbals 8: the targets measure_tracks judges a kit by) and trimmed to peak at "
         "-6 dBFS. False leaves every sampler at 0 dB, as the files are"))] = True,
+    style: Annotated[str | None, Field(description=(
+        "Without samples: the song's genre. creaper picks a whole kit that belongs together (one drum machine's "
+        "hits, or one kit's folder) and fits the genre's drums; the result names it and the next-best kits"))] = None,
+    choice: Annotated[int, Field(ge=1, le=20, description="With style: 1 = the best-fitting kit, 2 = the next, ...")] = 1,
 ) -> dict:
     """Builds a drum kit from sample files in REAPER's own sampler (ReaSamplOmatic5000
     on the General MIDI keys), so drum patterns and genre grooves land on the right
     sounds and every sample can be swapped by name later. A lane can have alternatives
     split by velocity (no machine-gun repeats, real dynamics) and layers that play with
     each hit (weight and snap a single sample lacks). Works with any samples, including
-    the ones other instruments ship with; find_samples(role=..., style=...) picks ones
-    that fit the genre. A missing crash lane and a kick with no attack are filled from
+    the ones other instruments ship with. The quick way: style=<genre> without samples,
+    and creaper picks a kit whose samples belong together and fit the genre (choice=2
+    for the next one). By hand, find_samples(role=..., style=...) lists samples per lane. A missing crash lane and a kick with no attack are filled from
     the library (fill_gaps). Building again on the same track replaces the lanes named
     this time (their old samplers are removed, the result lists them under 'replaced')
     and keeps the others, so one lane can be swapped by building just that lane."""
+    chosen = None
+    if samples is None:
+        if not style:
+            raise ValueError("give samples (lane -> file), or style and creaper picks a matched kit for that genre")
+        chosen = choose_kit(style, choice)
+        samples = chosen["samples"]
     samples = dict(samples)
     layers = {k: list(v) for k, v in (layers or {}).items()}
     added = fill_kit_gaps(samples, layers) if fill_gaps else []
@@ -723,6 +896,9 @@ def build_drum_kit(
     if any(len(v["samples"]) > 1 for v in kit.values()):
         out["tip"] = ("lanes with alternatives switch sample by velocity: give the part a feel (apply_feel) or "
                       "varied velocities so they alternate")
+    if chosen:
+        out["chosen"] = {k: chosen[k] for k in ("kit", "style", "fit", "off", "borrowed_from_its_folder", "other_kits",
+                                                "note", "acoustic_kits", "acoustic_note") if k in chosen}
     if added:
         out["added"] = added
     if replaced:
