@@ -257,7 +257,7 @@ def test_every_recipe_builds_and_says_what_it_is_based_on():
     assert {"bass", "lead", "pad", "chords", "arp", "solo"} <= roles
     for recipe in mk.RECIPES.values():
         if recipe.get("role"):
-            assert len(recipe["range"]) == 2 and recipe["voices"] in (1, 4)
+            assert len(recipe["range"]) == 2 and recipe["voices"] in (1, 2, 4)   # 2: a layer halves the voices
 
 
 def test_a_sound_says_when_it_does_not_fit_the_part():
@@ -808,3 +808,18 @@ def test_the_guide_gives_a_synths_own_values_and_they_load(korg):
     assert now["timbre1"]["distortion"] == "on" and now["timbre1"]["trigger_mode"] == "single"
     hw.save_hardware("Box", midi_output="UM-ONE", audio_input=1)                 # a synth creaper has no profile for
     assert "no profile" in hst.sound_design_guide("pluck", synth="Box")["on_this_synth"]
+
+
+def test_the_programs_designed_on_the_synth_are_recipes_with_their_lessons():
+    """2026-11-14: sixteen programs made, measured and used in a song on the user's microKORG."""
+    for name in ("glass choir", "rust bell", "tear lead", "clockwork", "sub terra", "monsoon", "tin toy", "wobbler",
+                 "iron gong", "brass halo", "acidic", "seance", "shutter", "velvet ep", "morse", "vortex"):
+        assert mk.RECIPES[name]["kind"] == "song" and mk.RECIPES[name]["role"]
+    layer = mk.decode_program(mk.build(mk.RECIPES["monsoon"]))
+    assert layer["voice_mode"] == "layer" and mk.RECIPES["monsoon"]["voices"] == 2
+    assert mk.RECIPES["monsoon"]["timbre2"]["filter_kbd_track"] == 0      # the rain doesn't follow the keys
+    assert mk.RECIPES["tear lead"]["range"] == ["C3", "A4"]               # a sync lead pierces above that
+    high = [{"pitch": 81, "start": i, "length": 0.5} for i in range(8)]
+    assert "above where this sound works" in mk.part_fit(mk.RECIPES["tear lead"], high)[0]
+    # The four recipes that measured 5-8 dB over the rest are brought down.
+    assert mk.RECIPES["ringing filter note"]["params"]["amp_level"] < mk.RECIPES["sci-fi drone"]["params"]["amp_level"] < 127

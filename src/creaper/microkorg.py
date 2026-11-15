@@ -618,6 +618,12 @@ def describe() -> dict:
 
 # ----------------------------------------------------------------- recipes
 
+# Levels: measured 2026-11-14 on one C4 with the interface set so the level test sound peaks at -11 dBFS,
+# the recipes ran from -26 to -8 dBFS. The four loudest (ringing filter note, explosion, noise helicopter,
+# sci-fi drone) carry an amp_level that brings them to about -14; amp_level is linear (127 -> 55 measured
+# as -8 dB). The quiet ones are left: most are chord sounds (four notes add 8-12 dB) or effects that are
+# exported one at a time.
+
 # Starting points, each a set of parameters over init_program. They're written from how
 # the sounds are described in print (sources in notes/hardware/microkorg-artist-sounds.md)
 # and from how the synth works; none is a copy of a Korg program. Audition and tune them.
@@ -709,7 +715,7 @@ RECIPES: dict[str, dict] = {
         "kind": "artist", "style_of": "The Killers, \"Jenny Was a Friend of Mine\" helicopter noise",
         "evidence": "Keyboard (Oct 2005): white noise with a triangle LFO on the filter cutoff.",
         "play": "Hold any note; lfo1_freq sets the rotor speed.",
-        "params": {"osc1_level": 0, "noise_level": 127, "filter_type": "12lpf", "cutoff": 40, "resonance": 35,
+        "params": {"amp_level": 85, "osc1_level": 0, "noise_level": 127, "filter_type": "12lpf", "cutoff": 40, "resonance": 35,
                    "lfo1_wave": "triangle", "lfo1_freq": 60, "patch1_source": "lfo1", "patch1_dest": "cutoff",
                    "patch1_int": 50, "eg2_attack": 40, "eg2_release": 70},
     },
@@ -721,7 +727,7 @@ RECIPES: dict[str, dict] = {
         # exactly 1:1, and at cutoff 24 the ringing filter sits on the played note (3 cents flat);
         # every 12 more is an octave up, and above about 7 kHz it stops following. At 24 the ring
         # takes a second to build; at 36 with the noise full up it speaks in about 0.1 s.
-        "params": {"osc1_level": 0, "noise_level": 127, "cutoff": 36, "resonance": 127, "filter_kbd_track": 48,
+        "params": {"amp_level": 61, "osc1_level": 0, "noise_level": 127, "cutoff": 36, "resonance": 127, "filter_kbd_track": 48,
                    "eg2_attack": 20, "eg2_release": 80, "delay_depth": 40},
     },
     "sync scream": {
@@ -777,7 +783,7 @@ RECIPES: dict[str, dict] = {
     "explosion": {
         "kind": "sfx", "play": "One low note (C1-C2), held 0.3 s; the tail rings on. Longer: raise eg1_decay and "
                                 "eg2_release together.",
-        "params": {"osc1_wave": "noise", "osc1_ctrl1": 127, "noise_level": 127, "cutoff": 15, "resonance": 20,
+        "params": {"amp_level": 85, "osc1_wave": "noise", "osc1_ctrl1": 127, "noise_level": 127, "cutoff": 15, "resonance": 20,
                    "filter_eg_int": 63, "eg1_decay": 85, "eg1_sustain": 0, "eg1_release": 85, "eg2_decay": 95,
                    "eg2_sustain": 0, "eg2_release": 95, "distortion": "on", "eq_low_freq": 4, "eq_low_gain": 9,
                    "delay_depth": 20, "delay_time": 60},
@@ -792,7 +798,7 @@ RECIPES: dict[str, dict] = {
     "sci-fi drone": {
         "kind": "sfx", "play": "Hold a low fifth (C2 G2) for the whole loop; it moves slowly by itself. For a "
                                 "seamless loop record at least 20 s.",
-        "params": {"voice_mode": "layer", "osc2_mod": "ring", "osc2_level": 90, "osc2_semitone": 7, "osc2_tune": 9,
+        "params": {"amp_level": 94, "voice_mode": "layer", "osc2_mod": "ring", "osc2_level": 90, "osc2_semitone": 7, "osc2_tune": 9,
                    "noise_level": 15, "cutoff": 45, "resonance": 70, "lfo2_wave": "sine", "lfo2_freq": 8,
                    "patch2_source": "lfo2", "patch2_dest": "cutoff", "patch2_int": 28, "lfo1_wave": "s/h",
                    "lfo1_freq": 12, "patch1_source": "lfo1", "patch1_dest": "pan", "patch1_int": 40,
@@ -832,6 +838,226 @@ RECIPES: dict[str, dict] = {
                                 "makes it bigger and darker, +1/+2 smaller.",
         "params": {"voice_mode": "vocoder", "assign_mode": "poly", "osc1_wave": "saw", "noise_level": 15,
                    "hpf_level": 50, "resonance": 40, "formant_shift": "-1", "direct_level": 0, "eg2_release": 15},
+    },
+    # ---- sixteen programs designed and measured on a microKORG, 2026-11-14 (not Korg's, not anyone's record):
+    # each leans on one thing the synth does. Levels were matched by ear of the meter: single notes and chords.
+    # tear lead, sub terra, rust bell and velvet ep were darkened after a mix with them measured harsh.
+    "glass choir": {
+        "kind": "song", "role": "pad", "range": ["A2", "C6"], "voices": 4,
+        "play": "A glassy choir pad from the vox oscillator: the vowel drifts on a slow LFO, the mod "
+                "wheel opens it up. Held chords of up to 4 notes, A2-C6; it swells in over half a "
+                "second.",
+        "params": {"assign_mode": "poly", "osc1_wave": "vox", "osc1_ctrl1": 48, "osc2_wave": "triangle",
+                   "osc2_semitone": 12, "osc2_level": 70, "osc2_tune": 4, "filter_type": "12lpf", "cutoff": 100,
+                   "resonance": 12, "filter_kbd_track": 20, "eg2_attack": 58, "eg2_decay": 90, "eg2_sustain": 115,
+                   "eg2_release": 72, "lfo1_wave": "triangle", "lfo1_freq": 5, "patch1_source": "lfo1", "patch1_dest":
+                   "osc1 ctrl1", "patch1_int": 28, "patch2_source": "mod wheel", "patch2_dest": "cutoff",
+                   "patch2_int": 35, "patch4_source": "velocity", "patch4_dest": "amp", "patch4_int": 15, "mod_type":
+                   "ensemble", "mod_depth": 85, "mod_speed": 18, "delay_sync": "on", "delay_division": "1/4",
+                   "delay_type": "cross", "delay_depth": 35, "eq_high_freq": 0, "eq_high_gain": 5, "eq_low_freq": 29,
+                   "eq_low_gain": 0, "amp_level": 100},
+    },
+    "rust bell": {
+        "kind": "song", "role": "keys", "range": ["C3", "C6"], "voices": 4,
+        "play": "A metallic bell from cross-modulation (the microKORG's FM): harder notes clang more, "
+                "and the clang fades before the tone. Melodies and sparse chords, C3-C6.",
+        "params": {"assign_mode": "poly", "osc1_wave": "sine", "osc1_ctrl1": 30, "osc2_wave": "triangle",
+                   "osc2_semitone": 19, "osc2_level": 55, "cutoff": 96, "filter_kbd_track": 30, "eg1_attack": 0,
+                   "eg1_decay": 52, "eg1_sustain": 0, "eg1_release": 52, "eg2_attack": 0, "eg2_decay": 88,
+                   "eg2_sustain": 0, "eg2_release": 78, "patch1_source": "eg1", "patch1_dest": "osc1 ctrl1",
+                   "patch1_int": 30, "patch2_source": "velocity", "patch2_dest": "osc1 ctrl1", "patch2_int": 25,
+                   "patch4_source": "velocity", "patch4_dest": "amp", "patch4_int": 12, "eq_high_freq": 0,
+                   "eq_high_gain": 2, "eq_low_freq": 29, "eq_low_gain": 6, "patch3_source": "lfo2", "patch3_dest":
+                   "pan", "patch3_int": 20, "lfo2_freq": 30, "delay_sync": "on", "delay_division": "3/16",
+                   "delay_type": "cross", "delay_depth": 40, "mod_type": "chorus/flanger", "mod_depth": 20,
+                   "mod_speed": 10},
+    },
+    "tear lead": {
+        "kind": "song", "role": "lead", "range": ["C3", "A4"], "voices": 1,
+        "play": "A tearing sync lead: each note opens with a sweep, and the mod wheel pulls the tear "
+                "by hand. Mono legato lines, C3-A4: an octave higher it pierces (measured in a mix).",
+        "params": {"assign_mode": "unison", "unison_detune": 7, "trigger_mode": "single", "portamento": 14,
+                   "osc1_wave": "saw", "osc1_level": 70, "osc2_wave": "saw", "osc2_mod": "sync", "osc2_semitone": 7,
+                   "osc2_level": 127, "cutoff": 88, "resonance": 10, "filter_kbd_track": 25, "eg1_attack": 0,
+                   "eg1_decay": 58, "eg1_sustain": 20, "eg1_release": 30, "eg2_decay": 80, "eg2_sustain": 110,
+                   "eg2_release": 28, "patch1_source": "eg1", "patch1_dest": "osc2 pitch", "patch1_int": 38,
+                   "patch2_source": "mod wheel", "patch2_dest": "osc2 pitch", "patch2_int": 45, "patch3_source":
+                   "lfo2", "patch3_dest": "pitch", "patch3_int": 0, "delay_sync": "on", "delay_division": "3/16",
+                   "delay_depth": 38, "delay_type": "stereo", "mod_type": "chorus/flanger", "mod_depth": 25,
+                   "mod_speed": 14},
+    },
+    "clockwork": {
+        "kind": "song", "role": "arp", "range": ["C3", "C5"], "voices": 4,
+        "play": "A held chord becomes a two-octave sequence with rests; a tempo-locked random LFO "
+                "gives every step its own brightness and place in the stereo field. Hold 3 or 4 "
+                "notes, C3-C5.",
+        "params": {"assign_mode": "poly", "osc1_wave": "pulse", "osc1_ctrl1": 38, "osc2_wave": "square",
+                   "osc2_semitone": 12, "osc2_level": 60, "osc2_tune": 4, "filter_type": "12lpf", "cutoff": 52,
+                   "resonance": 45, "filter_eg_int": 30, "eg1_decay": 38, "eg1_sustain": 0, "eg1_release": 30,
+                   "eg2_decay": 52, "eg2_sustain": 0, "eg2_release": 35, "lfo1_wave": "s/h", "lfo1_tempo_sync": "on",
+                   "lfo1_division": "1/16", "lfo1_key_sync": "timbre", "patch1_source": "lfo1", "patch1_dest":
+                   "cutoff", "patch1_int": 30, "patch2_source": "lfo1", "patch2_dest": "pan", "patch2_int": 40,
+                   "arp_on": "on", "arp_type": "alt1", "arp_octaves": 2, "arp_resolution": "1/16", "arp_gate": 55,
+                   "arp_steps": 8, "arp_pattern": "x-xxx-x-", "arp_key_sync": "on", "arp_swing": 12, "delay_sync":
+                   "on", "delay_division": "3/16", "delay_type": "cross", "delay_depth": 45},
+    },
+    "sub terra": {
+        "kind": "song", "role": "bass", "range": ["E1", "C3"], "voices": 1,
+        "play": "A growling digital bass: a DWGS wave over a square sub an octave down, through the "
+                "distortion. Soft notes are round, hard ones bite. Mono lines, E1-C3.",
+        "params": {"assign_mode": "mono", "trigger_mode": "multi", "osc1_wave": "dwgs", "dwgs_wave": 20, "osc1_level":
+                   110, "osc2_wave": "square", "osc2_semitone": -12, "osc2_level": 115, "filter_type": "24lpf",
+                   "cutoff": 33, "resonance": 38, "filter_eg_int": 36, "filter_velocity": 18, "eg1_attack": 0,
+                   "eg1_decay": 46, "eg1_sustain": 25, "eg1_release": 15, "eg2_decay": 70, "eg2_sustain": 105,
+                   "eg2_release": 10, "distortion": "on", "amp_level": 100, "eq_low_freq": 6, "eq_low_gain": 3},
+    },
+    "monsoon": {
+        "kind": "song", "role": "pad", "range": ["C2", "C5"], "voices": 2,
+        "play": "A layer: slow pulse-width strings under band-passed noise that scatters left and "
+                "right like rain. Two notes at once (the layer halves the voices): fifths and "
+                "octaves, C2-C5.",
+        "params": {"voice_mode": "layer", "assign_mode": "poly", "osc1_wave": "pulse", "osc1_ctrl1": 20, "osc1_ctrl2":
+                   60, "osc2_wave": "saw", "osc2_level": 90, "osc2_tune": 5, "filter_type": "24lpf", "cutoff": 72,
+                   "resonance": 10, "eg2_attack": 75, "eg2_decay": 90, "eg2_sustain": 115, "eg2_release": 85,
+                   "lfo1_wave": "triangle", "lfo1_freq": 12, "patch1_source": "lfo2", "patch1_dest": "cutoff",
+                   "patch1_int": 10, "lfo2_wave": "sine", "lfo2_freq": 8, "mod_type": "ensemble", "mod_depth": 70,
+                   "delay_sync": "on", "delay_division": "1/4", "delay_type": "cross", "delay_depth": 45},
+        "timbre2": {"assign_mode": "poly", "osc1_wave": "noise", "osc1_ctrl1": 90, "osc1_ctrl2": 40, "osc1_level":
+                    127, "filter_type": "12bpf", "cutoff": 84, "resonance": 70, "filter_kbd_track": 0, "eg2_attack":
+                    85, "eg2_decay": 90, "eg2_sustain": 110, "eg2_release": 90, "amp_level": 50, "lfo1_wave": "s/h",
+                    "lfo1_freq": 70, "lfo2_wave": "s/h", "lfo2_freq": 85, "patch1_source": "lfo1", "patch1_dest":
+                    "cutoff", "patch1_int": 30, "patch2_source": "lfo2", "patch2_dest": "pan", "patch2_int": 63,
+                    "patch3_source": "lfo1", "patch3_dest": "amp", "patch3_int": 25},
+    },
+    "tin toy": {
+        "kind": "song", "role": "keys", "range": ["C3", "C7"], "voices": 4,
+        "play": "A toy-piano key sound from a DWGS wave with a tiny pitch blip on each attack; "
+                "playing harder makes it brighter and louder. Melodies and chords, C3-C7.",
+        "params": {"assign_mode": "poly", "osc1_wave": "dwgs", "dwgs_wave": 38, "osc2_wave": "triangle",
+                   "osc2_semitone": 12, "osc2_level": 85, "filter_type": "12lpf", "cutoff": 82, "resonance": 20,
+                   "filter_eg_int": 30, "filter_velocity": 35, "filter_kbd_track": 30, "eg1_attack": 0, "eg1_decay":
+                   30, "eg1_sustain": 0, "eg1_release": 30, "eg2_attack": 0, "eg2_decay": 82, "eg2_sustain": 0,
+                   "eg2_release": 55, "patch3_source": "eg1", "patch3_dest": "pitch", "patch3_int": 4,
+                   "patch4_source": "velocity", "patch4_dest": "amp", "patch4_int": 18, "eq_low_freq": 29,
+                   "eq_low_gain": 6, "eq_high_freq": 0, "eq_high_gain": 6, "mod_type": "chorus/flanger", "mod_depth":
+                   30, "mod_speed": 12, "delay_sync": "on", "delay_division": "1/8", "delay_depth": 22},
+    },
+    "wobbler": {
+        "kind": "song", "role": "bass", "range": ["C1", "C3"], "voices": 1,
+        "play": "A wobble bass: the filter pumps in eighth notes at the song's tempo, and the mod "
+                "wheel opens it further. Long mono notes, C1-C3.",
+        "params": {"assign_mode": "unison", "unison_detune": 10, "trigger_mode": "single", "portamento": 10,
+                   "osc1_wave": "saw", "osc2_wave": "square", "osc2_semitone": -12, "osc2_level": 110, "osc2_tune": 4,
+                   "filter_type": "24lpf", "cutoff": 52, "resonance": 55, "filter_kbd_track": 20, "eg2_decay": 80,
+                   "eg2_sustain": 120, "eg2_release": 15, "lfo2_wave": "sine", "lfo2_tempo_sync": "on",
+                   "lfo2_division": "1/8", "lfo2_key_sync": "timbre", "patch1_source": "lfo2", "patch1_dest":
+                   "cutoff", "patch1_int": 50, "patch2_source": "mod wheel", "patch2_dest": "cutoff", "patch2_int":
+                   30, "patch3_source": "lfo2", "patch3_dest": "pan", "patch3_int": 15, "distortion": "on",
+                   "amp_level": 62, "eq_low_freq": 6, "eq_low_gain": 2},
+    },
+    "iron gong": {
+        "kind": "song", "role": "hit", "range": ["C1", "C4"], "voices": 4,
+        "play": "A struck metal plate from ring modulation: a clang that settles into a long dark "
+                "ring. Single hits and low octaves, C1-C4; harder is brighter.",
+        "params": {"assign_mode": "poly", "osc1_wave": "saw", "osc1_level": 90, "osc2_wave": "saw", "osc2_mod":
+                   "ring", "osc2_semitone": 7, "osc2_tune": 22, "osc2_level": 127, "noise_level": 20, "filter_type":
+                   "12lpf", "cutoff": 100, "resonance": 25, "filter_eg_int": 40, "filter_velocity": 30, "eq_low_freq":
+                   14, "eq_low_gain": 5, "eq_high_freq": 12, "eq_high_gain": 5, "eg1_attack": 0, "eg1_decay": 70,
+                   "eg1_sustain": 0, "eg1_release": 75, "eg2_attack": 0, "eg2_decay": 100, "eg2_sustain": 0,
+                   "eg2_release": 100, "patch3_source": "eg1", "patch3_dest": "noise level", "patch3_int": -30,
+                   "patch4_source": "velocity", "patch4_dest": "amp", "patch4_int": 20, "mod_type": "phaser",
+                   "mod_depth": 40, "mod_speed": 6, "delay_sync": "on", "delay_division": "1/4", "delay_type":
+                   "cross", "delay_depth": 35},
+    },
+    "brass halo": {
+        "kind": "song", "role": "chords", "range": ["C2", "C5"], "voices": 4,
+        "play": "A synth brass section: pulse width in motion, and the filter blows open at the start "
+                "of each chord. Stabs and held chords of up to 4 notes, C2-C5.",
+        "params": {"assign_mode": "poly", "osc1_wave": "pulse", "osc1_ctrl1": 30, "osc1_ctrl2": 45, "osc2_wave":
+                   "saw", "osc2_level": 110, "osc2_tune": 5, "filter_type": "24lpf", "cutoff": 48, "resonance": 15,
+                   "filter_eg_int": 48, "filter_velocity": 20, "filter_kbd_track": 20, "eg1_attack": 28, "eg1_decay":
+                   60, "eg1_sustain": 70, "eg1_release": 35, "eg2_attack": 8, "eg2_decay": 80, "eg2_sustain": 115,
+                   "eg2_release": 35, "lfo1_wave": "triangle", "lfo1_freq": 25, "patch4_source": "velocity",
+                   "patch4_dest": "amp", "patch4_int": 18, "mod_type": "ensemble", "mod_depth": 45, "delay_depth": 15,
+                   "delay_time": 45},
+    },
+    "acidic": {
+        "kind": "song", "role": "bass", "range": ["C1", "C4"], "voices": 1,
+        "play": "An acid line: one saw through a squealing filter. Loud notes are accents that "
+                "squeal, overlapped notes slide. Sixteenth-note mono patterns, C1-C4.",
+        "params": {"assign_mode": "mono", "trigger_mode": "single", "portamento": 7, "osc1_wave": "saw",
+                   "filter_type": "24lpf", "cutoff": 38, "resonance": 70, "filter_eg_int": 40, "filter_velocity": 45,
+                   "filter_kbd_track": 30, "eg1_attack": 0, "eg1_decay": 40, "eg1_sustain": 0, "eg1_release": 20,
+                   "eg2_decay": 64, "eg2_sustain": 100, "eg2_release": 8, "patch2_source": "mod wheel", "patch2_dest":
+                   "cutoff", "patch2_int": 40, "patch4_source": "velocity", "patch4_dest": "amp", "patch4_int": 20,
+                   "distortion": "on", "amp_level": 112, "delay_sync": "on", "delay_division": "3/16", "delay_depth":
+                   25},
+    },
+    "seance": {
+        "kind": "song", "role": "lead", "range": ["C4", "C7"], "voices": 1,
+        "play": "A theremin-like voice: a pure tone that glides between notes with a singing vibrato, "
+                "deeper on the mod wheel. Slow overlapped mono melodies, C4-C7.",
+        "params": {"assign_mode": "unison", "unison_detune": 3, "trigger_mode": "single", "portamento": 30,
+                   "eq_low_freq": 20, "eq_low_gain": 5, "eq_high_freq": 6, "eq_high_gain": 5, "osc1_wave": "sine",
+                   "osc1_ctrl1": 6, "osc2_wave": "triangle", "osc2_level": 25, "cutoff": 100, "filter_kbd_track": 30,
+                   "eg2_attack": 30, "eg2_decay": 80, "eg2_sustain": 120, "eg2_release": 50, "lfo2_wave": "sine",
+                   "lfo2_freq": 62, "vibrato_int": 30, "patch1_source": "lfo2", "patch1_dest": "pitch", "patch1_int":
+                   5, "patch2_source": "lfo2", "patch2_dest": "amp", "patch2_int": 12, "mod_type": "chorus/flanger",
+                   "mod_depth": 20, "mod_speed": 8, "delay_sync": "on", "delay_division": "1/4", "delay_type":
+                   "cross", "delay_depth": 50},
+    },
+    "shutter": {
+        "kind": "song", "role": "pad", "range": ["C3", "C6"], "voices": 4,
+        "play": "A bright pad chopped into sixteenth notes at the song's tempo, with the filter "
+                "rising slowly through a held chord. Hold chords of up to 4 notes for a bar or more, "
+                "C3-C6.",
+        "params": {"assign_mode": "poly", "osc1_wave": "saw", "osc2_wave": "saw", "osc2_level": 127, "osc2_tune": 6,
+                   "filter_type": "12lpf", "cutoff": 60, "resonance": 30, "filter_eg_int": 40, "eg1_attack": 95,
+                   "eg1_decay": 80, "eg1_sustain": 127, "eg1_release": 40, "eg2_attack": 0, "eg2_decay": 64,
+                   "eg2_sustain": 127, "eg2_release": 30, "amp_level": 55, "lfo1_wave": "square", "lfo1_tempo_sync":
+                   "on", "lfo1_division": "1/16", "lfo1_key_sync": "timbre", "patch1_source": "lfo1", "patch1_dest":
+                   "amp", "patch1_int": 63, "lfo2_wave": "sine", "lfo2_tempo_sync": "on", "lfo2_division": "1/1",
+                   "patch2_source": "lfo2", "patch2_dest": "pan", "patch2_int": 35, "mod_type": "ensemble",
+                   "mod_depth": 50, "delay_sync": "on", "delay_division": "3/16", "delay_type": "cross",
+                   "delay_depth": 40},
+    },
+    "velvet ep": {
+        "kind": "song", "role": "keys", "range": ["C2", "C6"], "voices": 4,
+        "play": "A soft electric piano: round when played gently, with a bark when hit hard, swaying "
+                "slowly from side to side. Chords and melodies, C2-C6.",
+        "params": {"assign_mode": "poly", "osc1_wave": "sine", "osc1_ctrl1": 4, "osc2_wave": "triangle",
+                   "osc2_semitone": 12, "osc2_level": 50, "cutoff": 92, "filter_velocity": 25, "filter_kbd_track": 25,
+                   "eg1_attack": 0, "eg1_decay": 45, "eg1_sustain": 0, "eg1_release": 40, "eg2_attack": 0,
+                   "eg2_decay": 92, "eg2_sustain": 30, "eg2_release": 48, "patch1_source": "velocity", "patch1_dest":
+                   "osc1 ctrl1", "patch1_int": 14, "patch2_source": "eg1", "patch2_dest": "osc1 ctrl1", "patch2_int":
+                   8, "lfo2_wave": "sine", "lfo2_freq": 40, "patch3_source": "lfo2", "patch3_dest": "pan",
+                   "patch3_int": 35, "patch4_source": "velocity", "patch4_dest": "amp", "patch4_int": 20, "mod_type":
+                   "phaser", "mod_depth": 25, "mod_speed": 10, "eq_low_freq": 29, "eq_low_gain": 3, "eq_high_freq": 0,
+                   "eq_high_gain": 0, "amp_level": 112},
+    },
+    "morse": {
+        "kind": "song", "role": "chords", "range": ["C3", "C5"], "voices": 4,
+        "play": "A held chord is re-struck as a syncopated rhythm of short stabs (the arpeggiator in "
+                "trigger mode). Hold 3 or 4 notes for a bar or more, C3-C5.",
+        "params": {"assign_mode": "poly", "osc1_wave": "saw", "osc2_wave": "square", "osc2_level": 100, "osc2_tune":
+                   5, "filter_type": "12lpf", "cutoff": 62, "resonance": 35, "filter_eg_int": 35, "eg1_decay": 35,
+                   "eg1_sustain": 0, "eg1_release": 25, "eg2_decay": 48, "eg2_sustain": 0, "eg2_release": 25,
+                   "arp_on": "on", "arp_type": "trigger", "arp_resolution": "1/16", "arp_gate": 60, "arp_steps": 8,
+                   "arp_pattern": "x--x--x-", "arp_key_sync": "on", "mod_type": "chorus/flanger", "mod_depth": 35,
+                   "mod_speed": 18, "delay_sync": "on", "delay_division": "1/8", "delay_type": "cross", "delay_depth":
+                   40, "eq_low_freq": 14, "eq_low_gain": 4},
+    },
+    "vortex": {
+        "kind": "song", "role": "lead", "range": ["C3", "C6"], "voices": 1,
+        "play": "A rave lead: four detuned voices that swoop up into each note with the pulse width "
+                "churning. Mono riffs and held notes, C3-C5.",
+        "params": {"assign_mode": "unison", "unison_detune": 14, "trigger_mode": "multi", "portamento": 8,
+                   "osc1_wave": "pulse", "osc1_ctrl1": 25, "osc1_ctrl2": 80, "osc2_wave": "saw", "osc2_semitone": -12,
+                   "osc2_level": 127, "osc2_tune": 3, "cutoff": 96, "resonance": 20, "eg1_attack": 0, "eg1_decay": 26,
+                   "eg1_sustain": 0, "eg1_release": 20, "eg2_decay": 80, "eg2_sustain": 115, "eg2_release": 25,
+                   "lfo1_wave": "triangle", "lfo1_freq": 45, "patch3_source": "eg1", "patch3_dest": "pitch",
+                   "patch3_int": -14, "mod_type": "ensemble", "mod_depth": 60, "delay_depth": 20, "delay_time": 50,
+                   "amp_level": 105, "eq_low_freq": 14, "eq_low_gain": 4, "eq_high_freq": 12, "eq_high_gain": 4},
     },
 }
 

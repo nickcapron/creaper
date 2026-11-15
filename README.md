@@ -225,7 +225,11 @@ needs a profile for the model, and the microKORG's is the only one so far.
   solo sound, string pad, chord stab, pluck: each with its role, register and voices) and
   for sounds in the style of well-known microKORG users, with the sources for each and
   the factory program when that's what a source says was used. All have been played and measured on a real microKORG;
-  they're still starting points to tune by ear.
+  they're still starting points to tune by ear. Sixteen more are original programs designed on
+  the synth for this project, each built on one thing it does well (the vocal-formant
+  oscillator, cross-modulation, hard sync, ring modulation, the arpeggiator as a step
+  sequencer, a two-timbre layer): pads, keys, basses, leads and rhythmic chord sounds,
+  level-matched and used together in a finished song.
 
 The hardware map is saved in `<REAPER resource path>/creaper/hardware.json`.
 
