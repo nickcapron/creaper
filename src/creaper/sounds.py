@@ -5,6 +5,9 @@ Claude) can't reach them. A snapshot captures the plugin's complete state
 after the user picks a sound there, so Claude can recall it on any track, in
 any project.
 
+A sound can also be a track's whole FX chain, for an instrument made of many plugins
+(a sampled instrument's zones, a drum kit) or one that needs its effects to be itself.
+
 Layout, in <REAPER resource path>/creaper/sounds/:
     library.json        names, tags, descriptions, which plugin
     <id>.state.json     the captured state (can be large for some plugins)
@@ -25,6 +28,7 @@ from . import jsonstore
 # patch it sent over MIDI, loaded back into its edit buffer the same way).
 SOURCE_PLUGIN = "plugin"
 SOURCE_HARDWARE = "hardware"
+SOURCE_CHAIN = "chain"     # a track's whole FX chain, as REAPER writes it (<FXCHAIN ... >)
 
 
 MAX_DESCRIPTION_CHARS = 400   # a sentence or two about a sound, not a document
@@ -58,6 +62,61 @@ def short_plugin_name(full_name: str) -> str:
     name = re.sub(r"^\w+:\s*", "", full_name)
     name = re.sub(r"\s*\((\d+\s*out|\d+->\d+\s*ch|\d+\s*ch)\)$", "", name)
     return re.sub(r"\s*\([^()]*\)$", "", name)
+
+
+# A plugin's header line inside an FX chain: <VST "VSTi: ReaSamplOmatic5000 (Cockos)" ...>, <JS loser/Saturation "">
+_PLUGIN_LINE = re.compile(r'^<(VST|JS|CLAP|AU|DX|LV2)\s+("([^"]*)"|(\S+))')
+_INSTRUMENT_KIND = re.compile(r"^\w+i:")    # VSTi:, VST3i:, CLAPi:, AUi:, DXi:
+
+
+def chain_has_instrument(plugins: list[str]) -> bool:
+    """Whether a chain plays notes: one of its plugins is an instrument (JS instruments can't be told apart)."""
+    return any(_INSTRUMENT_KIND.match(p) for p in plugins)
+
+
+def clean_chain(text: str) -> str:
+    """A track's <FXCHAIN> block made fit to load anywhere: no plugin ids (REAPER gives
+    each loaded copy its own), no automation (it belongs to a song, not a sound) and no
+    plugin windows left open."""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines or not re.fullmatch(r"<FXCHAIN", lines[0]) or lines[-1] != ">":
+        raise ValueError("that isn't a track's FX chain (<FXCHAIN ... >)")
+    out, skip = [], 0
+    for line in lines[:-1]:
+        if skip:
+            skip += 1 if line.startswith("<") else -1 if line == ">" else 0
+            continue
+        if line.startswith(("<PARMENV", "<PROGRAMENV")):
+            skip = 1
+            continue
+        if line.startswith(("FXID ", "FLOAT ")):
+            continue
+        out.append("SHOW 0" if line.startswith("SHOW ") else line)
+    return "\n".join(out + [">"])
+
+
+def chain_plugins(chain: str) -> list[str]:
+    """The plugins in an FX chain, in order: 'VSTi: ReaSamplOmatic5000 (Cockos)', 'JS: loser/Saturation'."""
+    found, depth = [], 0
+    for line in chain.splitlines():
+        line = line.strip()
+        if line.startswith("<"):
+            depth += 1
+            m = _PLUGIN_LINE.match(line)
+            if m and depth == 2:
+                found.append(m.group(3) if m.group(3) is not None else f"JS: {m.group(4)}")
+        elif line == ">":
+            depth -= 1
+    return found
+
+
+def chain_summary(plugins: list[str]) -> str:
+    """'ReaSamplOmatic5000 x30 + ReaEQ + Chorus JUN-6'."""
+    counts: dict[str, int] = {}
+    for p in plugins:
+        name = short_plugin_name(p)
+        counts[name] = counts.get(name, 0) + 1
+    return " + ".join(f"{n} x{c}" if c > 1 else n for n, c in counts.items())
 
 
 class SoundLibrary:
@@ -153,6 +212,36 @@ class SoundLibrary:
         self.folder.mkdir(parents=True, exist_ok=True)
         jsonstore.write(self._state_path(entry), {"source": SOURCE_HARDWARE, "model": model, "patch": patch_hex,
                                                   "params": params}, indent=None)
+        with self._updating() as data:
+            data.setdefault("sounds", {})[key] = entry
+        return entry
+
+    def save_chain(self, name: str, chain: str, instrument: bool, tags: list[str] | None = None,
+                   description: str | None = None, overwrite: bool = False) -> dict:
+        """A track's whole FX chain as one sound (clean_chain first). Its plugins load
+        in place of the track's own; files they read (samples) stay where they are."""
+        name = name.strip()
+        if not name:
+            raise ValueError("give the sound a name, e.g. 'Clean Chorus Guitar'")
+        key = name.lower()
+        existing = self._read()
+        if key in existing and not overwrite:
+            raise ValueError(f"there's already a sound named '{existing[key]['name']}'; "
+                             "pick another name or set overwrite=true")
+        plugins = chain_plugins(chain)
+        if not plugins:
+            raise ValueError("that FX chain has no plugins in it")
+        entry = {
+            "id": _slug(name), "name": name, "source": SOURCE_CHAIN,
+            "plugin": "FX chain: " + ", ".join(dict.fromkeys(plugins)),
+            "plugin_name": chain_summary(plugins), "kind": "instrument" if instrument else "effect",
+            "format": "FX chain", "tags": _norm_tags(tags), "description": _description(description),
+            "plugin_preset": None, "plugins": len(plugins), "restore": "whole FX chain",
+            "saved": dt.datetime.now().isoformat(timespec="seconds"),
+        }
+        self.folder.mkdir(parents=True, exist_ok=True)
+        jsonstore.write(self._state_path(entry), {"source": SOURCE_CHAIN, "chain": chain, "plugins": plugins,
+                                                  "instrument": instrument}, indent=None)
         with self._updating() as data:
             data.setdefault("sounds", {})[key] = entry
         return entry

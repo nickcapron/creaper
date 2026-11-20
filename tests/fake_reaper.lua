@@ -324,6 +324,40 @@ function reaper.GetTrackGUID(t) return t.guid end
 function reaper.GetTrackName(t) return true, t.name end
 function reaper.InsertTrackAtIndex(index) table.insert(F.tracks, index + 1, make_track("")) end
 function reaper.DeleteTrack(t) table.remove(F.tracks, assert(index_of(F.tracks, t), "no such track")) end
+-- FX, as far as whole-chain sounds need them: a track's plugins are the ones its state
+-- chunk lists inside its own <FXCHAIN (t.chunk; a track without one has no plugins).
+local function chunk_fx(t)
+  local names, depth, inside = {}, 0, false
+  for line in ((t.chunk or "") .. "\n"):gmatch("([^\n]*)\n") do
+    local s = line:match("^%s*(.-)%s*$")
+    if s:sub(1, 1) == "<" then
+      depth = depth + 1
+      if depth == 2 and s == "<FXCHAIN" then
+        inside = true
+      elseif inside and depth == 3 then
+        names[#names + 1] = s:match('^<%w+ "([^"]*)"') or ("JS: " .. (s:match("^<JS (%S+)") or "?"))
+      end
+    elseif s == ">" then
+      if depth == 2 then inside = false end
+      depth = depth - 1
+    end
+  end
+  return names
+end
+function reaper.GetTrackStateChunk(t)
+  return true, t.chunk or ('<TRACK\nNAME "' .. t.name .. '"\nTRACKID ' .. t.guid .. "\n>")
+end
+function reaper.SetTrackStateChunk(t, chunk) t.chunk = chunk return true end
+function reaper.TrackFX_GetCount(t) return #chunk_fx(t) end
+function reaper.TrackFX_GetFXName(t, i)
+  local name = chunk_fx(t)[i + 1]
+  return name ~= nil, name or ""
+end
+function reaper.TrackFX_GetInstrument(t)
+  for i, name in ipairs(chunk_fx(t)) do if name:match("^%w+i:") then return i - 1 end end
+  return -1
+end
+
 function reaper.IsTrackSelected(t) return t.selected end
 function reaper.SetTrackSelected(t, selected) t.selected = selected end
 function reaper.SetOnlyTrackSelected(t)

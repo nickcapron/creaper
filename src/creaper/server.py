@@ -26,7 +26,7 @@ from .bridge import Bridge, BridgeError
 from .knowledge import MAX_NOTE_CHARS, Knowledge, recent, staleness
 from .drums import BUILTIN_DRUM_MAPS, DrumMaps, builtin_entries
 from .pluginscan import PluginCatalog
-from .sounds import MAX_DESCRIPTION_CHARS, SoundLibrary, describe as describe_sound
+from .sounds import MAX_DESCRIPTION_CHARS, SOURCE_CHAIN, SoundLibrary, clean_chain, describe as describe_sound
 
 try:  # mcp 2.x
     from mcp.server.mcpserver import MCPServer
@@ -1239,6 +1239,18 @@ def split_instrument_outputs(
 Tags = Annotated[list[str] | None, Field(description="Role and character, e.g. ['pad', 'dark', 'warm'] or ['bass', 'sub']")]
 
 
+def apply_chain(track, name: str, state: dict, new_track: str | None = None) -> dict:
+    """Loads a saved whole-chain sound in place of the track's plugins; says which plugins
+    didn't load (not installed here) when REAPER reports fewer than were saved."""
+    result = call("apply_fx_chain", timeout=60.0, track=track, new_track_name=new_track, chain=state["chain"],
+                  sound_name=name)
+    saved, loaded = len(state.get("plugins") or []), len(result.get("fx") or [])
+    if loaded < saved:
+        result["warning"] = (f"only {loaded} of the {saved} saved plugins loaded: the others aren't installed "
+                             "on this computer")
+    return result
+
+
 @tool()
 def save_sound(
     track: TrackRef,
@@ -1249,17 +1261,39 @@ def save_sound(
     overwrite: Annotated[bool, Field(description=(
         "Replace an existing sound with the same name: asked in creaper's chat panel, refused in other apps "
         "unless the user set CREAPER_ALLOW_UNCONFIRMED=1"))] = False,
+    whole_chain: Annotated[bool | None, Field(description=(
+        "Save every plugin on the track, in order, as one sound: an instrument made of many plugins "
+        "(build_sampled_instrument, build_drum_kit) or a sound that needs its effects. Default: only "
+        "when the instrument is ReaSamplOmatic5000"))] = None,
 ) -> dict:
     """Saves the plugin's current sound to the user's sound library, so it can be
     loaded on any track in any project. Works for sounds picked in a plugin's own
     preset browser, which REAPER can't otherwise see, and ones loaded with
-    load_arturia_preset or audition_sounds."""
+    load_arturia_preset or audition_sounds. A whole-chain sound keeps the track's
+    plugins together; samples they play stay where they are on disk."""
     existing = next((e for e in sound_library.search() if e["name"].lower() == name.strip().lower()), None)
     if existing and not overwrite:
         raise ValueError(f"there's already a sound named '{existing['name']}'; pick another name or set overwrite=true")
+    if whole_chain and fx is not None:
+        raise ValueError("whole_chain saves every plugin on the track; leave fx out")
     if existing:
         confirm_with_user(f"replace the saved sound \"{existing['name']}\" in your library", irreversible=True)
-    captured = call("capture_fx_state", timeout=60.0, track=track, fx=fx)
+    captured = None
+    if not whole_chain:
+        captured = call("capture_fx_state", timeout=60.0, track=track, fx=fx)
+        # One zone of a sampled instrument is a single note's sample, not the instrument.
+        if whole_chain is None and fx is None and (captured.get("file") == "reasamplomatic.dll"
+                                                   or "ReaSamplOmatic5000" in captured["plugin"]):
+            captured = None
+    if captured is None:
+        chain = call("capture_fx_chain", timeout=60.0, track=track)
+        entry = sound_library.save_chain(name, clean_chain(chain["chain"]), chain["instrument"], tags=tags,
+                                         description=description, overwrite=overwrite)
+        result = describe_sound(entry)
+        result["saved_from"] = chain["track"]
+        result["note"] = (f"saved the track's whole FX chain ({entry['plugins']} plugins); load_sound puts it "
+                          "in place of a track's plugins")
+        return result
     entry = sound_library.save(name, captured, tags=tags, description=description, overwrite=overwrite)
     result = describe_sound(entry)
     result["saved_from"] = captured["track"]
@@ -1311,7 +1345,8 @@ def load_sound(
 ) -> dict:
     """Recalls a saved sound. Reuses the same plugin if it's already on the track,
     otherwise adds it; an instrument sound replaces a different instrument unless
-    replace_instrument is false. Undoable."""
+    replace_instrument is false. A whole-chain sound (restore "whole FX chain")
+    replaces all the track's plugins. Undoable."""
     if (track is None) == (new_track is None):
         raise ValueError("give either track or new_track")
     _, entry = sound_library.find(name)
@@ -1319,6 +1354,13 @@ def load_sound(
         raise ValueError(f"'{entry['name']}' is a {entry['plugin_name']} hardware sound: load_hardware_sound sends "
                          "it to the synth")
     state = sound_library.state(entry)
+    if entry.get("source") == SOURCE_CHAIN:
+        if fx is not None or (track is not None and not replace_instrument):
+            raise ValueError(f"'{entry['name']}' is a whole FX chain: it replaces every plugin on the track. "
+                             "To keep a track's plugins, load it on a new_track instead")
+        result = apply_chain(track, entry["name"], state, new_track=new_track)
+        result["sound"] = entry["name"]
+        return result
     result = call("apply_fx_state", timeout=60.0, track=track, new_track_name=new_track, fx=fx,
                   replace_instrument=replace_instrument, sound_name=entry["name"], state=state)
     result["sound"] = entry["name"]

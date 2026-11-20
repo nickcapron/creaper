@@ -13,7 +13,8 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, Field
 
 from . import listen
-from .server import READ_ONLY, BridgeError, TrackRef, call, sound_library, tool
+from .server import READ_ONLY, BridgeError, TrackRef, apply_chain, call, sound_library, tool
+from .sounds import SOURCE_CHAIN
 
 Role = Literal["bass", "sub", "lead", "pad", "keys", "pluck", "bell", "arp", "strings", "brass"]
 Character = Literal["bright", "dark", "punchy", "soft", "plucky", "sustained", "detuned", "wide", "thick", "moving"]
@@ -219,7 +220,11 @@ def score(measured: dict, wanted: dict[str, tuple[float, float]], detuned: bool 
 
 def _apply(track, name: str, state: dict) -> None:
     """Loads a captured or saved plugin state onto the track: into the same plugin if
-    it's there, otherwise swapping the track's instrument for it."""
+    it's there, otherwise swapping the track's instrument for it. A saved whole chain
+    replaces the track's plugins."""
+    if state.get("source") == SOURCE_CHAIN:
+        apply_chain(track, name, state)
+        return
     call("apply_fx_state", timeout=60.0, track=track, replace_instrument=True, sound_name=name, state=state)
 
 

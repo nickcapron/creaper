@@ -513,3 +513,66 @@ def test_the_bridge_names_actions_and_refuses_scripts_itself(rig, bridge):
     assert list(rig.f.actions.values()) == [40001, 53003]
     with pytest.raises(BridgeError, match="no action with id '99999'"):
         bridge.call("run_action", command=99999)
+
+
+# ------------------------------------------------------------------- whole-chain sounds
+
+TRACK_WITH_CHAIN = """<TRACK
+NAME Guitar
+<FXCHAIN_REC
+SHOW 0
+<VST "VST: ReaGate (Cockos)" reagate.dll 0 "" 1
+Z2F0ZQ==
+>
+>
+<FXCHAIN
+SHOW 0
+<VST "VSTi: ReaSamplOmatic5000 (Cockos)" reasamplomatic.dll 0 "C2" 1
+cnM1aw==
+>
+<VST "VST: ReaEQ (Cockos)" reaeq.dll 0 "" 1
+ZXE=
+>
+>
+<ITEM
+POSITION 0
+>
+>"""
+
+NEW_CHAIN = """<FXCHAIN
+SHOW 0
+<VST "VSTi: ReaSynth (Cockos)" reasynth.dll 0 "" 1
+c3lu
+>
+>"""
+
+
+def test_a_tracks_chain_is_captured_without_its_input_chain_or_items(rig, bridge):
+    rig.f.new_track("Guitar").chunk = TRACK_WITH_CHAIN
+    got = bridge.call("capture_fx_chain", track="Guitar")
+    chain = got["chain"]
+    assert chain.startswith("<FXCHAIN\n") and chain.endswith("ZXE=\n>\n>")
+    assert "ReaGate" not in chain and "POSITION" not in chain
+    assert got["fx"] == ["VSTi: ReaSamplOmatic5000 (Cockos)", "VST: ReaEQ (Cockos)"]
+    assert got["instrument"] is True
+
+
+def test_a_saved_chain_replaces_the_tracks_own_and_keeps_the_rest(rig, bridge):
+    rig.f.new_track("Guitar").chunk = TRACK_WITH_CHAIN
+    got = bridge.call("apply_fx_chain", track="Guitar", chain=NEW_CHAIN, sound_name="Synth")
+    chunk = rig.f.track("Guitar").chunk
+    assert got["fx"] == ["VSTi: ReaSynth (Cockos)"]
+    assert got["replaced"] == ["VSTi: ReaSamplOmatic5000 (Cockos)", "VST: ReaEQ (Cockos)"]
+    assert "ReaGate" in chunk and "POSITION 0" in chunk and "ReaSamplOmatic" not in chunk
+    assert chunk.index("<FXCHAIN\n") < chunk.index("<ITEM")
+
+
+def test_a_track_without_plugins_gets_the_chain_ahead_of_its_items(rig, bridge):
+    rig.f.new_track("Empty").chunk = "<TRACK\nNAME Empty\n<ITEM\nPOSITION 0\n>\n>"
+    bridge.call("apply_fx_chain", track="Empty", chain=NEW_CHAIN)
+    chunk = rig.f.track("Empty").chunk
+    assert chunk.index("ReaSynth") < chunk.index("<ITEM") and chunk.endswith(">\n>")
+    got = bridge.call("apply_fx_chain", new_track_name="Guitar 2", chain=NEW_CHAIN)
+    assert got["instrument"] is True and names(rig)[-1] == "Guitar 2"
+    with pytest.raises(BridgeError, match="master"):
+        bridge.call("apply_fx_chain", track="master", chain=NEW_CHAIN)

@@ -1,6 +1,6 @@
 -- @description creaper bridge: lets Claude work in REAPER through the creaper MCP server
 -- @author nickcapron
--- @version 0.63.0
+-- @version 0.63.1
 -- @link https://github.com/nickcapron/creaper
 -- @provides
 --   [nomain] creaper_json.lua
@@ -13,7 +13,7 @@
 --   Every change it makes is a named undo point ("creaper: ..."), so Ctrl+Z
 --   reverts anything Claude did.
 
-local BRIDGE_VERSION = "0.63.0"
+local BRIDGE_VERSION = "0.63.1"
 local PROTOCOL = 2
 
 ----------------------------------------------------------------------- JSON
@@ -1109,7 +1109,9 @@ function commands.capture_fx_state(p)
   local _, preset = reaper.TrackFX_GetPreset(t, fx, "")
   local details = fx_details(t, fx)
   return {
-    plugin = fx_name(t, fx),
+    -- the plugin itself, not a name the user gave it (a sampler zone named after its
+    -- sample would otherwise be saved as a plugin no computer has)
+    plugin = named_config(t, fx, "fx_name") or fx_name(t, fx),
     file = fx_file(t, fx),
     format = details.format,
     instrument = details.instrument or false,
@@ -1180,6 +1182,95 @@ function commands.apply_fx_state(p)
       restored = set .. " of " .. #s.params .. " parameters"
     end
     return { track = track_ref(t), fx = fx_details(t, fx), restored = restored, replaced = replaced }
+  end)
+end
+
+-- A track's whole FX chain, as REAPER writes it in its state (<FXCHAIN ... >): every
+-- plugin with its full state, in order, so a sound made of many plugins (a sampled
+-- instrument's zones, a drum kit) is kept whole. The span is the track's own chain,
+-- one level inside <TRACK, never its input chain (<FXCHAIN_REC).
+local function split_chunk_lines(chunk)
+  local lines = {}
+  for line in (chunk .. "\n"):gmatch("([^\n]*)\n") do lines[#lines + 1] = (line:gsub("\r$", "")) end
+  return lines
+end
+
+local function fx_chain_span(lines)
+  local depth, first = 0, nil
+  for i, line in ipairs(lines) do
+    local s = line:match("^%s*(.-)%s*$")
+    if s:sub(1, 1) == "<" then
+      depth = depth + 1
+      if depth == 2 and not first and (s == "<FXCHAIN" or s:match("^<FXCHAIN%s")) then first = i end
+    elseif s == ">" then
+      if first and depth == 2 then return first, i end
+      depth = depth - 1
+    end
+  end
+  if first then fail("the track's FX chain doesn't close") end
+end
+
+local function fx_names(t)
+  local names = {}
+  for i = 0, reaper.TrackFX_GetCount(t) - 1 do names[#names + 1] = fx_name(t, i) end
+  return names
+end
+
+function commands.capture_fx_chain(p)
+  local t = get_track(p.track)
+  if reaper.TrackFX_GetCount(t) == 0 then fail("track '" .. track_name(t) .. "' has no plugins") end
+  local _, chunk = reaper.GetTrackStateChunk(t, "", false)
+  local lines = split_chunk_lines(chunk)
+  local first, last = fx_chain_span(lines)
+  if not first then fail("track '" .. track_name(t) .. "' has no FX chain in its state") end
+  return { track = track_ref(t), chain = table.concat(lines, "\n", first, last), fx = fx_names(t),
+           instrument = reaper.TrackFX_GetInstrument(t) >= 0 }
+end
+
+-- Puts a saved chain in place of the track's own (undoable); a track without one gets
+-- it ahead of its items.
+function commands.apply_fx_chain(p)
+  local chain = p.chain or fail("no FX chain given")
+  local t
+  if not p.new_track_name then
+    t = get_track(p.track)
+    if t == reaper.GetMasterTrack(0) then fail("a whole-chain sound can't go on the master track") end
+  end
+  return with_undo("load sound " .. (p.sound_name or "FX chain"), function()
+    if not t then
+      local index = reaper.CountTracks(0)
+      reaper.InsertTrackAtIndex(index, true)
+      t = reaper.GetTrack(0, index)
+      reaper.GetSetMediaTrackInfo_String(t, "P_NAME", p.new_track_name, true)
+    end
+    local replaced = fx_names(t)
+    local _, chunk = reaper.GetTrackStateChunk(t, "", false)
+    local lines = split_chunk_lines(chunk)
+    while #lines > 0 and lines[#lines]:match("^%s*$") do lines[#lines] = nil end
+    local first, last = fx_chain_span(lines)
+    if not first then
+      first = #lines   -- before the track's closing ">", unless an item comes sooner
+      local depth = 0
+      for i, line in ipairs(lines) do
+        local s = line:match("^%s*(.-)%s*$")
+        if s:sub(1, 1) == "<" then
+          depth = depth + 1
+          if depth == 2 and s:match("^<ITEM") then first = i break end
+        elseif s == ">" then depth = depth - 1 end
+      end
+      last = first - 1
+    end
+    local out = {}
+    for i = 1, first - 1 do out[#out + 1] = lines[i] end
+    for _, line in ipairs(split_chunk_lines(chain)) do
+      if line ~= "" then out[#out + 1] = line end
+    end
+    for i = last + 1, #lines do out[#out + 1] = lines[i] end
+    if not reaper.SetTrackStateChunk(t, table.concat(out, "\n"), false) then
+      fail("REAPER refused the FX chain")
+    end
+    return { track = track_ref(t), fx = fx_names(t), instrument = reaper.TrackFX_GetInstrument(t) >= 0,
+             replaced = #replaced > 0 and replaced or nil }
   end)
 end
 
