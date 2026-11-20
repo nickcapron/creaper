@@ -93,6 +93,53 @@ def test_a_lingering_offset_and_a_minus_100_db_floor_still_trim():
     assert len(x.trim_tail(hiss)) <= len(sound) + 50
 
 
+def recorded(sound_at=1.0, seconds=3.0, hiss_dbfs=-90.0, level=0.1):
+    """A synth recorded through an interface: a hit with hiss before, under and after it."""
+    audio = 10 ** (hiss_dbfs / 20) / 3 * np.random.default_rng(3).standard_normal((int(seconds * FS), 1))
+    body = hit(0.3, delay=0) * 2 * level
+    audio[int(sound_at * FS): int(sound_at * FS) + len(body)] += body
+    return audio
+
+
+def test_a_recorded_sound_ends_where_it_sinks_into_the_hiss():
+    """Live 2026-11-16, microKORG prints: hiss at -86 dBFS under sounds peaking at -28,
+    so the tail never fell 80 dB and a 0.1 s blip kept a second of hiss."""
+    audio = recorded()
+    noise = x.noise_floor_db(audio, FS)
+    assert -95 < noise < -85
+    assert x.noise_floor_db(np.concatenate([hit(), np.zeros((FS, 1))]), FS) is None     # a plugin: silence, no hiss
+    assert x.noise_floor_db(hit(2.0, delay=0)[: FS // 2], FS) is None                   # no gap: that's the sound
+    plain = x.trim_tail(x.trim_head(audio, FS)[0])
+    assert len(plain) > 1.9 * FS                                                         # what it did before
+    sound, cut = x.trim_head(audio, FS, noise_db=noise)
+    sound = x.trim_tail(sound, noise_db=noise, fs=FS)
+    assert 995 <= cut <= 1000 and 0.15 * FS < len(sound) < 0.4 * FS
+    assert abs(sound[-1, 0]) < 1e-9                                                      # faded, no tick
+    assert not x.tail_state(audio, noise)["cut_off"]
+    assert x.tail_state(audio[: int(1.03 * FS)], noise)["cut_off"]                       # still caught mid-sound
+
+
+def test_export_regions_trims_recorded_sounds_and_names_a_hissy_one(tmp_path, monkeypatch):
+    renders = tmp_path / "renders"
+    renders.mkdir()
+    total = recorded(sound_at=0.5, seconds=6.0)
+    quiet = hit(0.3, delay=0) * 2 * 0.002                    # peaks 37 dB over the hiss
+    total[int(3.5 * FS): int(3.5 * FS) + len(quiet)] += quiet
+    sf.write(str(renders / "r.wav"), np.repeat(total, 2, axis=1), FS, subtype="FLOAT")
+    regions = [{"name": "blip", "start": {"seconds": 0.0}, "end": {"seconds": 2.5}},
+               {"name": "faint", "start": {"seconds": 3.0}, "end": {"seconds": 5.5}}]
+    monkeypatch.setattr(x, "call", lambda cmd, **kw: {"get_project_overview": {"regions": regions}, "project_paths": {},
+                                                      "render_audio": {"files": [str(renders / "r.wav")]}}[cmd])
+    monkeypatch.setattr(x.export_tools, "_check_renders", lambda files: None)
+    r = x.export_regions(folder=str(tmp_path / "sfx"))
+    by = {f["file"]: f for f in r["files"]}
+    assert -95 < r["recording_hiss_dbfs"] < -85
+    assert by["blip.wav"]["length_s"] < 0.4 and 495 <= by["blip.wav"]["head_trimmed_ms"] <= 500
+    assert by["blip.wav"]["hiss_db_below_peak"] > 60 and not by["blip.wav"].get("tail_cut_off")
+    assert [p for p in r["problems"] if p.startswith("faint: recorded quietly")]
+    assert not any(p.startswith("blip") for p in r["problems"])
+
+
 def test_regions_that_would_share_a_file_are_refused(tmp_path, monkeypatch):
     # "shot/01" and "shot 01" both become "shot 01.wav": one silently overwrote the other.
     import pytest

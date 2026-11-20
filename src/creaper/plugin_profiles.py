@@ -142,6 +142,16 @@ PROFILES: tuple[Profile, ...] = (
                   "knee": "Knee", "wet": "Wet", "dry": "Dry"},
     ),
     Profile(
+        "ReaLimit", "limiter",
+        "REAPER's brickwall limiter. Its Threshold is NOT where limiting starts on an otherwise unchanged "
+        "signal: everything is turned UP by the gap between Threshold and Ceiling, then held at the "
+        "Ceiling. Threshold -7 with the Ceiling left at 0 makes the track 7 dB louder (a drum kit came up "
+        "7 dB this way). To only catch peaks, set Threshold and Ceiling to the SAME value (both -3: peaks "
+        "over -3 dBFS are held there, nothing else moves). To make something louder, lower the Threshold "
+        "and keep the Ceiling. master_to_target sets the master's own limiter: leave that one to it.",
+        controls={"threshold": "Threshold", "ceiling": "Ceiling", "release": "Release"},
+    ),
+    Profile(
         "Piano V", "instrument",
         "Arturia's physically modelled acoustic piano (grands and uprights). It makes a real piano, not "
         "the sampled, compressed house piano of a Korg M1 or an electric piano: for those, use a sampled "

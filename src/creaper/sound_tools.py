@@ -281,6 +281,28 @@ AUDITION_LEGEND = (
     "(0 static, 0.15+ moving), tuning_spread_cents / drift_cents, plays_own_pattern, transposed_semitones")
 
 
+# Above this the best candidate is still off on something that matters (a score is the sum of
+# how far each measurement misses its range, by ratio: 1.5 is one target missed by more than
+# 4x, or several by about 1.6x each). A judgement, not a measurement: tune it from panel logs.
+NO_FIT_SCORE = 1.5
+# The sound_design blueprint to start from for each role when no preset fits.
+ROLE_BLUEPRINTS = {"bass": "saw bass", "sub": "sub bass", "lead": "saw lead", "pad": "warm pad",
+                   "keys": "electric piano", "pluck": "pluck", "bell": "bell", "arp": "pluck",
+                   "strings": "string pad", "brass": "brass"}
+
+
+def none_fit_note(role: str, best: dict | None) -> str | None:
+    """What to do when no candidate is the sound: design one rather than settle."""
+    if best is not None and best.get("score", 999.0) <= NO_FIT_SCORE:
+        return None
+    start = ROLE_BLUEPRINTS.get(role, "saw lead")
+    head = (f"the best scored {best['score']:g} (a close fit scores {NO_FIT_SCORE:g} or under)" if best
+            else "no candidate played properly")
+    return (f"{head}: no preset here is the sound. Design it: design_plugin_sound(track, sound='{start}') on "
+            "Prophet-5 V, then change the blueprint toward what 'why' says is off (on a hardware synth, "
+            "set_hardware_params(start_from='init')). Or try another seed or fewer filters for other presets.")
+
+
 def _spread(names: list, n: int) -> list:
     """n names spread evenly through a list (a plugin's presets run by category)."""
     if len(names) <= n:
@@ -327,7 +349,8 @@ def audition_sounds(
     brightness, sustain, decay and tuning (notes out of tune with each other or drifting
     while held), scores it against what the role and character need,
     and keeps the best (or puts the original back). Use it before programming a sound
-    from scratch. Arturia's presets live in its own browser: candidates="arturia" loads
+    from scratch; when none fits well (none_fit_well in the result), design the sound
+    with design_plugin_sound rather than keep a near miss. Arturia's presets live in its own browser: candidates="arturia" loads
     them straight from Arturia's library instead, across every installed Arturia
     instrument. Patches that play a pattern of their own (a built-in arpeggiator or
     sequence) or are tuned to another key score far down. The track fader is moved so
@@ -488,7 +511,9 @@ def audition_sounds(
             now = call("get_track_details", track=track).get("volume_db") or 0.0
             call("set_track_properties", track=track, volume_db=round(min(12.0, now + gain), 1))
             matched = round(gain, 1)
+    no_fit = none_fit_note(role, best)
     return {"role": role, "character": character or [], "wanted": {k: list(v) for k, v in wanted.items()},
+            **({"none_fit_well": no_fit} if no_fit else {}),
             **({"effects_bypassed_while_listening": bypassed} if bypassed else {}),
             **({"fader_moved_db_to_match_level": matched} if matched is not None else {}),
             "loaded": best["name"] if (keep_best and best) else "the original sound",
@@ -756,3 +781,105 @@ def layer_instrument(
     folder = call("create_folder", tracks=[track] + [m.pop("_ref") for m in made], name=part + LAYERED)
     return {"part": part, "folder": folder.get("folder", {}).get("name", part + LAYERED), "layers": made,
             "note": "the layers play the part's MIDI; mute a layer track to hear without it"}
+
+
+# ------------------------------------------------------------ designing on a plugin synth
+
+@tool()
+def design_plugin_sound(
+    track: TrackRef,
+    sound: Annotated[str | None, Field(description=(
+        "A blueprint from sound_design_guide by name: 'saw bass', 'sync lead', 'string pad', 'pluck', 'zap'..."))] = None,
+    blueprint: Annotated[dict | None, Field(description=(
+        "Or a blueprint of your own in sound_design_guide's fields and real units, e.g. {'voices': 'mono', 'glide_ms': "
+        "90, 'osc2': {'wave': 'saw', 'cents': 12}, 'filter': {'cutoff_hz': 1800, 'env_octaves': 2.5}, 'amp_env': "
+        "{'attack_ms': 5, 'release_ms': 200}}"))] = None,
+    plugin: Annotated[str, Field(description="The plugin synth to build it on; one creaper has a design profile for")] = "Prophet-5 V",
+    effects: Annotated[bool, Field(description="Add the blueprint's distortion to the track after the synth")] = True,
+    dry_run: Annotated[bool, Field(description="Only return the plugin's parameter values; change nothing")] = False,
+) -> dict:
+    """Designs a sound on a plugin synth from a blueprint in real units (milliseconds,
+    hertz, cents, octaves), the way set_hardware_params start_from='init' does on a
+    hardware synth: puts the plugin on the track (or uses the one there), sets it to its
+    plain sound (one saw, filter open, its built-in effects off), then sets every
+    control the blueprint names through the plugin's measured calibration, and listens
+    to the result (audition_instrument). Use it when no preset is the sound wanted
+    (audition_sounds found nothing bright, fast or plain enough), to make the same
+    sound a hardware synth plays, and for sound effects. Give sound or blueprint; a
+    built-in blueprint changed in real units is the usual way to an advanced patch.
+    Returns what was set, what was set by rule of thumb, what the plugin can't do
+    (do those by hand: get_fx_parameters, set_fx_parameters), effects to add on the
+    track, the blueprint's 'play' and 'check', and what the sound measures. Then
+    compare with 'check', change the blueprint and call again: each call starts from
+    the plain sound, so the blueprint is the whole patch. Profiles: Prophet-5 V
+    (Arturia). On any other plugin, set the nearest controls by name instead."""
+    from . import plugin_design, sound_design
+
+    if (sound is None) == (blueprint is None):
+        raise ValueError("give sound (a blueprint's name) or blueprint (your own), one of the two")
+    found = plugin_design.find(plugin)
+    if found is None:
+        raise ValueError(f"creaper has no design profile for '{plugin}'. It has: {', '.join(plugin_design.PROFILES)}. On "
+                         "another plugin, set the nearest controls by name (get_fx_parameters, set_fx_parameters with "
+                         "display_value in the plugin's own units) and measure with audition_instrument.")
+    name, profile = found
+    entry: dict = {}
+    if sound is not None:
+        hit = sound_design.find(sound)
+        if hit is None:
+            raise ValueError(f"no blueprint named '{sound}'. Sounds: {', '.join(sound_design.SOUNDS)}")
+        sound, entry = hit
+        blueprint = entry["blueprint"]
+    unknown = sound_design.unknown_fields(blueprint)
+    if unknown:
+        raise ValueError(f"not blueprint fields: {', '.join(unknown)}. The fields: "
+                         + "; ".join(f"{part or 'top level'}: {', '.join(sorted(names))}"
+                                     for part, names in sound_design.FIELDS.items()))
+    design = profile["from_design"](blueprint)
+    out: dict = {"plugin": name, **({"sound": sound} if sound else {}), "blueprint": blueprint,
+                 "set": {c["parameter"]: c.get("display_value", c.get("display_text", c.get("value"))) for c in design["changes"]},
+                 **{k: design[k] for k in ("approximate", "left_out") if design[k]},
+                 **{k: entry[k] for k in ("play", "check", "if") if entry.get(k)}}
+    if dry_run:
+        out["dry_run"] = True
+        if design["effects"]:
+            out["effects"] = design["effects"]
+        return out
+    info = call("get_track_details", track=track)
+    have = next((f for f in info.get("fx", []) if f.get("instrument")), None)
+    if have is not None and plugin_design.find(have["name"]) != found:
+        raise ValueError(f"'{info['name']}' already plays {have['name']}: remove_fx it first, or use another track "
+                         f"(this builds the sound on {name})")
+    fx = have or call("add_fx", timeout=60.0, track=info["number"], name=name, position=1)
+    done = call("set_fx_parameters", track=info["number"], fx=fx["index"], changes=profile["plain"] + design["changes"])
+    failed = [c.get("parameter") for c in done.get("results", []) if isinstance(c, dict) and c.get("error")]
+    if failed:
+        out["not_set"] = failed
+    added = []
+    for e in design["effects"]:
+        if not (effects and e.get("add")):
+            added.append({k: e[k] for k in e if k != "set"} if e.get("add") else e)
+            continue
+        there = next((f for f in info.get("fx", []) if e["add"].lower() in f["name"].lower()), None)
+        try:
+            box = there or call("add_fx", track=info["number"], name=e["add"], position=fx["index"] + 1)
+            if not there:
+                call("set_fx_parameters", track=info["number"], fx=box["index"], changes=e["set"])
+            added.append({"for": e["for"], "on_the_track": box["name"], **({"already_there": True} if there else {})})
+        except Exception as err:  # noqa: BLE001 - the sound stands without its effect; the reason is passed on
+            added.append({"for": e["for"], "not_added": str(err)[:120]})
+    if added:
+        out["effects"] = added
+    try:
+        from .music_tools import audition_instrument
+
+        heard = audition_instrument(track=info["number"])
+        keep = ("note", "level_db", "attack_ms", "decay_s", "sustain_db", "release_s", "centroid_hz", "cents_off")
+        out["measured"] = {**(heard.get("summary") or {}),
+                           "notes": [{k: n[k] for k in keep if k in n} for n in heard.get("notes", [])],
+                           **({"problems": heard["problems"]} if heard.get("problems") else {})}
+    except Exception as err:  # noqa: BLE001 - the patch is set whether or not the listening pass ran
+        out["measured"] = {"not_measured": str(err)[:160]}
+    out["next"] = ("Compare 'measured' with 'check' (and measure_tracks on the part once it plays): change the blueprint in "
+                   "real units and call again; save_sound when it's right.")
+    return out

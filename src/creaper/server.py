@@ -1433,13 +1433,13 @@ def analyze_audio(
 
 Shape = Literal["linear", "smooth", "square", "fast_start", "fast_end", "bezier"]
 AutomationKind = Annotated[Literal["volume", "pan", "fx"], Field(
-    description="volume (dB), pan (-1 left .. 1 right), or fx (a plugin parameter: give fx and parameter)")]
+    description="volume (dB added to the track's fader: 0 = the level it's mixed at), pan (-1 left .. 1 right), or fx (a plugin parameter: give fx and parameter)")]
 
 
 class AutomationPoint(BaseModel):
     bar: float = Field(ge=1, description="Bar, 1-based; fractions are parts of the bar")
     beat: float | None = Field(None, description="Beat within the bar, 1-based")
-    value: float = Field(description="volume: dB; pan: -1..1; fx: the plugin's displayed value (e.g. 2500 for 2.5 kHz), or 0-1 with normalized=true")
+    value: float = Field(description="volume: dB on top of the fader (0 = unchanged); pan: -1..1; fx: the plugin's displayed value (e.g. 2500 for 2.5 kHz), or 0-1 with normalized=true")
     shape: Shape | None = Field(None, description="Curve from this point to the next")
 
 
@@ -1522,15 +1522,41 @@ def write_automation(
     """Writes automation: volume rides, pans, filter sweeps, wobbles. Give points,
     a ramp or an lfo (they can be combined). The envelope is created and shown if
     needed, and the change is one undo step. A low-pass sweep rests fully open
-    (20000 Hz) outside its move: one that never opens darkens the part all song."""
+    (20000 Hz) outside its move: one that never opens darkens the part all song.
+    A volume envelope ADDS to the track's fader, so write rides as offsets around 0 dB
+    (+1.5 for a chorus lift, -3 for a verse), never the level the part should sit at."""
     pts = _automation_points(points, ramp, lfo)
     result = call("write_automation", track=track, target=_target(target, fx, parameter), replace=replace,
                   points=_bridge_points(target, pts, normalized))
+    if target == "volume" and isinstance(result, dict):
+        stacked = _volume_rides_on_fader(track, pts)
+        if stacked:
+            result = {**result, **stacked}
     if target == "fx" and not normalized:
         shut = _lowpass_never_opens(track, fx, parameter, pts)
         if shut:
             result = {**result, "warning": shut} if isinstance(result, dict) else result
     return result
+
+
+def _volume_rides_on_fader(track, pts: list[dict]) -> dict | None:
+    """Live, 2026-11-17: level rides written as the levels the parts were mixed at (-8.6 dB
+    on a fader at -8.6) put each part twice as far down, and the mix fell apart."""
+    try:
+        fader = call("describe_track", track=track).get("volume_db")
+    except Exception:
+        return None
+    values = [p["value"] for p in pts if isinstance(p.get("value"), (int, float))]
+    if not values or not isinstance(fader, (int, float)) or abs(fader) < 0.5:
+        return None
+    low, high = min(values) + fader, max(values) + fader
+    out = {"fader_db": round(fader, 1), "level_in_the_mix_db": [round(low, 1), round(high, 1)]}
+    middle = sorted(values)[len(values) // 2]
+    if abs(middle - fader) <= 1.5:
+        out["warning"] = (f"this envelope adds to the track's fader ({fader:g} dB), so these points play the part at "
+                          f"{low:.1f} to {high:.1f} dB, not {min(values):g} to {max(values):g}. If they were meant as "
+                          "the part's level, write them again as offsets around 0 (undo takes this back).")
+    return out
 
 
 # A low pass whose automation never opens past this keeps the part's top off all song: a
@@ -2841,6 +2867,7 @@ from . import mix_tools  # noqa: E402,F401  (auto_mix)
 from . import motif_tools  # noqa: E402,F401  (motifs reused across songs)
 from . import sfx_tools  # noqa: E402,F401  (sound effects: one file per region)
 from . import arrange_tools  # noqa: E402,F401  (transitions and ear candy)
+from . import production_tools  # noqa: E402,F401  (the production pass: filter moves, part effects)
 from . import sound_tools  # noqa: E402,F401  (choosing sounds by audition)
 from . import hardware_setup  # noqa: E402,F401  (is REAPER set up for the synth: checked before each hardware tool)
 from . import hardware_tools  # noqa: E402,F401  (hardware synths on MIDI: scan, map, test, panic)

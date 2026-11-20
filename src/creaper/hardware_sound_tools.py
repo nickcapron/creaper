@@ -327,9 +327,10 @@ def sound_design_guide(
     start_from='init', then audition_hardware with the 'play' phrase and compare with
     'check'), what was set by rule of thumb, what the synth can't do, and the synth's
     calibration (what its 0-127 values are in real units) for working out any other
-    value. For a plugin synth, set the nearest controls by name (get_fx_parameters,
-    set_fx_parameters display_value takes real units) and measure with
-    audition_instrument. An advanced patch is a blueprint plus techniques: start from
+    value. For a plugin synth, design_plugin_sound builds the blueprint on a plugin
+    creaper has measured (Prophet-5 V); on any other, set the nearest controls by name
+    (get_fx_parameters, set_fx_parameters display_value takes real units) and measure
+    with audition_instrument. An advanced patch is a blueprint plus techniques: start from
     the nearest sound, change its blueprint in real units, and pass it as blueprint=
     with synth= for the values (don't work out 0-127 values by eye: the controls aren't
     even), one step at a time."""
@@ -1178,8 +1179,14 @@ def create_hardware_track(
     (create_midi_item, add_midi_notes, add_midi_cc for knob sweeps), give it its sound
     with load_hardware_sound track=..., bar=..., then print_hardware records it to
     audio, after which mixing, mastering and exporting treat it like any audio track.
-    One pair per part (lead, bass, each sound effect): the synth plays one sound at a
-    time, so parts are printed one after another. (Two tracks rather than ReaInsert:
+    One pair per part (lead, bass): the synth plays one sound at a time, so parts are
+    printed one after another. Sound effects for a game share ONE pair (read
+    sound_design_guide('game sounds') first: a set has rules of its own): each effect's
+    notes in its own region named as its file, its sound at the region's first bar
+    (load_hardware_sound track=, bar=; hardware_profile show='recipes' kind='sfx' says
+    what to play), two bars of nothing between regions (the next sound loads there and
+    the hiss is measured there), one print_hardware over all of it, then
+    export_regions. (Two tracks rather than ReaInsert:
     ReaInsert forces every render to run in real time, and creaper measures and mixes
     with offline renders.) Any saved MIDI device gets a pair; on one creaper has no
     profile for, the user sets the sound on the synth before the print.
@@ -1248,10 +1255,23 @@ def print_hardware(
     length = end - start + tail_seconds
     _check_part_sysex(link, part)   # before the user is asked: nothing foreign is played to the synth
     confirm_with_user(f"record '{part['audio_track']['name']}' from the {link.name} in real time ({length:.0f} seconds)")
-    earlier = [s for s in part.get("sounds") or [] if s["start_seconds"] <= start + 0.01 and s.get("sysex")]
+    written = [s for s in part.get("sounds") or [] if s.get("sysex")]
+    earlier = [s for s in written if s["start_seconds"] <= start + 0.01]
+    later = sorted((s for s in written if start + 0.01 < s["start_seconds"] < end), key=lambda s: s["start_seconds"])
     out: dict[str, Any] = {"device": link.name}
     mute_items = []
-    if earlier:
+    if not earlier and later:
+        # Live, 2026-11-17: a bass item from bar 1 with its sound at bar 5 (where the notes
+        # start) was told "No sound is written into the song", though the sound was there.
+        # The part's first sound is its sound from the top: sent now, and not again mid-pass.
+        sound = later[0]
+        _load(link, _sound_patch(link, sound["sysex"], _item_label(sound)), sound["sound"], ask=False)
+        out["sound"] = sound["sound"]
+        bar = (sound.get("start") or {}).get("bar")
+        out["sound_note"] = (f"This part's first sound is written {f'at bar {bar}' if bar else 'later'}, after the "
+                             "print starts: it was sent before the pass, so any notes before it play with it too.")
+        mute_items.append(sound["id"])
+    elif earlier:
         sound = max(earlier, key=lambda s: s["start_seconds"])
         # ask=False: the print was just allowed, and the part's own sound is part of it.
         _load(link, _sound_patch(link, sound["sysex"], _item_label(sound)), sound["sound"], ask=False)

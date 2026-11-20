@@ -426,6 +426,36 @@ def mark_mixed(channels: list[str], buses: list[str] | None = None) -> None:
         data["auto_mix"] = {"at": time.strftime("%Y-%m-%d %H:%M"), "tracks": channels, **({"buses": buses} if buses else {})}
 
 
+def mark_produced(bus: str | None = None) -> None:
+    """add_production records that it ran in the song plan, when there is one, and its
+    Music bus among the mix's own buses (not a part 'added since the auto_mix run')."""
+    paths = _song_paths()
+    if not paths or not paths[0].exists():
+        return
+    with jsonstore.updating(paths[0], dict, indent=2) as data:
+        data["production"] = {"at": time.strftime("%Y-%m-%d %H:%M")}
+        mix = data.get("auto_mix")
+        if bus and isinstance(mix, dict) and bus not in (mix.get("buses") or []):
+            mix["buses"] = sorted([*(mix.get("buses") or []), bus])
+
+
+def _production_rows(ctx: _Context) -> list[dict]:
+    """A mix that is balanced and nothing more: two songs running (2026-11-07, 2026-11-17)
+    the first export was answered with "more produced", and the filter moves and part
+    effects went in only after. Asked for once, while the mix stage is still open."""
+    plan = ctx.plan
+    if not plan or not plan.get("auto_mix") or plan.get("production"):
+        return []
+    if ((plan.get("stages") or {}).get("mix") or {}).get("done"):
+        return []      # a song mixed before this check existed isn't sent back
+    return [songmap.row(
+        "production pass", "warn", None, None,
+        "add_production(): the pitched parts' filter opens over the intro and dives into each chorus or drop, and "
+        "each synth part gets its chorus and sends; then measure_tracks once",
+        detail="the mix is balanced but has no production moves yet: users ask for 'more produced' after a first "
+               "export like this")]
+
+
 def mark_mastered(asked_lufs: float, target_lufs: float, lufs: float) -> None:
     """master_to_target records a whole-song master in the song plan, when there is one:
     the loudness asked for, the target it used (lower for a sparse mix) and what it
@@ -516,7 +546,7 @@ def _style_rows(ctx: _Context, master: bool) -> list[dict]:
     if (silent := _silent(ctx)) is not None:
         return silent
     measured, _ = ctx.render()
-    rows = [] if master else _mix_rows(ctx)
+    rows = [] if master else _mix_rows(ctx) + _production_rows(ctx)
     if master:
         problems = styles.gate_problems(measured, styles.find_style(ctx.genre) if ctx.genre else None)
         rows.append(songmap.row("release gates", "fail" if problems else "pass", None, None, "; ".join(problems)))

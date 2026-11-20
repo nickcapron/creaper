@@ -11,6 +11,9 @@ def test_profiles_match_fx_names():
     assert pp.find_profile("VST3: EQ SITRAL-295 (Arturia)").drive is None
     assert pp.find_profile("VST3: Some Other Plugin") is None
     assert pp.find_profile("VST3i: Piano V3 (Arturia)").role == "instrument"
+    # Live 2026-11-17: a ReaLimit threshold set without its ceiling raised a kit 7 dB.
+    limiter = pp.find_profile("VST: ReaLimit (Cockos)")
+    assert limiter.drive is None and "SAME value" in limiter.summary and limiter.controls["ceiling"] == "Ceiling"
     assert pp.find_profile("VST3i: Stage-73 V2 (Arturia)") is None
     assert pp.find_profile(None) is None
 

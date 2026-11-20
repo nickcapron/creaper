@@ -489,6 +489,20 @@ def test_printing_sends_the_parts_sound_first_and_compensates_latency(korg):
     assert order.index("hardware_take_start") > max(i for i, c in enumerate(order) if c == "send_midi") - 0
 
 
+def test_a_sound_written_after_the_parts_first_item_is_still_its_sound(korg):
+    """Live 2026-11-17: a bass item from bar 1 with its sound at bar 5, where the notes
+    begin, was told 'No sound is written into the song'."""
+    hst.load_hardware_sound("microKORG", recipe="glide distortion lead", track="MK Lead", bar=4)
+    wanted, plain = korg.buffer, korg._sound_item
+    korg._sound_item = lambda w: {**plain(w), "start_seconds": 5.5, "end_seconds": 6.0, "start": {"bar": 3, "beat": 4}}
+    korg.buffer = mk.init_program(name="other")
+    result = hst.print_hardware("MK Lead")
+    assert korg.buffer == wanted and result["sound"] == "glide distortion lead" and "warning" not in result
+    assert "bar 3" in result["sound_note"]
+    start = next(p for c, p in korg.commands if c == "hardware_take_start")
+    assert start["mute_items"] == ["{S1}"]                       # sent before the pass, not again inside it
+
+
 def test_printing_without_a_sound_or_notes_says_so(korg):
     result = hst.print_hardware("MK Lead")
     assert "No sound is written" in result["warning"] and "calibrate_hardware_latency" in result["note"]

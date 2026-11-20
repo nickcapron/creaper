@@ -2,7 +2,7 @@ import subprocess
 import sys
 
 MODULES = ["server", "export_tools", "sfx_tools", "vocal_tools", "sample_tools", "mix_tools", "ear_tools",
-           "motif_tools", "music_tools", "project_tools", "record_tools", "scan_tools", "arrange_tools", "sound_tools", "hardware_setup", "hardware_tools", "hardware_sound_tools", "structure", "arturia", "chat", "cli",
+           "motif_tools", "music_tools", "project_tools", "record_tools", "scan_tools", "arrange_tools", "production_tools", "sound_tools", "hardware_setup", "hardware_tools", "hardware_sound_tools", "structure", "arturia", "chat", "cli",
            "installer"]
 
 CHECK = r"""

@@ -178,6 +178,22 @@ def test_a_low_pass_that_never_opens_is_called_out(monkeypatch):
                                                     points=[AutomationPoint(bar=1, value=0.4)])
 
 
+def test_volume_rides_written_as_the_parts_level_are_called_out(monkeypatch):
+    """Live 2026-11-17: rides written at the levels the parts were mixed at stacked on the
+    faders and put every part twice as far down."""
+    from creaper import server
+    from creaper.server import AutomationPoint, Ramp
+    fader = {"volume_db": -8.6}
+    monkeypatch.setattr(server, "call", lambda cmd, **kw: fader if cmd == "describe_track" else {"points_written": 3})
+    as_levels = [AutomationPoint(bar=b, value=v) for b, v in ((1, -8.6), (17, -7.1), (33, -8.6))]
+    out = server.write_automation(track="Lead", target="volume", points=as_levels)
+    assert "adds to the track's fader (-8.6 dB)" in out["warning"] and out["level_in_the_mix_db"] == [-17.2, -15.7]
+    rides = server.write_automation(track="Lead", target="volume", ramp=Ramp(start_bar=1, end_bar=9, start_value=0, end_value=1.5))
+    assert "warning" not in rides and rides["fader_db"] == -8.6 and rides["level_in_the_mix_db"] == [-8.6, -7.1]
+    fader["volume_db"] = 0.0
+    assert "fader_db" not in server.write_automation(track="Lead", target="volume", points=as_levels)
+
+
 def test_notes_say_a_fix_is_for_its_sound_not_a_default(tmp_path, monkeypatch):
     from creaper import server
     monkeypatch.setattr(server, "knowledge", Knowledge(tmp_path / "k.json"))

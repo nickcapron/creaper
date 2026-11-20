@@ -12,9 +12,10 @@ Three parts:
   measure, and what to change when it doesn't.
 
 A blueprint is turned into one synth's parameters by that synth's profile
-(`from_design`, using its measured calibration: microkorg.py is the first). A synth
-without a profile, or a plugin, still gets the blueprint: the model sets the nearest
-controls by name and checks the result by measuring.
+(`from_design`, using its measured calibration: microkorg.py is the first hardware
+synth, plugin_design.py holds the plugins, Prophet-5 V first). A synth without a
+profile still gets the blueprint: the model sets the nearest controls by name and
+checks the result by measuring.
 
 Blueprint fields (all optional; what's left out stays at the synth's plain sound):
 
@@ -146,6 +147,23 @@ TECHNIQUES: dict[str, str] = {
     "distortion": "Drive after the filter puts back the top the filter took off: closing the cutoff on a "
                   "distorted bass doesn't make it less fizzy (measured: no change at 2-5 kHz). Turn the drive "
                   "off, or cut the top after the synth, in the mix.",
+    "game sounds": "A game's interface and event sounds are one set heard thousands of times: design them by "
+                   "slot-machine rules. Every pitched sound in one key, chosen once (open fifths, fourths and "
+                   "seconds), so any two that overlap never clash. Good news rises, and the bigger the news the "
+                   "higher and longer the rise: two notes for a small success, a run up an octave or more for a "
+                   "big one. Bad news never buzzes: a low soft toll, lower and longer the graver the loss, with "
+                   "a voice an octave up so small speakers still carry it. The most frequent sounds are the "
+                   "shortest and quietest (hover, click: a soft tick of 20-60 ms, 6-12 dB under the rest). "
+                   "Bell-family voices (mallets, chimes, soft bells: bell presets or the 'bell' blueprint) and "
+                   "one shared reverb, a plate, make it one set. Bare synth blips, two-note jingles and dry "
+                   "'glassy' partials on one voice were heard as cheap and arcade on a real game's set. For a "
+                   "darker game (sci-fi, war, strategy): a minor key in stacked fourths and bare fifths, no major "
+                   "thirds; one uneasy interval (a tritone or a semitone) in every loss; a low thud under anything "
+                   "with weight (orders, construction, losses); a slow airy swell under the big moments; chimes "
+                   "an octave lower and a longer, darker plate. Each sound's notes go in their own region named "
+                   "as its file; export_regions at the game's sample rate, in three calls by size: big events "
+                   "at peak_db -6, ordinary ones -9, the frequent ticks -14 (one peak for all makes a click as "
+                   "loud as a defeat).",
     "level": "When the amp is at its top and the patch is still quiet (sines, cross-modulation and digital "
              "waves often are), an EQ can lift it: two shelves that meet at the same frequency, both raised, "
              "are a gain stage. Then check a chord: it must still not clip.",

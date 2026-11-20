@@ -302,7 +302,7 @@ That line runs the installer as it is on `main` today. To run exactly the instal
 that was released with a version (the one you read), use the tagged one instead:
 
 ```powershell
-irm https://raw.githubusercontent.com/nickcapron/creaper/v0.62.0/install.ps1 | iex
+irm https://raw.githubusercontent.com/nickcapron/creaper/v0.63.0/install.ps1 | iex
 ```
 
 Either way the creaper it installs is the released version, and a Python installer it
@@ -313,7 +313,7 @@ downloads is only run if it's signed by the Python Software Foundation.
 You need Python 3.10 or newer.
 
 ```bash
-pip install https://github.com/nickcapron/creaper/archive/refs/tags/v0.62.0.zip
+pip install https://github.com/nickcapron/creaper/archive/refs/tags/v0.63.0.zip
 creaper setup
 ```
 
@@ -335,13 +335,13 @@ individual steps are below if you'd rather do them yourself.
 - `creaper[analysis]`: librosa's beat tracker, for finding the bars of reference tracks.
 
 ```bash
-pip install "creaper[ml] @ https://github.com/nickcapron/creaper/archive/refs/tags/v0.62.0.zip"
+pip install "creaper[ml] @ https://github.com/nickcapron/creaper/archive/refs/tags/v0.63.0.zip"
 ```
 
 **1. Install creaper** (manual steps)
 
 ```bash
-pip install https://github.com/nickcapron/creaper/archive/refs/tags/v0.62.0.zip
+pip install https://github.com/nickcapron/creaper/archive/refs/tags/v0.63.0.zip
 ```
 
 **2. Install the bridge script into REAPER**
@@ -540,7 +540,7 @@ HFC) are for non-commercial use only.
   server's environment.
 - **Updating:** on Windows, run the installer command again. Otherwise
   `pip install --upgrade https://github.com/nickcapron/creaper/archive/refs/tags/<version>.zip`
-  with the newest release's tag (for this README, `v0.62.0`),
+  with the newest release's tag (for this README, `v0.63.0`),
   then `creaper install-bridge` again and restart the bridge. A newly started bridge takes
   over from a running one, so you don't need to restart REAPER.
 

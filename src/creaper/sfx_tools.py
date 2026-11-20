@@ -23,6 +23,11 @@ HEAD_FLOOR_DB = -50.0      # below the peak: where a sound "starts"
 PREROLL_MS = 1.0           # kept before the start, faded in so it can't click
 TAIL_FLOOR_DB = -80.0      # below the peak: a tail this quiet has died away
 CUT_TAIL_DB = -50.0        # a region ending louder than this (re peak) cuts the sound off
+NOISE_WINDOW_S = 0.01      # hiss is measured as the peak of 10 ms stretches
+NOISE_MARGIN_DB = 9.0      # a recorded sound ends where it sinks to this far over the hiss
+NOISE_MAX_DBFS = -60.0     # a quietest stretch louder than this is sound, not a recording's hiss
+NOISE_FADE_MS = 20.0       # the fade that ends a recorded sound (hiss that stops dead ticks)
+HISSY_DB = 45.0            # hiss closer than this under a sound's peak is heard once it's normalised
 
 
 def to_channels(audio: np.ndarray, channels: Literal["mono", "stereo"]) -> np.ndarray:
@@ -54,11 +59,35 @@ def _level_db(audio: np.ndarray) -> np.ndarray:
     return 20 * np.log10(np.abs(audio).max(axis=1) + 1e-12)
 
 
-def trim_head(audio: np.ndarray, fs: int, floor_db: float = HEAD_FLOOR_DB, preroll_ms: float = PREROLL_MS) -> tuple[np.ndarray, float]:
-    """Cuts the silence before the sound so it starts within `preroll_ms` of the file
-    start (fading that sliver in). Returns the audio and how much was cut (ms)."""
+def noise_floor_db(audio: np.ndarray, fs: int) -> float | None:
+    """The hiss under a recording (a hardware synth through an interface), dBFS: the
+    level of its quietest stretches. None when those are digital silence (plugins), or
+    when nothing in the audio is quiet enough to be the gaps between sounds. Measured
+    2026-11-16 on microKORG prints: about -86 dBFS, 58-75 dB under the sounds, so a
+    tail trim waiting for 80 dB under the peak never came, and a 0.1 s blip would have
+    been exported as 1.1 s of hiss."""
     level = _level_db(audio)
-    loud = np.nonzero(level > level.max() + floor_db)[0]
+    n = max(1, int(NOISE_WINDOW_S * fs))
+    if len(level) < 20 * n:
+        return None
+    windows = level[: len(level) // n * n].reshape(-1, n).max(axis=1)
+    quiet = np.sort(windows)[: max(1, len(windows) // 20)]
+    floor = float(np.median(quiet))
+    if floor <= SILENCE_DBFS or floor > NOISE_MAX_DBFS or floor > windows.max() - 40:
+        return None
+    return floor
+
+
+def trim_head(audio: np.ndarray, fs: int, floor_db: float = HEAD_FLOOR_DB, preroll_ms: float = PREROLL_MS,
+              noise_db: float | None = None) -> tuple[np.ndarray, float]:
+    """Cuts the silence before the sound so it starts within `preroll_ms` of the file
+    start (fading that sliver in). Returns the audio and how much was cut (ms). With
+    `noise_db` (a recording's hiss) the sound starts where it rises clear of the hiss."""
+    level = _level_db(audio)
+    floor = level.max() + floor_db
+    if noise_db is not None:
+        floor = max(floor, noise_db + NOISE_MARGIN_DB)
+    loud = np.nonzero(level > floor)[0]
     if not len(loud):
         return audio, 0.0
     start = max(0, int(loud[0] - preroll_ms / 1000 * fs))
@@ -69,22 +98,36 @@ def trim_head(audio: np.ndarray, fs: int, floor_db: float = HEAD_FLOOR_DB, prero
     return out, start / fs * 1000
 
 
-def tail_state(audio: np.ndarray) -> dict:
-    """Whether the sound has died away by the end (its last 10 ms well under the peak)."""
+def tail_state(audio: np.ndarray, noise_db: float | None = None) -> dict:
+    """Whether the sound has died away by the end (its last 10 ms well under the peak,
+    or down in the recording's hiss)."""
     level = _level_db(audio)
     end = level[-max(1, len(level) // 100):].max()
     below = round(float(level.max() - end), 1)
-    return {"end_db_below_peak": below, "cut_off": below < -CUT_TAIL_DB}
+    in_hiss = noise_db is not None and end <= noise_db + NOISE_MARGIN_DB
+    return {"end_db_below_peak": below, "cut_off": below < -CUT_TAIL_DB and not in_hiss}
 
 
-def trim_tail(audio: np.ndarray, floor_db: float = TAIL_FLOOR_DB) -> np.ndarray:
+def trim_tail(audio: np.ndarray, floor_db: float = TAIL_FLOOR_DB, noise_db: float | None = None,
+              fs: int = 44100) -> np.ndarray:
     """Drops the silence after the sound has died away: everything after the last
     moment above floor_db (re its peak) or above -96 dBFS, whichever is higher. A
-    generator fading to "-100 dB" instead of true silence used to keep its tail."""
+    generator fading to "-100 dB" instead of true silence used to keep its tail.
+    With `noise_db` (a recording's hiss) the sound ends where it sinks into the hiss,
+    and its last 20 ms fade out, since hiss that stops dead is heard as a tick."""
     level = _level_db(audio)
     floor = max(level.max() + floor_db, SILENCE_DBFS)
-    loud = np.nonzero(level > floor)[0]
-    return audio[: loud[-1] + 1] if len(loud) else audio
+    if noise_db is None or noise_db + NOISE_MARGIN_DB <= floor:
+        loud = np.nonzero(level > floor)[0]
+        return audio[: loud[-1] + 1] if len(loud) else audio
+    loud = np.nonzero(level > noise_db + NOISE_MARGIN_DB)[0]
+    if not len(loud):
+        return audio
+    out = audio[: loud[-1] + 1].copy()
+    fade = min(int(NOISE_FADE_MS / 1000 * fs), len(out) // 4)
+    if fade > 1:
+        out[-fade:] *= (0.5 + 0.5 * np.cos(np.linspace(0, np.pi, fade)))[:, None]
+    return out
 
 
 def normalize_peak(audio: np.ndarray, peak_db: float) -> tuple[np.ndarray, float]:
@@ -140,9 +183,13 @@ def export_regions(
     One-shots: mono unless listed in `stereo`, DC removed, the silence before the sound
     cut so it starts within a millisecond of the file start, trailing silence dropped,
     peak set to peak_db, and a warning when the region cuts the sound off before it
-    dies away. Loops: seamless (crossfaded seam, no fade at either end), their length
-    reported. 16-bit files are dithered; 24-bit aren't. Put each sound in its own region
-    with a little room after it (for its tail), then call this once."""
+    dies away. Recorded sounds (a printed hardware synth) carry hiss: it's measured in
+    the gaps between regions and each one-shot ends where it sinks into it, so leave a
+    second of nothing between regions. Loops: seamless (crossfaded seam, no fade at
+    either end), their length reported. 16-bit files are dithered; 24-bit aren't. Put each sound in its own region
+    with a little room after it (for its tail), then call this once; for a game's set
+    whose sounds differ in size, once per size with its own peak_db (sound_design_guide
+    'game sounds')."""
     overview = call("get_project_overview")
     all_regions = overview.get("regions", [])
     chosen = [r for r in all_regions if not regions or any(r["name"].lower() == n.lower() for n in regions)]
@@ -176,6 +223,7 @@ def export_regions(
         g = math.gcd(int(fs), int(sample_rate))
         audio = signal.resample_poly(audio, sample_rate // g, fs // g, axis=0)
         fs = sample_rate
+    noise = noise_floor_db(remove_dc(audio, fs), fs)   # a recorded synth's hiss; None for plugins
     out_dir.mkdir(parents=True, exist_ok=True)
     subtype = {16: "PCM_16", 24: "PCM_24", 32: "FLOAT"}[bit_depth]
     files, problems = [], []
@@ -203,9 +251,16 @@ def export_regions(
             if not np.any(np.abs(part) > 1e-6):
                 problems.append(f"{region['name']}: silent")
                 continue
-            tail = tail_state(part)
-            sound, cut_ms = trim_head(part, fs)
-            sound = trim_tail(sound)
+            tail = tail_state(part, noise)
+            sound, cut_ms = trim_head(part, fs, noise_db=noise)
+            sound = trim_tail(sound, noise_db=noise, fs=fs)
+            if noise is not None:
+                over = round(20 * math.log10(float(np.abs(sound).max()) + 1e-12) - noise, 1)
+                entry["hiss_db_below_peak"] = over
+                if over < HISSY_DB:
+                    problems.append(f"{region['name']}: recorded quietly, its hiss is only {over:g} dB under the sound "
+                                    "and will be heard once it's turned up: record it louder (a hardware synth: "
+                                    "setup_hardware action='level', or a louder patch) and print again")
             if peak_db is not None:
                 sound, gain = normalize_peak(sound, peak_db)
                 entry["gain_db"] = round(gain, 1)
@@ -226,6 +281,10 @@ def export_regions(
         files.append(entry)
     result: dict = {"folder": str(out_dir), "exported": len(files), "files": files,
                     "format": f"WAV {bit_depth}-bit {fs} Hz"}
+    if noise is not None:
+        result["recording_hiss_dbfs"] = round(noise, 1)
+        result["note"] = ("These are recordings with hiss under them: each one-shot ends where it sinks into the "
+                          "hiss, with a short fade.")
     if problems:
         result["problems"] = problems
     if missing:
